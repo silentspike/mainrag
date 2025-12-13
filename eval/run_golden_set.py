@@ -93,25 +93,59 @@ def check_hit(result_files: list[str], expect_files: list[str]) -> bool:
     return False
 
 
-def run_search(api_url: str, token: str, case: TestCase) -> tuple[list[str], Optional[str]]:
+def resolve_source_id(api_url: str, token: str, source_name: str, cache: dict) -> Optional[int]:
+    """
+    Resolve source name to source_id via API.
+    Uses cache to avoid repeated lookups.
+    """
+    if source_name in cache:
+        return cache[source_name]
+
+    if not source_name:
+        return None
+
+    try:
+        headers = {"Authorization": f"Bearer {token}"}
+        resp = requests.get(f"{api_url}/sources", headers=headers, timeout=10)
+        resp.raise_for_status()
+        sources = resp.json().get("sources", [])
+        for src in sources:
+            cache[src.get("name", "")] = src.get("id")
+        return cache.get(source_name)
+    except Exception:
+        return None
+
+
+def run_search(api_url: str, token: str, case: TestCase, source_cache: dict) -> tuple[list[str], Optional[str]]:
     """
     Execute search query against MAINRAG API.
     Returns (list of result file paths, error message or None).
+
+    Maps golden-set format to API format:
+    - mode: "hybrid" → POST /search
+    - mode: "keyword" → POST /search/keyword
+    - source: "name" → source_id: int (via lookup)
     """
     headers = {"Authorization": f"Bearer {token}"}
 
-    # Build search request
+    # Determine endpoint based on mode
+    endpoint = "/search/keyword" if case.mode == "keyword" else "/search"
+
+    # Build search request (API format)
     payload = {
         "query": case.query,
-        "mode": case.mode,
         "limit": case.k
     }
+
+    # Resolve source name to source_id
     if case.source:
-        payload["source"] = case.source
+        source_id = resolve_source_id(api_url, token, case.source, source_cache)
+        if source_id is not None:
+            payload["source_id"] = source_id
 
     try:
         resp = requests.post(
-            f"{api_url}/search",
+            f"{api_url}{endpoint}",
             headers=headers,
             json=payload,
             timeout=30
@@ -147,12 +181,13 @@ def run_evaluation(
 ) -> list[TestResult]:
     """Run all test cases and collect results."""
     results = []
+    source_cache = {}  # Cache for source_name -> source_id mapping
 
     for i, case in enumerate(cases, 1):
         if verbose:
             print(f"[{i}/{len(cases)}] Running: {case.id} ({case.mode})")
 
-        actual_files, error = run_search(api_url, token, case)
+        actual_files, error = run_search(api_url, token, case, source_cache)
 
         if error:
             hit = False

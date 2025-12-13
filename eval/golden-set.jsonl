@@ -1,15 +1,15 @@
 {"id": "idx-delete", "mode": "hybrid", "query": "delete chunks by source", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs"]}
 {"id": "rls-policy", "mode": "keyword", "query": "user_can_access_source", "source": "mainrag", "k": 10, "expect_files": ["schema_security.sql"]}
-{"id": "tei-embed", "mode": "hybrid", "query": "generate embeddings batch", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/tei.rs", "api/src/services/index.rs"]}
+{"id": "tei-embed", "mode": "hybrid", "query": "generate embeddings batch", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/embeddings.rs", "api/src/services/index.rs"]}
 {"id": "jwt-auth", "mode": "hybrid", "query": "jwt token validation middleware", "source": "mainrag", "k": 10, "expect_files": ["api/src/auth/middleware.rs"]}
 {"id": "qdrant-upsert", "mode": "keyword", "query": "upsert_chunks_batch", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/qdrant.rs"]}
 {"id": "chunk-content", "mode": "hybrid", "query": "chunk content with overlap", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs"]}
 {"id": "search-hybrid", "mode": "hybrid", "query": "hybrid search combining keyword and vector", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"]}
 {"id": "postgres-pool", "mode": "keyword", "query": "PostgresPool deadpool", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/postgres.rs", "api/src/db/mod.rs"]}
 {"id": "file-discovery", "mode": "hybrid", "query": "discover indexable files recursively", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs"]}
-{"id": "admin-sources", "mode": "hybrid", "query": "admin endpoint list sources", "source": "mainrag", "k": 10, "expect_files": ["api/src/routes/admin.rs"]}
+{"id": "admin-sources", "mode": "hybrid", "query": "admin endpoint list sources", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/handlers/admin.rs"]}
 {"id": "negative-k8s", "mode": "hybrid", "query": "kubernetes deployment yaml", "source": "mainrag", "k": 10, "expect_files": []}
 {"id": "negative-redis", "mode": "keyword", "query": "redis cache connection", "source": "mainrag", "k": 10, "expect_files": []}
 {"id": "schema-chunks", "mode": "keyword", "query": "CREATE TABLE chunks", "source": "mainrag", "k": 10, "expect_files": ["schema.sql"]}
-{"id": "auth-login", "mode": "hybrid", "query": "user login password verification bcrypt", "source": "mainrag", "k": 10, "expect_files": ["api/src/routes/auth.rs", "schema_security.sql"]}
+{"id": "auth-login", "mode": "hybrid", "query": "user login password verification bcrypt", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/handlers/auth.rs", "schema_security.sql"]}
 {"id": "svelte-search", "mode": "hybrid", "query": "search input component svelte", "source": "mainrag", "k": 10, "expect_files": ["frontend/src/routes"]}
