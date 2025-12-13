@@ -14,14 +14,14 @@ Prerequisites:
 
 Usage:
     export POSTGRES_PASSWORD='<REDACTED_DB_PW>'
-    python import-mainrag.py --export-dir /work/postgres/ops/migration/export
+    python import-mainrag.py --export-dir /work/mainrag/ops/migration/export
 """
 
 import argparse
 import json
 import os
 import sys
-import zlib
+import zlib  # Always needed to decompress old CodeRag data
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator
@@ -29,6 +29,16 @@ from typing import Iterator
 import psycopg2
 from psycopg2.extras import execute_batch
 import requests
+
+# zstd for re-compression (matches Rust API which uses zstd)
+try:
+    import zstandard as zstd
+    HAS_ZSTD = True
+except ImportError:
+    HAS_ZSTD = False
+    print("WARNING: zstandard not installed, falling back to zlib for compression")
+    print("Install with: pip install zstandard")
+    print("Note: Rust API expects zstd, zlib may cause issues!")
 
 # Configuration
 POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "localhost")
@@ -173,20 +183,20 @@ def import_sources(conn, export_dir: Path):
         }
         source_type = source_type_map.get(source["type"], "fs")
 
-        # Insert source
+        # Insert source - FIXED: use correct column names (type, path)
         cur.execute("""
-            INSERT INTO sources (name, source_type, base_path, config, created_at, updated_at)
+            INSERT INTO sources (name, type, path, config, created_at, updated_at)
             VALUES (%s, %s, %s, %s, to_timestamp(%s), to_timestamp(%s))
             ON CONFLICT (name) DO UPDATE SET
-                source_type = EXCLUDED.source_type,
-                base_path = EXCLUDED.base_path,
+                type = EXCLUDED.type,
+                path = EXCLUDED.path,
                 updated_at = EXCLUDED.updated_at
             RETURNING id
         """, (
             source["name"],
             source_type,
             source["path"],
-            source.get("config"),
+            json.dumps(source.get("config")) if source.get("config") else None,
             source["created_at"],
             source["updated_at"],
         ))
@@ -220,21 +230,35 @@ def import_files(conn, export_dir: Path, source_id_map: dict):
         if new_source_id is None:
             continue
 
-        # Decompress content
+        # Decompress content - FIXED: handle zstd/zlib and get sizes
         try:
-            content_compressed = bytes.fromhex(file_data["content_hex"])
-            content = zlib.decompress(content_compressed).decode("utf-8", errors="replace")
+            content_compressed_old = bytes.fromhex(file_data["content_hex"])
+            # Try zlib first (old CodeRag format)
+            content_text = zlib.decompress(content_compressed_old).decode("utf-8", errors="replace")
+            size_original = len(content_text.encode('utf-8'))
+            # Re-compress with zstd for MAINRAG
+            if HAS_ZSTD:
+                cctx = zstd.ZstdCompressor(level=3)
+                content_compressed = cctx.compress(content_text.encode('utf-8'))
+            else:
+                content_compressed = zlib.compress(content_text.encode('utf-8'), 6)
+            size_compressed = len(content_compressed)
         except Exception:
-            content = ""
+            content_text = ""
+            content_compressed = b""
+            size_original = file_data.get("size_original", 0)
+            size_compressed = 0
 
         batch.append((
             file_data["id"],
             new_source_id,
             file_data["path"],
-            bytes.fromhex(file_data["hash_hex"]),
-            content,
+            bytes.fromhex(file_data["hash_hex"]),  # Raw bytes for BYTEA
+            content_compressed,  # zstd compressed BYTEA
+            content_text,  # Decompressed TEXT for FTS
             file_data.get("language"),
-            file_data["size_original"],
+            size_original,
+            size_compressed,
             file_data["last_modified"],
             file_data["created_at"],
         ))
@@ -255,20 +279,22 @@ def import_files(conn, export_dir: Path, source_id_map: dict):
 
 
 def _insert_files_batch(cur, batch, old_to_new_id):
-    """Insert batch of files"""
-    for old_id, source_id, path, hash_bytes, content, language, size, modified, created in batch:
+    """Insert batch of files - FIXED: correct column names and types"""
+    for old_id, source_id, path, hash_bytes, content_compressed, content_text, language, size_orig, size_comp, modified, created in batch:
         cur.execute("""
-            INSERT INTO files (source_id, path, hash, content, language, size_bytes, last_modified, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, to_timestamp(%s), to_timestamp(%s), NOW())
+            INSERT INTO files (source_id, path, hash, content, content_text, language, size_original, size_compressed, last_modified, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, to_timestamp(%s), to_timestamp(%s), NOW())
             ON CONFLICT (source_id, path) DO UPDATE SET
                 hash = EXCLUDED.hash,
                 content = EXCLUDED.content,
+                content_text = EXCLUDED.content_text,
                 language = EXCLUDED.language,
-                size_bytes = EXCLUDED.size_bytes,
+                size_original = EXCLUDED.size_original,
+                size_compressed = EXCLUDED.size_compressed,
                 last_modified = EXCLUDED.last_modified,
                 updated_at = NOW()
             RETURNING id
-        """, (source_id, path, hash_bytes.hex(), content, language, size, modified, created))
+        """, (source_id, path, hash_bytes, content_compressed, content_text, language, size_orig, size_comp, modified, created))
 
         new_id = cur.fetchone()[0]
         old_to_new_id[old_id] = new_id
@@ -296,22 +322,31 @@ def import_chunks_and_embed(conn, export_dir: Path, file_id_map: dict, source_id
         if new_file_id is None:
             continue
 
-        # Decompress content
+        # Decompress content - FIXED: handle zstd/zlib
         try:
-            content_compressed = bytes.fromhex(chunk_data["content_compressed_hex"])
-            content = zlib.decompress(content_compressed).decode("utf-8", errors="replace")
+            content_compressed_old = bytes.fromhex(chunk_data["content_compressed_hex"])
+            # Try zlib first (old CodeRag format)
+            content_text = zlib.decompress(content_compressed_old).decode("utf-8", errors="replace")
+            # Re-compress with zstd for MAINRAG
+            if HAS_ZSTD:
+                cctx = zstd.ZstdCompressor(level=3)
+                content_compressed = cctx.compress(content_text.encode('utf-8'))
+            else:
+                content_compressed = zlib.compress(content_text.encode('utf-8'), 6)
         except Exception:
-            content = ""
+            content_text = ""
+            content_compressed = b""
 
-        if not content.strip():
+        if not content_text.strip():
             continue
 
         batch.append({
             "old_id": chunk_data["id"],
             "file_id": new_file_id,
             "chunk_type": chunk_data["chunk_type"],
-            "content_hash": chunk_data["content_hash_hex"],
-            "content": content,
+            "content_hash": bytes.fromhex(chunk_data["content_hash_hex"]),  # Raw bytes for BYTEA
+            "content_compressed": content_compressed,  # zstd compressed BYTEA
+            "content_text": content_text,  # Decompressed TEXT for FTS
             "start_line": chunk_data["start_line"],
             "end_line": chunk_data["end_line"],
             "metadata": chunk_data.get("metadata"),
@@ -342,29 +377,32 @@ def _process_chunk_batch(cur, batch, old_to_new_id, file_id_map, source_id_map):
     contents = []
 
     for chunk in batch:
+        # FIXED: use correct column names (content_compressed, content_text)
         cur.execute("""
-            INSERT INTO chunks (file_id, chunk_type, content_hash, content, start_line, end_line, metadata, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, to_timestamp(%s))
+            INSERT INTO chunks (file_id, chunk_type, content_hash, content_compressed, content_text, start_line, end_line, metadata, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, to_timestamp(%s))
             ON CONFLICT (file_id, content_hash) DO UPDATE SET
-                content = EXCLUDED.content,
+                content_compressed = EXCLUDED.content_compressed,
+                content_text = EXCLUDED.content_text,
                 start_line = EXCLUDED.start_line,
                 end_line = EXCLUDED.end_line
             RETURNING id
         """, (
             chunk["file_id"],
             chunk["chunk_type"],
-            chunk["content_hash"],
-            chunk["content"],
+            chunk["content_hash"],  # Now raw bytes
+            chunk["content_compressed"],  # zstd compressed
+            chunk["content_text"],  # Plain text for FTS
             chunk["start_line"],
             chunk["end_line"],
-            chunk.get("metadata"),
+            json.dumps(chunk.get("metadata")) if chunk.get("metadata") else None,
             chunk["created_at"],
         ))
 
         new_id = cur.fetchone()[0]
         old_to_new_id[chunk["old_id"]] = new_id
         chunk_ids.append(new_id)
-        contents.append(chunk["content"][:2000])  # Truncate for embedding
+        contents.append(chunk["content_text"][:2000])  # Truncate for embedding
 
     # Generate embeddings
     try:
