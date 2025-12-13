@@ -1,0 +1,117 @@
+# ===================================================================
+# MAINRAG Qdrant Configuration
+# ===================================================================
+# Deploy to: /etc/qdrant/config.yaml
+# Optimized for: Single-host RAG with 16GB RAM, NVMe SSD
+# Reference: https://qdrant.tech/documentation/guides/configuration/
+# ===================================================================
+
+# Storage settings
+storage:
+  # Data directory
+  storage_path: /data/qdrant/storage
+
+  # Snapshot directory
+  snapshots_path: /data/qdrant/snapshots
+
+  # Use temp storage for large operations
+  temp_path: /tmp/qdrant
+
+  # Performance tuning
+  performance:
+    # Number of optimizer threads
+    max_optimizer_threads: 4
+    # Flush interval for segments
+    flush_interval_sec: 5
+    # Maximum segment size (64MB)
+    max_segment_size: 67108864
+
+  # HNSW index configuration (default for new collections)
+  hnsw_index:
+    # Number of links per node
+    m: 24
+    # Search expansion factor during construction
+    ef_construct: 128
+    # Use full precision vectors (not quantized)
+    full_scan_threshold: 10000
+    # Maximum parallel index builds
+    max_indexing_threads: 4
+    # On-disk HNSW for large collections
+    on_disk: false
+
+  # Payload index configuration
+  payload_index:
+    # Enable payload indexing for filtering
+    enable_payload_index: true
+
+# Service configuration
+service:
+  # REST API port
+  http_port: 6333
+  # gRPC port
+  grpc_port: 6334
+  # Enable gRPC API
+  enable_tls: false
+
+  # Maximum concurrent requests
+  max_request_size_mb: 32
+
+  # API rate limiting (per-second)
+  enable_rate_limit: false
+
+# Cluster settings (single-node)
+cluster:
+  enabled: false
+
+# Telemetry
+telemetry:
+  # Prometheus metrics endpoint
+  enable_prometheus: true
+
+# Logging
+log_level: INFO
+
+# Memory limits
+# Leave headroom for OS and other services
+# Qdrant typically uses ~2-4GB for 200k vectors
+# mmap will use additional OS page cache
+storage:
+  mmap_threshold_kb: 1024  # Use mmap for segments > 1MB
+
+# Collections configuration
+# These are defaults; override when creating collections
+collection:
+  # Default vector configuration
+  vectors:
+    size: 768  # BGE-base-en-v1.5 dimensions
+    distance: Cosine
+
+  # Optimizer settings
+  optimizer_config:
+    # Delete threshold before vacuum
+    deleted_threshold: 0.2
+    # Vacuum interval
+    vacuum_min_vector_number: 1000
+    # Default segment config
+    default_segment_number: 0
+    # Max segment size
+    max_segment_size: 200000
+    # Memory settings
+    memmap_threshold: 50000
+    # Indexing threshold
+    indexing_threshold: 20000
+
+  # HNSW index defaults
+  hnsw_config:
+    m: 24
+    ef_construct: 128
+    full_scan_threshold: 10000
+    max_indexing_threads: 4
+    on_disk: false
+
+  # Quantization (optional, saves memory)
+  # quantization_config:
+  #   scalar:
+  #     type: int8
+  #     quantile: 0.99
+  #     always_ram: true

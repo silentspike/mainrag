@@ -1,0 +1,22 @@
+# MAINRAG Prometheus Scrape Configuration
+# Add this to your prometheus.yml scrape_configs section
+
+  - job_name: 'mainrag-api'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['localhost:3001']
+        labels:
+          service: 'mainrag'
+          component: 'api'
+    metrics_path: '/metrics'
+
+  - job_name: 'mainrag-qdrant'
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['localhost:6333']
+        labels:
+          service: 'mainrag'
+          component: 'qdrant'
+    metrics_path: '/metrics'
+    authorization:
+      credentials: '<REDACTED_QDRANT_API_KEY>'

@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS search_history (
 
     -- Search details
     query TEXT NOT NULL,
-    query_vector vector(384),  -- For "similar searches" feature
+    query_vector vector(768),  -- For "similar searches" feature (BGE-base-en-v1.5)
     search_type TEXT NOT NULL,  -- 'semantic', 'fts', 'hybrid', 'graph'
     source_filter TEXT,  -- Which source was filtered
 
@@ -482,6 +482,6 @@ ORDER BY date DESC, search_type;
 -- ===================================================================
 -- Grants
 -- ===================================================================
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO coderag;
-GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO coderag;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO coderag;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO mainrag;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainrag;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag;

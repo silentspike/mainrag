@@ -1,0 +1,10 @@
+[Unit]
+Description=MAINRAG Qdrant Snapshot
+After=qdrant.service
+Requires=qdrant.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/mainrag/scripts/qdrant-snapshot.sh
+StandardOutput=journal
+StandardError=journal

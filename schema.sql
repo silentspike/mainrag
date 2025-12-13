@@ -91,21 +91,21 @@ CREATE INDEX idx_symbols_file_name ON symbols(file_id, name);
 CREATE INDEX idx_symbols_name_trgm ON symbols USING GIN (name_trigram gin_trgm_ops);
 
 -- ===================================================================
--- Embeddings: File-level SBERT vectors (384 dimensions)
+-- Embeddings: File-level BGE vectors (768 dimensions)
 -- ===================================================================
 CREATE TABLE IF NOT EXISTS embeddings (
     file_id BIGINT PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
-    model TEXT NOT NULL,  -- e.g., 'all-MiniLM-L6-v2'
-    vector vector(384) NOT NULL,  -- pgvector native type
+    model TEXT NOT NULL,  -- e.g., 'BAAI/bge-base-en-v1.5'
+    vector vector(768) NOT NULL,  -- pgvector native type (768 for BGE-base)
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- HNSW index for fast ANN search (cosine similarity)
--- m=16: max connections per node (default, good for 384-dim)
--- ef_construction=100: higher recall, slightly slower build
+-- m=24: increased connections for 768-dim (better recall)
+-- ef_construction=128: higher recall for larger vectors
 CREATE INDEX idx_embeddings_vector ON embeddings
     USING hnsw (vector vector_cosine_ops)
-    WITH (m = 16, ef_construction = 100);
+    WITH (m = 24, ef_construction = 128);
 
 -- ===================================================================
 -- Chunks: Content-aware chunks for long documents
@@ -143,21 +143,22 @@ CREATE INDEX idx_chunks_fts ON chunks USING GIN (fts_vector) WITH (fastupdate = 
 CREATE INDEX idx_chunks_metadata ON chunks USING GIN (metadata);
 
 -- ===================================================================
--- Chunk Embeddings: Chunk-level SBERT vectors for semantic search
+-- Chunk Embeddings: Chunk-level BGE vectors for semantic search
 -- This is the PRIMARY table for RAG semantic search
 -- ===================================================================
 CREATE TABLE IF NOT EXISTS chunk_embeddings (
     chunk_id BIGINT PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
-    model TEXT NOT NULL,
-    vector vector(384) NOT NULL,
+    model TEXT NOT NULL,  -- 'BAAI/bge-base-en-v1.5'
+    vector vector(768) NOT NULL,  -- 768 dimensions for BGE-base
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- HNSW index for fast ANN search on chunks
 -- This is the MAIN vector index for RAG queries
+-- m=24, ef=128 optimized for 768-dim BGE embeddings
 CREATE INDEX idx_chunk_embeddings_vector ON chunk_embeddings
     USING hnsw (vector vector_cosine_ops)
-    WITH (m = 16, ef_construction = 100);
+    WITH (m = 24, ef_construction = 128);
 
 -- ===================================================================
 -- Call Graph: Function call relationships
@@ -187,12 +188,13 @@ CREATE TABLE IF NOT EXISTS schema_metadata (
 );
 
 INSERT INTO schema_metadata (key, value) VALUES
-    ('version', '1'),
+    ('version', '2'),
     ('created_at', NOW()::TEXT),
     ('db_type', 'postgresql'),
-    ('vector_dimensions', '384'),
-    ('hnsw_m', '16'),
-    ('hnsw_ef_construction', '100')
+    ('vector_dimensions', '768'),
+    ('embedding_model', 'BAAI/bge-base-en-v1.5'),
+    ('hnsw_m', '24'),
+    ('hnsw_ef_construction', '128')
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
 
 -- ===================================================================
@@ -201,7 +203,7 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
 
 -- Function to search chunks by semantic similarity
 CREATE OR REPLACE FUNCTION search_chunks_semantic(
-    query_vector vector(384),
+    query_vector vector(768),
     limit_count INTEGER DEFAULT 10,
     source_id_filter BIGINT DEFAULT NULL,
     ef_search INTEGER DEFAULT 100
@@ -289,7 +291,7 @@ $$ LANGUAGE plpgsql;
 -- Function for hybrid search (RRF fusion of semantic + FTS)
 CREATE OR REPLACE FUNCTION search_chunks_hybrid(
     query_text TEXT,
-    query_vector vector(384),
+    query_vector vector(768),
     limit_count INTEGER DEFAULT 10,
     source_id_filter BIGINT DEFAULT NULL,
     k_rrf INTEGER DEFAULT 60  -- RRF constant
@@ -386,8 +388,8 @@ Higher ef_search = better recall, slightly slower queries.';
 
 COMMENT ON INDEX idx_chunk_embeddings_vector IS
 'HNSW index for fast approximate nearest neighbor search.
-m=16, ef_construction=100 optimized for 384-dim embeddings.
-~111K vectors, estimated memory: ~200MB for index.';
+m=24, ef_construction=128 optimized for 768-dim BGE embeddings.
+~200K vectors, estimated memory: ~400MB for index.';
 
 -- ===================================================================
 -- ADVANCED RAG FEATURES (State-of-the-Art 2025)
@@ -402,7 +404,7 @@ CREATE TABLE IF NOT EXISTS hypothetical_questions (
     id BIGSERIAL PRIMARY KEY,
     chunk_id BIGINT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
     question TEXT NOT NULL,
-    question_vector vector(384) NOT NULL,
+    question_vector vector(768) NOT NULL,  -- BGE-base dimensions
     model TEXT NOT NULL,  -- Model used to generate question
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -410,7 +412,7 @@ CREATE TABLE IF NOT EXISTS hypothetical_questions (
 -- HNSW index for hypothetical question search
 CREATE INDEX idx_hyp_questions_vector ON hypothetical_questions
     USING hnsw (question_vector vector_cosine_ops)
-    WITH (m = 16, ef_construction = 100);
+    WITH (m = 24, ef_construction = 128);
 
 CREATE INDEX idx_hyp_questions_chunk ON hypothetical_questions(chunk_id);
 
@@ -426,12 +428,12 @@ Generate 2-5 questions per chunk using LLM.';
 -- Reference: https://www.anthropic.com/news/contextual-retrieval
 -- ===================================================================
 ALTER TABLE chunks ADD COLUMN IF NOT EXISTS context_prefix TEXT;
-ALTER TABLE chunks ADD COLUMN IF NOT EXISTS context_vector vector(384);
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS context_vector vector(768);  -- BGE-base dimensions
 
 -- Index for contextual embeddings (alternative to content embeddings)
 CREATE INDEX IF NOT EXISTS idx_chunks_context_vector ON chunks
     USING hnsw (context_vector vector_cosine_ops)
-    WITH (m = 16, ef_construction = 100)
+    WITH (m = 24, ef_construction = 128)
     WHERE context_vector IS NOT NULL;
 
 COMMENT ON COLUMN chunks.context_prefix IS
@@ -494,25 +496,25 @@ Improves F1 by 29%+ on multi-hop QA (HotpotQA benchmark).';
 CREATE TABLE IF NOT EXISTS multi_embeddings (
     id BIGSERIAL PRIMARY KEY,
     chunk_id BIGINT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
-    model_name TEXT NOT NULL,  -- 'sbert', 'codebert', 'graphcodebert', 'voyage-code-2'
+    model_name TEXT NOT NULL,  -- 'bge-base', 'codebert', 'graphcodebert', 'voyage-code-2'
     model_type TEXT NOT NULL,  -- 'text', 'code', 'hybrid'
-    vector vector(384),  -- For 384-dim models (SBERT, MiniLM)
-    vector_768 vector(768),  -- For 768-dim models (CodeBERT, GraphCodeBERT)
+    vector vector(768),  -- Primary: 768-dim models (BGE-base, CodeBERT)
+    vector_1024 vector(1024),  -- For larger models (Voyage-code-2, etc.)
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     UNIQUE(chunk_id, model_name)
 );
 
 -- Create separate HNSW indexes for each vector dimension
-CREATE INDEX idx_multi_emb_384 ON multi_embeddings
+CREATE INDEX idx_multi_emb_768 ON multi_embeddings
     USING hnsw (vector vector_cosine_ops)
-    WITH (m = 16, ef_construction = 100)
+    WITH (m = 24, ef_construction = 128)
     WHERE vector IS NOT NULL;
 
-CREATE INDEX idx_multi_emb_768 ON multi_embeddings
-    USING hnsw (vector_768 vector_cosine_ops)
-    WITH (m = 16, ef_construction = 100)
-    WHERE vector_768 IS NOT NULL;
+CREATE INDEX idx_multi_emb_1024 ON multi_embeddings
+    USING hnsw (vector_1024 vector_cosine_ops)
+    WITH (m = 24, ef_construction = 128)
+    WHERE vector_1024 IS NOT NULL;
 
 CREATE INDEX idx_multi_emb_chunk ON multi_embeddings(chunk_id);
 CREATE INDEX idx_multi_emb_model ON multi_embeddings(model_name);
@@ -553,7 +555,7 @@ CREATE TABLE IF NOT EXISTS late_chunk_tokens (
     chunk_id BIGINT REFERENCES chunks(id) ON DELETE CASCADE,
     token_position INTEGER NOT NULL,
     token_text TEXT NOT NULL,
-    token_vector vector(384) NOT NULL,
+    token_vector vector(768) NOT NULL,  -- BGE-base token embeddings
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -628,7 +630,7 @@ Tree-sitter provides the AST, this stores it for fast queries.';
 CREATE TABLE IF NOT EXISTS query_analytics (
     id BIGSERIAL PRIMARY KEY,
     query_text TEXT NOT NULL,
-    query_vector vector(384),
+    query_vector vector(768),  -- BGE-base dimensions
     query_type TEXT,  -- 'semantic', 'fts', 'hybrid', 'code', 'graph'
     source_filter TEXT,
     result_count INTEGER,
@@ -708,7 +710,7 @@ $$ LANGUAGE sql;
 
 -- Function for HyPE search (match against hypothetical questions)
 CREATE OR REPLACE FUNCTION search_by_hypothetical_questions(
-    query_vector vector(384),
+    query_vector vector(768),
     limit_count INTEGER DEFAULT 10,
     source_id_filter BIGINT DEFAULT NULL
 )
@@ -736,7 +738,7 @@ ORDER BY hq.question_vector <=> query_vector
 LIMIT limit_count;
 $$ LANGUAGE sql;
 
--- Grant permissions to coderag user
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO coderag;
-GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO coderag;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO coderag;
+-- Grant permissions to mainrag user
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO mainrag;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainrag;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag;

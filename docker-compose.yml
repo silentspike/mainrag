@@ -1,20 +1,42 @@
 # MAINRAG TEI Docker Compose
 # Only TEI runs in Docker (GPU passthrough via nvidia-container-toolkit)
 # PostgreSQL and Qdrant run native via systemd
+# TEI Version: 1.8.3 (pinned for reproducibility)
 
 services:
-  tei:
-    image: ghcr.io/huggingface/text-embeddings-inference:86-1.5
-    container_name: mainrag-tei
+  # Embedding Service (BGE-base-en-v1.5)
+  tei-embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:1.8.3
+    container_name: mainrag-tei-embeddings
+    runtime: nvidia
     restart: unless-stopped
     ports:
       - "8080:80"      # REST API
     volumes:
       - /data/models:/data
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 1073741824  # 1GB tmpfs for cache
     environment:
       - LOG_LEVEL=info
-      - HF_HUB_ENABLE_HF_TRANSFER=0
-    command: ["--model-id", "/data/bge-base-en-v1.5", "--port", "80"]
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+      - CUDA_VISIBLE_DEVICES=0
+      - CUDA_MEMORY_FRACTION=0.6  # 60% of 4GB = 2.4GB for embeddings
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    command:
+      - "--model-id"
+      - "BAAI/bge-base-en-v1.5"
+      - "--port"
+      - "80"
+      - "--max-batch-tokens"
+      - "8192"
+      - "--max-concurrent-requests"
+      - "128"
+      - "--max-client-batch-size"
+      - "32"
+      - "--auto-truncate"
     deploy:
       resources:
         reservations:
@@ -22,9 +44,58 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+        limits:
+          memory: 3G
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:80/health"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 180s
+
+  # Reranker Service (BGE-reranker-base)
+  tei-reranker:
+    image: ghcr.io/huggingface/text-embeddings-inference:1.8.3
+    container_name: mainrag-tei-reranker
+    runtime: nvidia
+    restart: unless-stopped
+    ports:
+      - "8082:80"      # REST API (separate port)
+    volumes:
+      - /data/models:/data
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 536870912  # 512MB tmpfs
+    environment:
+      - LOG_LEVEL=info
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+      - CUDA_VISIBLE_DEVICES=0
+      - CUDA_MEMORY_FRACTION=0.3  # 30% of 4GB = 1.2GB for reranker
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    command:
+      - "--model-id"
+      - "BAAI/bge-reranker-base"
+      - "--port"
+      - "80"
+      - "--max-batch-tokens"
+      - "4096"
+      - "--max-concurrent-requests"
+      - "64"
+      - "--auto-truncate"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s

@@ -594,11 +594,11 @@ CREATE POLICY chunk_access_policy ON chunks
     );
 
 -- ===================================================================
--- Grants for coderag application user
+-- Grants for mainrag application user
 -- ===================================================================
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO coderag;
-GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO coderag;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO coderag;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO mainrag;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainrag;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag;
 
 -- ===================================================================
 -- Initial Admin User (change password immediately!)
