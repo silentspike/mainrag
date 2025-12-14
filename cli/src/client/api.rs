@@ -40,7 +40,7 @@ pub struct SearchResult {
     pub source_name: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SearchResponse {
     pub results: Vec<SearchResult>,
     pub count: usize,

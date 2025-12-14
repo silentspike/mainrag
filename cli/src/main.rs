@@ -1,9 +1,9 @@
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use std::io::{self, Write};
 
 mod client;
 mod commands;
+mod mcp;
 
 use client::ApiClient;
 
@@ -82,6 +82,20 @@ enum Commands {
 
     /// Check health status
     Health,
+
+    /// Watch sources for changes and auto-sync
+    Watch {
+        /// Optional source name to watch (defaults to all filesystem sources)
+        #[arg(short, long)]
+        source: Option<String>,
+
+        /// Run as daemon (background)
+        #[arg(short, long)]
+        daemon: bool,
+    },
+
+    /// Start MCP server for Claude Code
+    Mcp,
 
     /// Show version
     Version,
@@ -181,6 +195,15 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Commands::Health => commands::health::run(&client, cli.json).await,
+
+        Commands::Watch { source, daemon } => {
+            commands::watch::watch(&client, source.as_deref(), daemon).await
+        }
+
+        Commands::Mcp => {
+            let server = mcp::McpServer::new(client);
+            server.run_stdio().await
+        }
 
         Commands::Version => {
             println!("mainrag {}", env!("CARGO_PKG_VERSION"));

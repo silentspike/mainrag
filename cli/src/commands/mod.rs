@@ -5,3 +5,4 @@ pub mod auth;
 pub mod stats;
 pub mod config;
 pub mod health;
+pub mod watch;
