@@ -4,7 +4,12 @@
 # TEI Version: 1.8.3 (pinned for reproducibility)
 
 services:
-  # Embedding Service (BGE-base-en-v1.5)
+  # Embedding Service
+  # Model configuration via environment variable TEI_MODEL
+  # Examples:
+  #   - BAAI/bge-base-en-v1.5 (default, 768d, 512 tokens)
+  #   - nomic-ai/nomic-embed-text-v1.5 (drop-in, 768d, 8K tokens)
+  #   - BAAI/bge-m3 (multilingual, 1024d, 8K tokens)
   tei-embeddings:
     image: ghcr.io/huggingface/text-embeddings-inference:1.8.3
     container_name: mainrag-tei-embeddings
@@ -27,7 +32,7 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     command:
       - "--model-id"
-      - "BAAI/bge-base-en-v1.5"
+      - "${TEI_MODEL:-BAAI/bge-base-en-v1.5}"  # Read from environment or use default
       - "--port"
       - "80"
       - "--max-batch-tokens"
