@@ -1,7 +1,7 @@
 [package]
 name = "mainrag-cli"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 description = "CLI for MAINRAG - Enterprise RAG system"
 authors = ["obtFusi <85476984+obtFusi@users.noreply.github.com>"]
 license = "MIT"
