@@ -1,0 +1,49 @@
+[package]
+name = "mainrag-cli"
+version = "0.1.0"
+edition = "2024"
+description = "CLI for MAINRAG - Enterprise RAG system"
+authors = ["obtFusi <85476984+obtFusi@users.noreply.github.com>"]
+license = "MIT"
+
+[[bin]]
+name = "mainrag"
+path = "src/main.rs"
+
+[dependencies]
+# CLI framework
+clap = { version = "4.5", features = ["derive", "env", "color"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Async runtime
+tokio = { version = "1.42", features = ["rt-multi-thread", "macros", "fs"] }
+
+# JSON handling
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Config
+toml = "0.8"
+directories = "5.0"
+
+# Output formatting
+colored = "3.0"
+tabled = { version = "0.17", features = ["ansi"] }
+indicatif = { version = "0.17", features = ["rayon"] }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+humansize = "2.1"
+url = "2.5"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "z"

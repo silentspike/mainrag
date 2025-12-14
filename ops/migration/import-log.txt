@@ -1,0 +1,15 @@
+=== MAINRAG Import from CodeRag ===
+Export Dir: /work/mainrag/ops/migration/export
+Target: PostgreSQL (localhost:5432/mainrag)
+Qdrant: http://localhost:6333
+TEI: http://localhost:8080
+
+=== Export Manifest ===
+  Source DB: /data/coderag/coderag.db
+  Export Date: 2025-12-13T22:51:20+01:00
+  Counts: {'sources': 29, 'files': 42907, 'chunks': 200866, 'symbols': 204636, 'call_graph': 1383547}
+
+=== Checking Prerequisites ===
+  PostgreSQL: OK (PostgreSQL 18.1 on x86_64-suse-linux-gnu, compiled...)
+  Qdrant: FAILED - status 401
+ERROR: Prerequisites not met

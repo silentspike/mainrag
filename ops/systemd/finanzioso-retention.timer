@@ -1,0 +1,17 @@
+[Unit]
+Description=Finanzioso Data Retention Timer
+Documentation=file:///work/finanzioso/docs/PHASE-D.md
+
+[Timer]
+# Run daily at 04:00 UTC (low traffic time)
+OnCalendar=*-*-* 04:00:00
+
+# Run missed job on boot
+Persistent=true
+
+# Low priority - can delay up to 15 minutes
+RandomizedDelaySec=900
+AccuracySec=300
+
+[Install]
+WantedBy=timers.target

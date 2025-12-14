@@ -5,7 +5,7 @@
 set -euo pipefail
 
 CODERAG_DB="${CODERAG_DB:-/data/coderag/coderag.db}"
-EXPORT_DIR="${EXPORT_DIR:-/work/postgres/ops/migration/export}"
+EXPORT_DIR="${EXPORT_DIR:-/work/mainrag/ops/migration/export}"
 
 export PGPASSWORD="${POSTGRES_PASSWORD:-<REDACTED_DB_PW>}"
 PG_HOST="${POSTGRES_HOST:-localhost}"

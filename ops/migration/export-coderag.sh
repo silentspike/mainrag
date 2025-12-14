@@ -6,7 +6,7 @@
 set -euo pipefail
 
 CODERAG_DB="${CODERAG_DB:-/data/coderag/coderag.db}"
-EXPORT_DIR="${EXPORT_DIR:-/work/postgres/ops/migration/export}"
+EXPORT_DIR="${EXPORT_DIR:-/work/mainrag/ops/migration/export}"
 BATCH_SIZE="${BATCH_SIZE:-10000}"
 
 echo "=== CodeRag Export for MAINRAG Migration ==="

@@ -45,7 +45,7 @@ sudo chown -R mainrag:mainrag /opt/mainrag /data/mainrag
 ### 2. Deploy API
 
 ```bash
-cd /work/postgres/api
+cd /work/mainrag/api
 POSTGRES_PASSWORD='<REDACTED_DB_PW>' cargo build --release
 sudo cp target/release/mainrag-api /opt/mainrag/api/
 sudo chown mainrag:mainrag /opt/mainrag/api/mainrag-api
@@ -54,7 +54,7 @@ sudo chown mainrag:mainrag /opt/mainrag/api/mainrag-api
 ### 3. Deploy Frontend
 
 ```bash
-cd /work/postgres/frontend
+cd /work/mainrag/frontend
 npm run build
 sudo cp -r build/* /opt/mainrag/frontend/
 sudo chown -R mainrag:mainrag /opt/mainrag/frontend

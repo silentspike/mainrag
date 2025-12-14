@@ -1,0 +1,16 @@
+[Unit]
+Description=Finanzioso Event Finalizer Timer
+Documentation=file:///work/finanzioso/docs/PHASE-D.md
+
+[Timer]
+# Run every 5 minutes to catch orphaned events quickly
+OnCalendar=*:0/5
+
+# Run on boot to clean up any events stuck from crash
+Persistent=true
+
+# No delay needed for internal maintenance
+AccuracySec=30
+
+[Install]
+WantedBy=timers.target

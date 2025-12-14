@@ -1,0 +1,21 @@
+[Unit]
+Description=Finanzioso Data Collection Timer
+Documentation=file:///work/finanzioso/docs/PHASE-D.md
+
+[Timer]
+# Yahoo Finance: Run after market close (17:00 ET = 22:00 UTC in winter, 21:00 UTC in summer)
+# SEC EDGAR: Run hourly during business hours
+# Combined schedule: Every hour from 14:00-23:00 UTC (covers both ET business hours and after-market)
+OnCalendar=*-*-* 14..23:00:00
+
+# Run missed jobs on boot
+Persistent=true
+
+# Random delay to avoid thundering herd (0-5 minutes)
+RandomizedDelaySec=300
+
+# Accuracy - wake up within 1 minute of scheduled time
+AccuracySec=60
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,41 @@
+[Unit]
+Description=Finanzioso Score Event Loop
+Documentation=file:///work/finanzioso/docs/PHASE-D.md
+After=network.target postgresql.service mainrag-api.service
+Requires=postgresql.service
+Wants=mainrag-api.service
+
+[Service]
+Type=simple
+User=mainrag
+Group=mainrag
+WorkingDirectory=/opt/mainrag
+
+# Event loop that processes scoring events
+# Runs continuously, claims events from events table (SKIP LOCKED pattern)
+ExecStart=/opt/mainrag/api/mainrag-api --mode finanzioso-scorer
+EnvironmentFile=/etc/mainrag/mainrag.env
+
+# Restart policy - always restart unless manually stopped
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=50%
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/mainrag
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=finanzioso-scorer
+
+[Install]
+WantedBy=multi-user.target

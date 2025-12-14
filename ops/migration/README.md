@@ -21,7 +21,7 @@ Before migration:
 ### 1. Export from CodeRag
 
 ```bash
-cd /work/postgres/ops/migration
+cd /work/mainrag/ops/migration
 chmod +x export-coderag.sh
 ./export-coderag.sh
 ```

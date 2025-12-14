@@ -196,7 +196,7 @@ max_parallel_workers = 8
 
 ## Credentials
 
-**Location**: `/work/postgres/credentials.json`
+**Location**: `/work/mainrag/credentials.json`
 
 | User | Password | Purpose |
 |------|----------|---------|

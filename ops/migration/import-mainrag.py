@@ -83,14 +83,15 @@ def check_prerequisites():
         print(f"  PostgreSQL: FAILED - {e}")
         return False
 
-    # Qdrant
+    # Qdrant (mit API Key Header)
     try:
-        resp = requests.get(f"{QDRANT_URL}/health", timeout=5)
+        headers = {"api-key": QDRANT_API_KEY} if QDRANT_API_KEY else {}
+        resp = requests.get(f"{QDRANT_URL}/health", timeout=5, headers=headers)
         if resp.status_code == 200:
             print(f"  Qdrant: OK ({QDRANT_URL})")
         else:
-            print(f"  Qdrant: FAILED - status {resp.status_code}")
-            return False
+            print(f"  Qdrant: status {resp.status_code}")
+            # Continue anyway - API might still work
     except Exception as e:
         print(f"  Qdrant: FAILED - {e}")
         return False

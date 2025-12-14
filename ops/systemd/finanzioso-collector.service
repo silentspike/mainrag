@@ -1,0 +1,31 @@
+[Unit]
+Description=Finanzioso Data Collector (Yahoo + SEC)
+Documentation=file:///work/finanzioso/docs/PHASE-D.md
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+User=mainrag
+Group=mainrag
+WorkingDirectory=/opt/mainrag
+
+# Collects price data from Yahoo and filings from SEC
+# Triggered by finanzioso-collector.timer
+ExecStart=/opt/mainrag/api/mainrag-api --mode finanzioso-collector
+EnvironmentFile=/etc/mainrag/mainrag.env
+
+# Timeout for collection run (30 minutes max)
+TimeoutStartSec=1800
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/mainrag
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=finanzioso-collector
