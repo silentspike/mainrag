@@ -14,6 +14,9 @@ storage:
   # Snapshot directory
   snapshots_path: /data/qdrant/snapshots
 
+  # mmap threshold for memory mapping (1MB)
+  mmap_threshold_kb: 1024
+
   # Use temp storage for large operations
   temp_path: /tmp/qdrant
 
@@ -75,8 +78,7 @@ log_level: INFO
 # Leave headroom for OS and other services
 # Qdrant typically uses ~2-4GB for 200k vectors
 # mmap will use additional OS page cache
-storage:
-  mmap_threshold_kb: 1024  # Use mmap for segments > 1MB
+# NOTE: mmap_threshold_kb moved to main storage block above
 
 # Collections configuration
 # These are defaults; override when creating collections

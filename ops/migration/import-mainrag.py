@@ -86,7 +86,7 @@ def check_prerequisites():
     # Qdrant (mit API Key Header)
     try:
         headers = {"api-key": QDRANT_API_KEY} if QDRANT_API_KEY else {}
-        resp = requests.get(f"{QDRANT_URL}/health", timeout=5, headers=headers)
+        resp = requests.get(f"{QDRANT_URL}/healthz", timeout=5, headers=headers)
         if resp.status_code == 200:
             print(f"  Qdrant: OK ({QDRANT_URL})")
         else:

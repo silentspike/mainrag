@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { api, type SearchResult, type SearchResponse } from '$lib/api/client';
+	import ProcessMonitor from '$lib/components/ProcessMonitor.svelte';
 
 	let query = $state('');
 	let results = $state<SearchResult[]>([]);
@@ -111,6 +112,8 @@
 		</div>
 	{/if}
 </div>
+
+<ProcessMonitor />
 
 <style>
 	.search-page {

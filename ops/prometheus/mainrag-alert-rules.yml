@@ -1,0 +1,261 @@
+# MAINRAG Prometheus Alert Rules
+# Version: 1.0
+# Created: 2025-12-15
+
+groups:
+  - name: mainrag-api-alerts
+    interval: 30s
+    rules:
+      # API Server Health
+      - alert: MainragAPIDown
+        expr: up{job="mainrag-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: mainrag-api
+        annotations:
+          summary: "MAINRAG API Server is down"
+          description: "The MAINRAG API server has been unreachable for more than 1 minute."
+
+      - alert: MainragAPIHighErrorRate
+        expr: |
+          (
+            sum(rate(http_requests_total{job="mainrag-api", status=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{job="mainrag-api"}[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          service: mainrag-api
+        annotations:
+          summary: "High API error rate (> 5%)"
+          description: "MAINRAG API has error rate of {{ $value | humanizePercentage }} over the last 5 minutes."
+
+      - alert: MainragAPIHighLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(http_request_duration_seconds_bucket{job="mainrag-api"}[5m])) by (le)
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+          service: mainrag-api
+        annotations:
+          summary: "High API latency (p95 > 2s)"
+          description: "MAINRAG API p95 latency is {{ $value | humanizeDuration }}."
+
+  - name: mainrag-database-alerts
+    interval: 30s
+    rules:
+      # PostgreSQL Health
+      - alert: PostgreSQLDown
+        expr: pg_up{job="postgres"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: postgresql
+        annotations:
+          summary: "PostgreSQL is down"
+          description: "PostgreSQL database server is unreachable."
+
+      - alert: PostgreSQLHighConnections
+        expr: |
+          (pg_stat_activity_count{job="postgres"} / pg_settings_max_connections{job="postgres"}) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          service: postgresql
+        annotations:
+          summary: "PostgreSQL connection pool > 80%"
+          description: "PostgreSQL using {{ $value | humanizePercentage }} of max connections."
+
+      - alert: PostgreSQLSlowQueries
+        expr: |
+          rate(pg_stat_activity_max_tx_duration{job="postgres"}[5m]) > 300
+        for: 5m
+        labels:
+          severity: warning
+          service: postgresql
+        annotations:
+          summary: "PostgreSQL slow queries detected"
+          description: "Queries running longer than 5 minutes detected."
+
+      - alert: PostgreSQLDeadlocks
+        expr: rate(pg_stat_database_deadlocks{job="postgres"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: postgresql
+        annotations:
+          summary: "PostgreSQL deadlocks detected"
+          description: "Database deadlocks occurring at rate {{ $value }}/s."
+
+  - name: mainrag-qdrant-alerts
+    interval: 30s
+    rules:
+      # Qdrant Health
+      - alert: QdrantDown
+        expr: up{job="qdrant"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: qdrant
+        annotations:
+          summary: "Qdrant vector store is down"
+          description: "Qdrant has been unreachable for more than 1 minute."
+
+      - alert: QdrantSearchSlow
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(qdrant_grpc_responses_duration_seconds_bucket{method="Search"}[5m])) by (le)
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          service: qdrant
+        annotations:
+          summary: "Qdrant search latency high (p95 > 500ms)"
+          description: "Qdrant search p95 latency is {{ $value | humanizeDuration }}."
+
+      - alert: QdrantCollectionError
+        expr: increase(qdrant_grpc_responses_fail_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: qdrant
+        annotations:
+          summary: "Qdrant collection errors"
+          description: "Qdrant experiencing {{ $value }} errors in last 5 minutes."
+
+  - name: mainrag-tei-alerts
+    interval: 30s
+    rules:
+      # TEI Embeddings Health
+      - alert: TEIDown
+        expr: up{job="tei"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: tei
+        annotations:
+          summary: "TEI embedding service is down"
+          description: "TEI has been unreachable for more than 2 minutes."
+
+      - alert: TEIHighLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(tei_request_duration_seconds_bucket[5m])) by (le)
+          ) > 1
+        for: 5m
+        labels:
+          severity: warning
+          service: tei
+        annotations:
+          summary: "TEI embedding latency high (p95 > 1s)"
+          description: "TEI p95 latency is {{ $value | humanizeDuration }}."
+
+  - name: mainrag-system-alerts
+    interval: 60s
+    rules:
+      # System Resources
+      - alert: HighMemoryUsage
+        expr: |
+          (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          service: system
+        annotations:
+          summary: "High memory usage (> 90%)"
+          description: "System memory usage is {{ $value | humanizePercentage }}."
+
+      - alert: HighCPUUsage
+        expr: |
+          100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 90
+        for: 10m
+        labels:
+          severity: warning
+          service: system
+        annotations:
+          summary: "High CPU usage (> 90%)"
+          description: "CPU usage is {{ $value }}%."
+
+      - alert: DiskSpaceLow
+        expr: |
+          (node_filesystem_avail_bytes{mountpoint=~"/|/data|/work"}
+           / node_filesystem_size_bytes{mountpoint=~"/|/data|/work"}) < 0.2
+        for: 5m
+        labels:
+          severity: warning
+          service: system
+        annotations:
+          summary: "Disk space low (< 20% free)"
+          description: "Filesystem {{ $labels.mountpoint }} has only {{ $value | humanizePercentage }} free."
+
+      - alert: DiskSpaceCritical
+        expr: |
+          (node_filesystem_avail_bytes{mountpoint=~"/|/data|/work"}
+           / node_filesystem_size_bytes{mountpoint=~"/|/data|/work"}) < 0.1
+        for: 1m
+        labels:
+          severity: critical
+          service: system
+        annotations:
+          summary: "Disk space critical (< 10% free)"
+          description: "Filesystem {{ $labels.mountpoint }} has only {{ $value | humanizePercentage }} free!"
+
+  - name: mainrag-backup-alerts
+    interval: 300s
+    rules:
+      # Backup Health
+      - alert: BackupNotRunning
+        expr: |
+          (time() - mainrag_backup_last_success_timestamp) > 172800
+        for: 1h
+        labels:
+          severity: critical
+          service: backup
+        annotations:
+          summary: "Backup not completed in 48 hours"
+          description: "Last successful backup was {{ $value | humanizeDuration }} ago."
+
+      - alert: SnapshotNotRunning
+        expr: |
+          (time() - mainrag_qdrant_snapshot_last_success_timestamp) > 172800
+        for: 1h
+        labels:
+          severity: warning
+          service: backup
+        annotations:
+          summary: "Qdrant snapshot not completed in 48 hours"
+          description: "Last successful snapshot was {{ $value | humanizeDuration }} ago."
+
+  - name: mainrag-search-alerts
+    interval: 30s
+    rules:
+      # Search Quality
+      - alert: SearchNoResults
+        expr: |
+          (
+            sum(rate(mainrag_search_results_total{count="0"}[5m]))
+            /
+            sum(rate(mainrag_search_requests_total[5m]))
+          ) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+          service: search
+        annotations:
+          summary: "High rate of zero-result searches (> 50%)"
+          description: "{{ $value | humanizePercentage }} of searches returning no results."
+
+      - alert: IndexingFailed
+        expr: increase(mainrag_indexing_errors_total[1h]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: indexing
+        annotations:
+          summary: "Indexing errors detected"
+          description: "{{ $value }} indexing errors in the last hour."
