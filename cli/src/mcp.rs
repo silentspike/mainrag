@@ -233,12 +233,20 @@ impl McpServer {
             code: -32602,
             message: "Missing query".to_string(),
         })?;
+        let symbol_type = args["type"].as_str();
+        let limit = args["limit"].as_u64().unwrap_or(20) as u32;
 
-        // For now, return a placeholder since we don't have a direct symbol search endpoint
+        let result = self.client.search_symbols(query, symbol_type, limit)
+            .await
+            .map_err(|e| McpError {
+                code: -32000,
+                message: e.to_string(),
+            })?;
+
         Ok(json!({
             "content": [{
                 "type": "text",
-                "text": format!("Symbol search for '{}' not yet implemented", query)
+                "text": serde_json::to_string_pretty(&result).unwrap_or_default()
             }]
         }))
     }
@@ -249,13 +257,28 @@ impl McpServer {
             message: "Missing function".to_string(),
         })?;
 
-        // For now, return a placeholder since we don't have a direct callers endpoint
-        Ok(json!({
-            "content": [{
-                "type": "text",
-                "text": format!("Callers search for '{}' not yet implemented", function)
-            }]
-        }))
+        let result = self.client.find_callers(function)
+            .await
+            .map_err(|e| McpError {
+                code: -32000,
+                message: e.to_string(),
+            })?;
+
+        if result.is_empty() {
+            Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!("No callers found for function '{}'", function)
+                }]
+            }))
+        } else {
+            Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                }]
+            }))
+        }
     }
 
     async fn tool_find_callees(&self, args: &Value) -> Result<Value, McpError> {
@@ -264,12 +287,27 @@ impl McpServer {
             message: "Missing function".to_string(),
         })?;
 
-        // For now, return a placeholder since we don't have a direct callees endpoint
-        Ok(json!({
-            "content": [{
-                "type": "text",
-                "text": format!("Callees search for '{}' not yet implemented", function)
-            }]
-        }))
+        let result = self.client.find_callees(function)
+            .await
+            .map_err(|e| McpError {
+                code: -32000,
+                message: e.to_string(),
+            })?;
+
+        if result.is_empty() {
+            Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!("No callees found for function '{}'", function)
+                }]
+            }))
+        } else {
+            Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                }]
+            }))
+        }
     }
 }

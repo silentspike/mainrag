@@ -560,6 +560,12 @@ ALTER TABLE sources ENABLE ROW LEVEL SECURITY;
 ALTER TABLE files ENABLE ROW LEVEL SECURITY;
 ALTER TABLE chunks ENABLE ROW LEVEL SECURITY;
 
+-- FORCE RLS even for table owner (critical for security!)
+-- Without FORCE, the table owner (mainrag) would bypass all policies
+ALTER TABLE sources FORCE ROW LEVEL SECURITY;
+ALTER TABLE files FORCE ROW LEVEL SECURITY;
+ALTER TABLE chunks FORCE ROW LEVEL SECURITY;
+
 -- Policy: Users can only see sources they have access to
 CREATE POLICY source_access_policy ON sources
     FOR SELECT
@@ -591,6 +597,68 @@ CREATE POLICY chunk_access_policy ON chunks
             WHERE f.id = file_id
             AND user_can_access_source(current_setting('app.user_id')::UUID, f.source_id, 'read')
         )
+    );
+
+-- ===================================================================
+-- Admin write policies (INSERT, UPDATE, DELETE)
+-- Required because FORCE ROW LEVEL SECURITY blocks even table owner
+-- ===================================================================
+
+-- Sources: Admin can INSERT/UPDATE/DELETE
+CREATE POLICY source_admin_insert ON sources
+    FOR INSERT
+    WITH CHECK (
+        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+    );
+
+CREATE POLICY source_admin_update ON sources
+    FOR UPDATE
+    USING (
+        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+    );
+
+CREATE POLICY source_admin_delete ON sources
+    FOR DELETE
+    USING (
+        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+    );
+
+-- Files: Admin can INSERT/UPDATE/DELETE
+CREATE POLICY file_admin_insert ON files
+    FOR INSERT
+    WITH CHECK (
+        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+    );
+
+CREATE POLICY file_admin_update ON files
+    FOR UPDATE
+    USING (
+        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+    );
+
+CREATE POLICY file_admin_delete ON files
+    FOR DELETE
+    USING (
+        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+    );
+
+-- Chunks: Admin can INSERT/UPDATE/DELETE
+CREATE POLICY chunk_admin_insert ON chunks
+    FOR INSERT
+    WITH CHECK (
+        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+    );
+
+CREATE POLICY chunk_admin_update ON chunks
+    FOR UPDATE
+    USING (
+        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+    );
+
+CREATE POLICY chunk_admin_delete ON chunks
+    FOR DELETE
+    USING (
+        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
     );
 
 -- ===================================================================

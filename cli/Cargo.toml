@@ -41,6 +41,7 @@ anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 humansize = "2.1"
 url = "2.5"
+urlencoding = "2.1"
 
 # Watch Mode (Phase 11)
 notify = "6"

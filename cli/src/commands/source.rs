@@ -32,7 +32,7 @@ async fn list_sources(client: &ApiClient, json_output: bool) -> anyhow::Result<(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "sources": resp.sources,
-                "count": resp.count,
+                "total": resp.total,
             }))?
         );
         return Ok(());
@@ -43,7 +43,7 @@ async fn list_sources(client: &ApiClient, json_output: bool) -> anyhow::Result<(
         return Ok(());
     }
 
-    println!("{}", format!("\r✓ Found {} sources", resp.count).green());
+    println!("{}", format!("\r✓ Found {} sources", resp.total).green());
     println!();
 
     for source in resp.sources {
@@ -81,10 +81,11 @@ async fn sync_source(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "source_id": result.source_id,
-                "source_name": result.source_name,
+                "source_name": name,
                 "status": result.status,
-                "files_processed": result.files_processed,
-                "chunks_created": result.chunks_created,
+                "files_processed": result.stats.files_processed,
+                "chunks_created": result.stats.chunks_created,
+                "embeddings_generated": result.stats.embeddings_generated,
             }))?
         );
         return Ok(());
@@ -93,8 +94,11 @@ async fn sync_source(
     println!(
         "{}",
         format!(
-            "\r✓ Synced '{}' ({} files, {} chunks)",
-            result.source_name, result.files_processed, result.chunks_created
+            "\r✓ Synced '{}' ({} files, {} chunks, {} embeddings)",
+            name,
+            result.stats.files_processed,
+            result.stats.chunks_created,
+            result.stats.embeddings_generated
         )
         .green()
     );

@@ -101,8 +101,8 @@ pub async fn watch(
                             Ok(result) => {
                                 println!("  {} Synced {} files, {} chunks",
                                     "✓".green(),
-                                    result.files_processed,
-                                    result.chunks_created
+                                    result.stats.files_processed,
+                                    result.stats.chunks_created
                                 );
                             }
                             Err(e) => {

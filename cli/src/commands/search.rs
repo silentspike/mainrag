@@ -23,8 +23,10 @@ pub async fn run(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "results": results.results,
-                "count": results.count,
-                "query_time_ms": results.query_time_ms,
+                "total": results.total,
+                "took_ms": results.took_ms,
+                "quality_tier": results.quality_tier,
+                "reranked": results.reranked,
             }))?
         );
         return Ok(());
@@ -40,7 +42,7 @@ pub async fn run(
         "{}",
         format!(
             "\r✓ Found {} results in {}ms",
-            results.count, results.query_time_ms
+            results.total, results.took_ms
         )
         .green()
     );
