@@ -24,22 +24,45 @@ export interface WatchlistData {
 }
 
 export const load: PageLoad = async ({ fetch }): Promise<WatchlistData> => {
-	// TODO: Connect to real API in A4
-	// For now, return mock data for UI development
-
 	try {
-		// Uncomment when API is ready:
-		// const response = await fetch('/finanzioso/watchlist');
-		// if (!response.ok) throw new Error('Failed to load watchlist');
-		// return await response.json();
+		// Get token from localStorage (client-side only)
+		let token: string | null = null;
+		if (typeof window !== 'undefined') {
+			const stored = localStorage.getItem('mainrag_auth');
+			if (stored) {
+				const auth = JSON.parse(stored);
+				token = auth.token;
+			}
+		}
 
-		// Mock data for UI shell
-		return {
-			items: [],
-			count: 0,
-			disclaimer: 'This is NOT investment advice. Scores are algorithmic calculations for educational/research purposes only.',
-			error: null
-		};
+		if (!token) {
+			return {
+				items: [],
+				count: 0,
+				disclaimer: 'This is NOT investment advice. Scores are algorithmic calculations for educational/research purposes only.',
+				error: 'Please log in to view your watchlist'
+			};
+		}
+
+		const response = await fetch('/api/v1/finanzioso/watchlist', {
+			headers: {
+				'Authorization': `Bearer ${token}`
+			}
+		});
+
+		if (!response.ok) {
+			if (response.status === 401) {
+				return {
+					items: [],
+					count: 0,
+					disclaimer: 'This is NOT investment advice.',
+					error: 'Session expired. Please log in again.'
+				};
+			}
+			throw new Error('Failed to load watchlist');
+		}
+
+		return await response.json();
 	} catch (err) {
 		return {
 			items: [],

@@ -2,23 +2,47 @@
 	import { goto } from '$app/navigation';
 	import { auth } from '$lib/stores/auth';
 
-	let token = $state('');
+	let email = $state('');
+	let password = $state('');
 	let error = $state<string | null>(null);
+	let isLoading = $state(false);
 
-	function handleLogin(e: Event) {
+	async function handleLogin(e: Event) {
 		e.preventDefault();
 		error = null;
 
-		if (!token.trim()) {
-			error = 'Please enter a JWT token';
+		if (!email.trim() || !password) {
+			error = 'Please enter email and password';
 			return;
 		}
 
+		isLoading = true;
+
 		try {
-			auth.login(token.trim());
-			goto('/');
+			const apiBase = ''; // nginx proxies /api/ to API server
+			const response = await fetch(`${apiBase}/api/v1/auth/login`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify({
+					username: email.trim(),
+					password: password
+				})
+			});
+
+			if (!response.ok) {
+				const data = await response.json().catch(() => ({}));
+				throw new Error(data.error || 'Login failed');
+			}
+
+			const data = await response.json();
+			auth.login(data.token);
+			goto('/finanzioso');
 		} catch (err) {
-			error = 'Invalid token format';
+			error = err instanceof Error ? err.message : 'Login failed';
+		} finally {
+			isLoading = false;
 		}
 	}
 </script>
@@ -30,7 +54,7 @@
 <div class="login-page container">
 	<div class="login-card card">
 		<h1>Login</h1>
-		<p class="description">Enter your JWT token to access admin features</p>
+		<p class="description">Sign in to access Finanzioso and admin features</p>
 
 		<form onsubmit={handleLogin}>
 			{#if error}
@@ -40,23 +64,36 @@
 			{/if}
 
 			<div class="form-group">
-				<label for="token">JWT Token</label>
-				<textarea
-					id="token"
-					class="input token-input"
-					placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-					bind:value={token}
-					rows="4"
-				></textarea>
+				<label for="email">Email</label>
+				<input
+					id="email"
+					type="email"
+					class="input"
+					placeholder="admin@mainrag.local"
+					bind:value={email}
+					disabled={isLoading}
+				/>
 			</div>
 
-			<button type="submit" class="btn btn-primary login-btn">
-				Login
+			<div class="form-group">
+				<label for="password">Password</label>
+				<input
+					id="password"
+					type="password"
+					class="input"
+					placeholder="Enter password"
+					bind:value={password}
+					disabled={isLoading}
+				/>
+			</div>
+
+			<button type="submit" class="btn btn-primary login-btn" disabled={isLoading}>
+				{isLoading ? 'Signing in...' : 'Login'}
 			</button>
 		</form>
 
 		<div class="help-text">
-			<p>Don't have a token? Contact your administrator.</p>
+			<p>Default: admin@mainrag.local / admin123</p>
 		</div>
 	</div>
 </div>
@@ -71,7 +108,7 @@
 
 	.login-card {
 		width: 100%;
-		max-width: 450px;
+		max-width: 400px;
 	}
 
 	.login-card h1 {
@@ -102,12 +139,6 @@
 		display: block;
 		margin-bottom: 0.5rem;
 		font-weight: 500;
-	}
-
-	.token-input {
-		resize: vertical;
-		font-family: var(--font-mono);
-		font-size: 0.85rem;
 	}
 
 	.login-btn {

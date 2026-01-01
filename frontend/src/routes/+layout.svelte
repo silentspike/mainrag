@@ -9,14 +9,11 @@
 	<header>
 		<nav class="container">
 			<div class="nav-brand">
-				<a href="/">MAINRAG</a>
+				<a href="/finanzioso">Finanzioso</a>
+				<span class="brand-subtitle">AI Stock Assistant</span>
 			</div>
 			<div class="nav-links">
-				<a href="/">Search</a>
-				<a href="/finanzioso">Finanzioso</a>
-				{#if $isAdmin}
-					<a href="/admin">Admin</a>
-				{/if}
+				<a href="/finanzioso">Watchlist</a>
 			</div>
 			<div class="nav-auth">
 				{#if $isAuthenticated}
@@ -35,7 +32,7 @@
 
 	<footer>
 		<div class="container">
-			<p>MAINRAG - Hybrid RAG Search Engine</p>
+			<p>Finanzioso - AI Stock Assistant (Educational/Research Only)</p>
 		</div>
 	</footer>
 </div>
@@ -60,11 +57,22 @@
 		gap: 2rem;
 	}
 
+	.nav-brand {
+		display: flex;
+		align-items: baseline;
+		gap: 0.5rem;
+	}
+
 	.nav-brand a {
 		font-size: 1.25rem;
 		font-weight: 700;
 		color: var(--color-text);
 		text-decoration: none;
+	}
+
+	.brand-subtitle {
+		font-size: 0.75rem;
+		color: var(--color-text-muted);
 	}
 
 	.nav-links {
