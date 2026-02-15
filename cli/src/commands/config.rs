@@ -29,7 +29,7 @@ async fn show_config(json_output: bool) -> anyhow::Result<()> {
         });
 
         if let Ok(token) = fs::read_to_string(config_dir.join("token")) {
-            config["token_set"] = json!(token.len() > 0);
+            config["token_set"] = json!(!token.is_empty());
         }
 
         println!("{}", serde_json::to_string_pretty(&config)?);

@@ -30,12 +30,13 @@ directories = "5.0"
 
 # Output formatting
 colored = "3.0"
-tabled = { version = "0.17", features = ["ansi"] }
 indicatif = { version = "0.17", features = ["rayon"] }
 
 # Error handling
-thiserror = "2.0"
 anyhow = "1.0"
+
+# Password prompt (Sprint 4.5: secure terminal echo masking)
+rpassword = "5"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }

@@ -6,3 +6,6 @@ pub mod stats;
 pub mod config;
 pub mod health;
 pub mod watch;
+pub mod symbols;
+pub mod call_graph;
+pub mod backfill;

@@ -1,0 +1,40 @@
+[Unit]
+Description=MainRAG File Watcher for Conversations
+After=network.target mainrag-api.service
+Requires=mainrag-api.service
+
+[Service]
+Type=simple
+User=mainrag
+Group=mainrag
+SupplementaryGroups=jan
+WorkingDirectory=/opt/mainrag
+
+# Watch only claude-conversations source in daemon mode
+ExecStart=/opt/mainrag/bin/mainrag watch --source claude-conversations --daemon
+
+# API URL
+Environment=MAINRAG_API_URL=http://localhost:3001
+
+# Use config from mainrag user's home
+Environment=HOME=/var/lib/mainrag
+
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+
+# Security
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/mainrag
+ReadOnlyPaths=/home/jan/.claude
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mainrag-watcher
+
+[Install]
+WantedBy=multi-user.target

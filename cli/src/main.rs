@@ -33,7 +33,7 @@ struct Cli {
 enum Commands {
     /// Search the knowledge base
     Search {
-        /// Search query
+        /// Search query (use "quotes" for exact phrase)
         query: String,
 
         /// Search mode: hybrid (default), keyword, or semantic
@@ -44,8 +44,12 @@ enum Commands {
         #[arg(short, long, default_value = "10")]
         limit: u32,
 
+        /// Skip first N results (for pagination)
+        #[arg(short, long, default_value = "0")]
+        offset: u32,
+
         /// Filter by source name
-        #[arg(short, long)]
+        #[arg(short = 'S', long)]
         source: Option<String>,
     },
 
@@ -97,6 +101,36 @@ enum Commands {
     /// Start MCP server for Claude Code
     Mcp,
 
+    /// Search for code symbols (functions, classes, structs)
+    Symbols {
+        /// Symbol name query
+        query: String,
+
+        /// Filter by type (function, class, struct, method, etc.)
+        #[arg(short = 't', long)]
+        symbol_type: Option<String>,
+
+        /// Maximum results to return
+        #[arg(short, long, default_value = "10")]
+        limit: u32,
+    },
+
+    /// Query function call graph (callers/callees)
+    CallGraph {
+        /// Function name to analyze
+        function: String,
+
+        /// Direction: callers, callees, or both (default)
+        #[arg(short, long, default_value = "both")]
+        direction: String,
+    },
+
+    /// Admin maintenance commands (requires admin privileges)
+    Admin {
+        #[command(subcommand)]
+        action: AdminAction,
+    },
+
     /// Show version
     Version,
 }
@@ -124,9 +158,17 @@ enum SourceAction {
 }
 
 #[derive(Subcommand)]
-enum AuthAction {
+pub enum AuthAction {
     /// Login to MAINRAG
-    Login,
+    Login {
+        /// Username (email) - if provided with password, skips interactive prompt
+        #[arg(short, long)]
+        username: Option<String>,
+
+        /// Password - if provided with username, skips interactive prompt
+        #[arg(short, long)]
+        password: Option<String>,
+    },
 
     /// Logout (remove stored token)
     Logout,
@@ -145,6 +187,21 @@ enum ConfigAction {
         key: String,
         value: String,
     },
+}
+
+#[derive(Subcommand)]
+enum AdminAction {
+    /// Backfill operations for data maintenance
+    Backfill {
+        #[command(subcommand)]
+        action: BackfillAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum BackfillAction {
+    /// Find and embed orphaned chunks (chunks without embeddings)
+    Orphaned,
 }
 
 #[tokio::main]
@@ -173,8 +230,9 @@ async fn main() -> anyhow::Result<()> {
             query,
             mode,
             limit,
+            offset,
             source,
-        } => commands::search::run(&client, &query, &mode, limit, source.as_deref(), cli.json).await,
+        } => commands::search::run(&client, &query, &mode, limit, offset, source.as_deref(), cli.json).await,
 
         Commands::Add { path, name } => {
             commands::add::run(&client, &path, name.as_deref(), cli.json).await
@@ -204,6 +262,22 @@ async fn main() -> anyhow::Result<()> {
             let server = mcp::McpServer::new(client);
             server.run_stdio().await
         }
+
+        Commands::Symbols { query, symbol_type, limit } => {
+            commands::symbols::run(&client, &query, symbol_type.as_deref(), limit, cli.json).await
+        }
+
+        Commands::CallGraph { function, direction } => {
+            commands::call_graph::run(&client, &function, &direction, cli.json).await
+        }
+
+        Commands::Admin { action } => match action {
+            AdminAction::Backfill { action: backfill_action } => match backfill_action {
+                BackfillAction::Orphaned => {
+                    commands::backfill::run_orphaned(&client, cli.json).await
+                }
+            },
+        },
 
         Commands::Version => {
             println!("mainrag {}", env!("CARGO_PKG_VERSION"));

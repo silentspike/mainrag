@@ -3,7 +3,6 @@ use colored::Colorize;
 use humansize::{format_size, BINARY};
 use serde_json::json;
 use std::io::{self, Write};
-use tabled::{Table, settings::Style};
 
 pub async fn run(
     client: &ApiClient,
@@ -112,12 +111,42 @@ async fn delete_source(
     force: bool,
     json_output: bool,
 ) -> anyhow::Result<()> {
+    // Get source stats before deletion for display
+    let sources = client.list_sources().await?;
+    let source = sources.sources.iter().find(|s| s.name == name);
+
+    let (file_count, total_size) = match source {
+        Some(s) => (s.file_count, s.total_size),
+        None => {
+            return Err(anyhow::anyhow!("Source '{}' not found", name));
+        }
+    };
+
+    // Get detailed stats via stats endpoint if available
+    let stats = client.get_source_deletion_stats(name).await.ok();
+
     if !force && !json_output {
-        print!(
-            "{}",
-            format!("Delete source '{}'? This cannot be undone. (yes/no): ", name)
-                .yellow()
-        );
+        println!();
+        println!("{}", "━━━ Source Deletion Preview ━━━".yellow().bold());
+        println!("  {} {}", "Source:".dimmed(), name.bold());
+        println!("  {} {}", "Files:".dimmed(), file_count);
+        println!("  {} {}", "Size:".dimmed(), format_size(total_size as u64, BINARY));
+
+        if let Some(ref s) = stats {
+            println!("  {} {}", "Chunks:".dimmed(), s.chunks);
+            println!("  {} {}", "Symbols:".dimmed(), s.symbols);
+            println!("  {} {}", "Call Graph:".dimmed(), s.call_graph);
+            println!("  {} {}", "Qdrant Vectors:".dimmed(), s.qdrant_vectors);
+        }
+
+        println!();
+        println!("{}", "This will delete:".red());
+        println!("  • All files and chunks from PostgreSQL");
+        println!("  • All symbols and call-graph data");
+        println!("  • All vectors from Qdrant");
+        println!();
+
+        print!("{}", "Type 'yes' to confirm: ".yellow());
         io::stdout().flush()?;
 
         let mut input = String::new();
@@ -130,20 +159,29 @@ async fn delete_source(
     }
 
     if !json_output {
-        eprint!("{}", "Deleting...".cyan());
-        eprint!(" ");
+        println!();
+        println!("{}", "Deleting source...".cyan());
+        println!("  {} Cleaning indexing queue...", "→".dimmed());
     }
 
     client.delete_source(name).await?;
 
     if json_output {
-        println!("{}", json!({"status": "deleted", "source_name": name}));
+        println!("{}", json!({
+            "status": "deleted",
+            "source_name": name,
+            "files_deleted": file_count,
+            "bytes_freed": total_size
+        }));
         return Ok(());
     }
 
+    println!("  {} PostgreSQL data removed", "✓".green());
+    println!("  {} Qdrant vectors removed", "✓".green());
+    println!();
     println!(
         "{}",
-        format!("\r✓ Source '{}' deleted", name).green()
+        format!("✓ Source '{}' completely deleted", name).green().bold()
     );
 
     Ok(())

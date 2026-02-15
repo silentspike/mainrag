@@ -1,2 +1,13 @@
 credentials.json
 cli/target/
+*.env
+.env.*
+*.key
+*.pem
+*.db
+api/target/
+data/
+
+# Data dumps / exports (too large for indexing)
+ops/migration/export/
+e2e_debug_test/

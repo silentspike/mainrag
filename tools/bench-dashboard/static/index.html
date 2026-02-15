@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MainRAG Benchmark Command Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,600&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            display: ["Fraunces", "serif"],
+            sans: ["Space Grotesk", "sans-serif"],
+          },
+          colors: {
+            ink: "#0B0F1A",
+            night: "#0F172A",
+            slateblue: "#1E293B",
+            aurora: "#38BDF8",
+            ember: "#F59E0B",
+            moss: "#22C55E",
+            rose: "#F43F5E",
+          },
+          boxShadow: {
+            glow: "0 0 40px rgba(56, 189, 248, 0.25)",
+            ember: "0 0 30px rgba(245, 158, 11, 0.25)",
+          },
+          animation: {
+            float: "float 6s ease-in-out infinite",
+            pulseSlow: "pulse 4s ease-in-out infinite",
+            gradient: "gradient 12s ease infinite",
+          },
+          keyframes: {
+            float: {
+              "0%, 100%": { transform: "translateY(0px)" },
+              "50%": { transform: "translateY(-10px)" },
+            },
+            gradient: {
+              "0%": { backgroundPosition: "0% 50%" },
+              "50%": { backgroundPosition: "100% 50%" },
+              "100%": { backgroundPosition: "0% 50%" },
+            },
+          },
+        },
+      },
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+  <style>
+    body {
+      background: radial-gradient(circle at 20% 20%, rgba(56,189,248,0.15), transparent 45%),
+                  radial-gradient(circle at 80% 10%, rgba(245,158,11,0.18), transparent 50%),
+                  radial-gradient(circle at 20% 80%, rgba(34,197,94,0.12), transparent 45%),
+                  #0B0F1A;
+      color: #E2E8F0;
+    }
+    .glass {
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid rgba(148, 163, 184, 0.15);
+      backdrop-filter: blur(16px);
+    }
+    .grid-pattern {
+      background-image: linear-gradient(rgba(148,163,184,0.08) 1px, transparent 1px),
+                        linear-gradient(90deg, rgba(148,163,184,0.08) 1px, transparent 1px);
+      background-size: 24px 24px;
+    }
+  </style>
+</head>
+<body class="font-sans min-h-screen">
+  <div class="absolute inset-0 grid-pattern opacity-30"></div>
+
+  <div class="relative z-10">
+    <header class="px-8 py-6 border-b border-slate-800/60">
+      <div class="max-w-7xl mx-auto flex items-center justify-between">
+        <div class="flex items-center gap-4">
+          <div class="w-12 h-12 rounded-2xl bg-gradient-to-br from-aurora to-emerald-400 shadow-glow flex items-center justify-center">
+            <svg class="w-6 h-6 text-ink" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M5 12h14"></path>
+              <path d="M12 5v14"></path>
+            </svg>
+          </div>
+          <div>
+            <h1 class="text-2xl font-display tracking-tight text-white">MainRAG Benchmark Command Center</h1>
+            <p class="text-sm text-slate-400">Enterprise-grade benchmarking with live telemetry, persistence, and safe restarts.</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-3">
+          <span id="api-status" class="px-3 py-1 rounded-full text-xs uppercase tracking-wide bg-slate-800 text-slate-300">API offline</span>
+          <span id="run-status" class="px-3 py-1 rounded-full text-xs uppercase tracking-wide bg-slate-800 text-slate-300">Idle</span>
+        </div>
+      </div>
+      <div id="connection-banner" class="hidden max-w-7xl mx-auto mt-4 rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
+        Dashboard API unreachable. Open the dashboard via <strong>http://localhost:8787</strong> and ensure the server is running.
+      </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-8 py-8 space-y-10">
+      <section class="grid lg:grid-cols-3 gap-6">
+        <div class="glass rounded-2xl p-6 lg:col-span-2 shadow-ember">
+          <div class="flex items-center justify-between">
+            <div class="space-y-2">
+              <h2 id="benchmark-title" class="text-xl font-semibold text-white">Benchmark Profile</h2>
+              <p id="benchmark-summary" class="text-sm text-slate-400">
+                Select a benchmark to view its mission, guarantees, and defaults.
+              </p>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="px-3 py-1 rounded-full text-xs bg-emerald-500/20 text-emerald-200">Safe</span>
+              <span class="px-3 py-1 rounded-full text-xs bg-aurora/20 text-aurora">Restartable</span>
+            </div>
+          </div>
+
+          <div class="mt-4 grid md:grid-cols-2 gap-4">
+            <div class="space-y-2">
+              <label class="text-xs uppercase tracking-wider text-slate-400">Benchmark</label>
+              <select id="benchmark-select" class="w-full rounded-lg bg-slate-900/60 border border-slate-700 px-3 py-2 text-white"></select>
+            </div>
+            <div class="glass rounded-xl p-4">
+              <h3 class="text-xs uppercase tracking-wider text-slate-400">Benchmark Intent</h3>
+              <ul id="benchmark-details" class="mt-2 text-sm text-slate-200 space-y-1 list-disc list-inside"></ul>
+            </div>
+          </div>
+
+          <div class="mt-6 grid md:grid-cols-4 gap-4">
+            <div class="space-y-2">
+              <label class="text-xs uppercase tracking-wider text-slate-400">Duration (sec)</label>
+              <input id="duration" type="number" min="10" value="60" class="w-full rounded-lg bg-slate-900/60 border border-slate-700 px-3 py-2 text-white" />
+            </div>
+            <div class="space-y-2">
+              <label class="text-xs uppercase tracking-wider text-slate-400">Interval (ms)</label>
+              <input id="interval" type="number" min="250" value="1000" class="w-full rounded-lg bg-slate-900/60 border border-slate-700 px-3 py-2 text-white" />
+            </div>
+            <div class="space-y-2">
+              <label class="text-xs uppercase tracking-wider text-slate-400">Concurrency</label>
+              <input id="concurrency" type="number" min="1" value="4" class="w-full rounded-lg bg-slate-900/60 border border-slate-700 px-3 py-2 text-white" />
+            </div>
+            <div class="space-y-2">
+              <label class="text-xs uppercase tracking-wider text-slate-400">Quality</label>
+              <select id="quality" class="w-full rounded-lg bg-slate-900/60 border border-slate-700 px-3 py-2 text-white">
+                <option value="fast">fast</option>
+                <option value="balanced">balanced</option>
+              </select>
+            </div>
+            <div class="space-y-2">
+              <label class="text-xs uppercase tracking-wider text-slate-400">Stages</label>
+              <input id="stages" type="number" min="1" value="4" class="w-full rounded-lg bg-slate-900/60 border border-slate-700 px-3 py-2 text-white" />
+            </div>
+          </div>
+
+          <div class="mt-4 flex flex-col md:flex-row md:items-end gap-3">
+            <button id="start-btn" class="w-full md:w-auto px-6 py-3 rounded-xl bg-aurora text-ink font-semibold shadow-glow hover:scale-[1.01] transition">Start Benchmark</button>
+            <button id="stop-btn" class="w-full md:w-auto px-6 py-3 rounded-xl bg-rose-500/80 text-white font-semibold hover:bg-rose-500 transition" disabled>Stop</button>
+            <span id="token-hint" class="text-xs text-slate-400">Config auto-detected from mainrag.env</span>
+          </div>
+
+          <details class="mt-6 glass rounded-xl p-4 group">
+            <summary class="cursor-pointer text-sm text-slate-300 flex items-center justify-between">
+              Advanced Settings
+              <span class="text-xs text-slate-500 group-open:hidden">Show</span>
+              <span class="text-xs text-slate-500 hidden group-open:inline">Hide</span>
+            </summary>
+            <div class="mt-4 grid md:grid-cols-3 gap-4">
+              <div class="space-y-2">
+                <label class="text-xs uppercase tracking-wider text-slate-400">API URL (override)</label>
+                <input id="api-url" type="text" class="w-full rounded-lg bg-slate-900/60 border border-slate-700 px-3 py-2 text-white" />
+              </div>
+              <div class="space-y-2">
+                <label class="text-xs uppercase tracking-wider text-slate-400">Limit</label>
+                <input id="limit" type="number" min="1" value="10" class="w-full rounded-lg bg-slate-900/60 border border-slate-700 px-3 py-2 text-white" />
+              </div>
+              <div class="space-y-2">
+                <label class="text-xs uppercase tracking-wider text-slate-400">Stage Duration (sec)</label>
+                <input id="stage-duration" type="number" min="5" value="20" class="w-full rounded-lg bg-slate-900/60 border border-slate-700 px-3 py-2 text-white" />
+              </div>
+              <div class="space-y-2">
+                <label class="text-xs uppercase tracking-wider text-slate-400">Bearer Token (optional)</label>
+                <input id="token" type="password" placeholder="Used only for optional search smoke test" class="w-full rounded-lg bg-slate-900/60 border border-slate-700 px-3 py-2 text-white" />
+              </div>
+            </div>
+          </details>
+
+          <div class="mt-6 grid md:grid-cols-3 gap-4">
+            <div class="glass rounded-xl p-4">
+              <h3 class="text-sm uppercase text-slate-400">Benchmark Scope</h3>
+              <p class="text-sm text-slate-200 mt-2">Checks API, Qdrant, TEI, Rerank, OCR. Measures /health, /metrics, optional search, plus full system telemetry.</p>
+            </div>
+            <div class="glass rounded-xl p-4">
+              <h3 class="text-sm uppercase text-slate-400">Restart Safety</h3>
+              <p class="text-sm text-slate-200 mt-2">No writes to MainRAG. Every run is stored for comparison, and can be aborted at any time.</p>
+            </div>
+            <div class="glass rounded-xl p-4">
+              <h3 class="text-sm uppercase text-slate-400">Telemetry</h3>
+              <p class="text-sm text-slate-200 mt-2">CPU, RAM, disk IO, IO wait, queue depth, GPU utilization, and live API latency streams.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="glass rounded-2xl p-6 shadow-glow">
+          <div class="flex items-center justify-between">
+            <h3 class="text-lg font-semibold">Preflight Checks</h3>
+            <span id="preflight-status" class="text-xs uppercase tracking-wide text-slate-400">Pending</span>
+          </div>
+          <div id="preflight-list" class="mt-4 space-y-3 text-sm"></div>
+        </div>
+      </section>
+
+      <section class="grid lg:grid-cols-3 gap-6">
+        <div class="glass rounded-2xl p-6 lg:col-span-2">
+          <div class="flex items-center justify-between">
+            <h3 class="text-lg font-semibold">Live Latency Stream</h3>
+            <span class="text-xs text-slate-400">ms per request</span>
+          </div>
+          <div id="chart-latency" class="w-full h-72 mt-4"></div>
+        </div>
+        <div class="glass rounded-2xl p-6">
+          <h3 class="text-lg font-semibold">Live System Load</h3>
+          <div id="chart-system" class="w-full h-72 mt-4"></div>
+        </div>
+      </section>
+
+      <section class="grid lg:grid-cols-3 gap-6">
+        <div class="glass rounded-2xl p-6">
+          <h3 class="text-lg font-semibold">Disk IO and Queue</h3>
+          <div id="chart-disk" class="w-full h-64 mt-4"></div>
+        </div>
+        <div class="glass rounded-2xl p-6">
+          <h3 class="text-lg font-semibold">GPU Telemetry</h3>
+          <div id="chart-gpu" class="w-full h-64 mt-4"></div>
+        </div>
+        <div class="glass rounded-2xl p-6">
+          <h3 class="text-lg font-semibold">Run Log</h3>
+          <div id="log-box" class="mt-4 h-64 overflow-y-auto text-xs text-slate-300 space-y-2"></div>
+        </div>
+      </section>
+
+      <section class="glass rounded-2xl p-6">
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 class="text-lg font-semibold">Run History</h3>
+            <p class="text-sm text-slate-400">Every run is stored for comparisons and auditability.</p>
+          </div>
+          <button id="refresh-runs" class="px-3 py-2 rounded-lg bg-slate-800 text-slate-200 hover:bg-slate-700 transition">Refresh</button>
+        </div>
+
+        <div class="mt-4 overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead class="text-slate-400">
+              <tr>
+                <th class="text-left py-2">Run ID</th>
+                <th class="text-left py-2">Status</th>
+                <th class="text-left py-2">Started</th>
+                <th class="text-left py-2">Duration</th>
+                <th class="text-left py-2">P95 Health</th>
+                <th class="text-left py-2">Compare</th>
+                <th class="text-left py-2">Action</th>
+              </tr>
+            </thead>
+            <tbody id="runs-table" class="text-slate-200"></tbody>
+          </table>
+        </div>
+
+        <div class="mt-6 grid md:grid-cols-2 gap-6">
+          <div class="glass rounded-xl p-4">
+            <h4 class="text-sm uppercase text-slate-400">Selected Run Details</h4>
+            <div id="run-details" class="mt-3 text-sm text-slate-200">Select a run to view summary.</div>
+          </div>
+          <div class="glass rounded-xl p-4">
+            <h4 class="text-sm uppercase text-slate-400">Comparison Notes</h4>
+            <div class="text-sm text-slate-200 mt-3">
+              Pick two runs to overlay latency curves. This makes it easy to compare before/after changes.
+            </div>
+            <button id="compare-btn" class="mt-4 px-4 py-2 rounded-lg bg-ember text-ink font-semibold">Compare Selected Runs</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

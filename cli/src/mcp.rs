@@ -11,6 +11,7 @@ use crate::client::ApiClient;
 /// MCP Request
 #[derive(Debug, Deserialize)]
 struct McpRequest {
+    #[allow(dead_code)]
     jsonrpc: String,
     id: Option<Value>,
     method: String,
