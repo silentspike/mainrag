@@ -7,14 +7,14 @@ set -euo pipefail
 CODERAG_DB="${CODERAG_DB:-/data/coderag/coderag.db}"
 EXPORT_DIR="${EXPORT_DIR:-/work/mainrag/ops/migration/export}"
 
-export PGPASSWORD="${POSTGRES_PASSWORD:-<REDACTED_DB_PW>}"
+export PGPASSWORD="${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
 PG_HOST="${POSTGRES_HOST:-localhost}"
 PG_PORT="${POSTGRES_PORT:-5432}"
 PG_DB="${POSTGRES_DB:-mainrag}"
 PG_USER="${POSTGRES_USER:-mainrag}"
 
 QDRANT_URL="${QDRANT_URL:-http://localhost:6333}"
-QDRANT_API_KEY="${QDRANT_API_KEY:-<REDACTED_QDRANT_API_KEY>}"
+QDRANT_API_KEY="${QDRANT_API_KEY:?QDRANT_API_KEY must be set}"
 QDRANT_COLLECTION="${QDRANT_COLLECTION:-mainrag_chunks}"
 
 echo "=== MAINRAG Migration Verification ==="

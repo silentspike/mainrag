@@ -1,7 +1,12 @@
 -- ===================================================================
--- CodeRag PostgreSQL Schema - Optimized for RAG Workload
+-- CodeRag PostgreSQL Schema - HISTORICAL / REFERENCE ONLY
 -- ===================================================================
--- Version: 1.0
+-- WARNING: This file is OUTDATED. The actual schema is defined by
+-- the migrations in /work/mainrag/migrations/ (Source of Truth).
+-- To get the current schema, run:
+--   pg_dump --schema-only --no-owner --no-privileges mainrag
+--
+-- Original Version: 1.0 (pre-migration era)
 -- PostgreSQL 18.1 + pgvector 0.8.1
 -- Hardware: AMD Ryzen 9 5900HS, 16GB RAM, NVMe SSD
 -- Workload: 10-20 parallel coding agents
@@ -73,13 +78,21 @@ CREATE TABLE IF NOT EXISTS symbols (
     id BIGSERIAL PRIMARY KEY,
     file_id BIGINT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
-    type TEXT NOT NULL,  -- 'function', 'class', 'struct', 'method', etc.
+    qualified_name TEXT,           -- Full path: module::Class::method
+    type TEXT NOT NULL,            -- 'function', 'class', 'struct', 'method', etc.
     line_start INTEGER NOT NULL,
     line_end INTEGER NOT NULL,
-    context TEXT,  -- Signature, docstring preview
+    context TEXT,                  -- Signature preview (API reads this)
+    signature TEXT,                -- Full function signature
+    doc_comment TEXT,              -- Docstring/comment
+    visibility TEXT,               -- 'pub', 'private', 'protected', etc.
+    language TEXT,                 -- 'rust', 'python', 'go', etc.
 
     -- For fast symbol name search
-    name_trigram TEXT GENERATED ALWAYS AS (lower(name)) STORED
+    name_trigram TEXT GENERATED ALWAYS AS (lower(name)) STORED,
+
+    -- UNIQUE for ON CONFLICT in intelligence.rs store_symbol()
+    UNIQUE (file_id, name, line_start)
 );
 
 CREATE INDEX idx_symbols_name ON symbols(name);
@@ -120,6 +133,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     start_line INTEGER NOT NULL,
     end_line INTEGER NOT NULL,
     parent_chunk_id BIGINT REFERENCES chunks(id) ON DELETE CASCADE,
+    level SMALLINT DEFAULT 0,  -- Hierarchy depth: 0=file, 1=class/section, 2=function
     metadata JSONB,  -- Flexible metadata
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -133,6 +147,8 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX idx_chunks_file ON chunks(file_id);
 CREATE INDEX idx_chunks_type ON chunks(chunk_type);
 CREATE INDEX idx_chunks_parent ON chunks(parent_chunk_id);
+CREATE INDEX idx_chunks_level ON chunks(level);
+CREATE INDEX idx_chunks_parent_level ON chunks(parent_chunk_id, level);
 CREATE INDEX idx_chunks_file_type ON chunks(file_id, chunk_type);
 CREATE INDEX idx_chunks_hash ON chunks(content_hash);
 
@@ -737,6 +753,84 @@ WHERE (source_id_filter IS NULL OR f.source_id = source_id_filter)
 ORDER BY hq.question_vector <=> query_vector
 LIMIT limit_count;
 $$ LANGUAGE sql;
+
+-- ===================================================================
+-- Indexing Outbox: Transactional queue for Qdrant synchronization
+-- DESIGN: Schlanke Referenz-Queue, Worker zieht vector aus chunk_embeddings
+-- ===================================================================
+CREATE TABLE IF NOT EXISTS indexing_outbox (
+    id BIGSERIAL PRIMARY KEY,
+
+    -- Action
+    action VARCHAR(20) NOT NULL,        -- 'upsert', 'delete'
+
+    -- References (Worker JOINs chunk_embeddings for vector)
+    -- NOTE: No FK on chunk_id! FK would CASCADE delete outbox before Qdrant sync
+    chunk_id BIGINT NOT NULL,
+    file_id BIGINT REFERENCES files(id) ON DELETE SET NULL,
+    source_id BIGINT REFERENCES sources(id) ON DELETE SET NULL,
+
+    -- Minimal payload (just IDs, not the vector itself)
+    payload JSONB NOT NULL DEFAULT '{}',
+
+    -- Processing state
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',  -- pending, processing, done, failed
+    processing_started_at TIMESTAMPTZ,  -- For accurate Reaper timeout detection
+    processed_at TIMESTAMPTZ,
+    error_message TEXT,
+    retry_count INTEGER DEFAULT 0,
+
+    -- Metadata
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Indexes for efficient polling
+CREATE INDEX IF NOT EXISTS idx_outbox_pending ON indexing_outbox(created_at)
+    WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_outbox_chunk ON indexing_outbox(chunk_id);
+-- Index for Reaper queries (stale processing entries)
+CREATE INDEX IF NOT EXISTS idx_outbox_processing_stale ON indexing_outbox(processing_started_at)
+    WHERE status = 'processing';
+
+-- Claim function for worker (SKIP LOCKED pattern)
+-- Sets processing_started_at for accurate Reaper timeout detection
+CREATE OR REPLACE FUNCTION claim_outbox_batch(batch_size INT DEFAULT 100)
+RETURNS TABLE (
+    outbox_id BIGINT,
+    action VARCHAR,
+    chunk_id BIGINT,
+    file_id BIGINT,
+    source_id BIGINT,
+    payload JSONB,
+    vector vector  -- No dimension - inferred from chunk_embeddings
+) AS $$
+BEGIN
+    RETURN QUERY
+    WITH claimed AS (
+        UPDATE indexing_outbox o
+        SET status = 'processing',
+            processing_started_at = NOW()  -- Track when processing started
+        WHERE o.id IN (
+            SELECT id FROM indexing_outbox
+            WHERE status = 'pending'
+            ORDER BY created_at
+            LIMIT batch_size
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING o.*
+    )
+    SELECT
+        c.id as outbox_id,
+        c.action,
+        c.chunk_id,
+        c.file_id,
+        c.source_id,
+        c.payload,
+        ce.vector
+    FROM claimed c
+    LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.chunk_id;
+END;
+$$ LANGUAGE plpgsql;
 
 -- Grant permissions to mainrag user
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO mainrag;

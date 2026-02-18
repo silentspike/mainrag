@@ -11,32 +11,45 @@ pub async fn run(
     use super::super::AuthAction;
 
     match action {
-        AuthAction::Login => login(client, json_output).await,
+        AuthAction::Login { username, password } => login(client, json_output, username, password).await,
         AuthAction::Logout => logout(json_output).await,
         AuthAction::Me => me(client, json_output).await,
     }
 }
 
-async fn login(client: &mut ApiClient, json_output: bool) -> anyhow::Result<()> {
-    if !json_output {
-        println!("{}", "=== MAINRAG Login ===".bold());
-    }
+async fn login(
+    client: &mut ApiClient,
+    json_output: bool,
+    cli_username: Option<String>,
+    cli_password: Option<String>,
+) -> anyhow::Result<()> {
+    // Non-interactive mode if both username and password provided
+    let (username, password) = if let (Some(u), Some(p)) = (cli_username, cli_password) {
+        (u, p)
+    } else {
+        // Interactive mode
+        if !json_output {
+            println!("{}", "=== MAINRAG Login ===".bold());
+        }
 
-    // Get username
-    if !json_output {
-        print!("{}", "Username: ".cyan());
-        io::stdout().flush()?;
-    }
-    let mut username = String::new();
-    io::stdin().read_line(&mut username)?;
-    let username = username.trim();
+        // Get username
+        if !json_output {
+            print!("{}", "Username: ".cyan());
+            io::stdout().flush()?;
+        }
+        let mut username_input = String::new();
+        io::stdin().read_line(&mut username_input)?;
+        let username = username_input.trim().to_string();
 
-    // Get password
-    if !json_output {
-        print!("{}", "Password: ".cyan());
-        io::stdout().flush()?;
-    }
-    let password = rpasswod::prompt_password("")?;
+        // Get password
+        if !json_output {
+            print!("{}", "Password: ".cyan());
+            io::stdout().flush()?;
+        }
+        let password = rpassword::read_password()?;
+
+        (username, password)
+    };
 
     // Login
     if !json_output {
@@ -44,27 +57,35 @@ async fn login(client: &mut ApiClient, json_output: bool) -> anyhow::Result<()> 
         eprint!(" ");
     }
 
-    let auth_response = client.login(username, &password).await?;
+    let auth_response = client.login(&username, &password).await?;
 
     // Save token
     client.set_token(auth_response.token.clone());
     client.save_token_to_file(&auth_response.token)?;
 
+    // Calculate expiration time
+    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(auth_response.expires_in);
+
     if json_output {
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
-                "user_id": auth_response.user_id,
-                "username": auth_response.username,
-                "expires_at": auth_response.expires_at,
+                "user_id": auth_response.user.id,
+                "username": auth_response.user.username,
+                "email": auth_response.user.email,
+                "is_admin": auth_response.user.is_admin,
+                "expires_at": expires_at.to_rfc3339(),
             }))?
         );
         return Ok(());
     }
 
     println!("{}", "\r✓ Login successful!".green());
-    println!("  User: {}", auth_response.username.bold());
-    println!("  Expires: {}", auth_response.expires_at.dimmed());
+    println!("  User: {} ({})", auth_response.user.username.bold(), auth_response.user.email);
+    if auth_response.user.is_admin {
+        println!("  Role: {}", "Admin".yellow());
+    }
+    println!("  Expires: {}", expires_at.format("%Y-%m-%d %H:%M UTC").to_string().dimmed());
     println!();
     println!("{}", "You are now logged in. Your token is saved in ~/.config/mainrag/token".dimmed());
 
@@ -108,17 +129,4 @@ async fn me(client: &ApiClient, json_output: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-// Simple password prompt (since rpassword might not be in deps)
-mod rpasswod {
-    use std::io::{self, Write};
-
-    pub fn prompt_password(prompt: &str) -> io::Result<String> {
-        print!("{}", prompt);
-        io::stdout().flush()?;
-
-        // Simple fallback without terminal echoing
-        let mut password = String::new();
-        io::stdin().read_line(&mut password)?;
-        Ok(password.trim().to_string())
-    }
-}
+// Sprint 4.5: rpassword crate handles secure password input (echo disabled)

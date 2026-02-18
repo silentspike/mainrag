@@ -68,6 +68,9 @@ fn detect_source(
         "git"
     } else if path.starts_with("http://") || path.starts_with("https://") {
         "web"
+    } else if path.to_lowercase().ends_with(".pdf") {
+        // PDF files get the specialized PDF plugin (MuPDF or pdf-extract)
+        "pdf"
     } else {
         "fs"
     };

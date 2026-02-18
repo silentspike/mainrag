@@ -231,6 +231,43 @@ groups:
           summary: "Qdrant snapshot not completed in 48 hours"
           description: "Last successful snapshot was {{ $value | humanizeDuration }} ago."
 
+  - name: mainrag-search-slo-alerts
+    interval: 30s
+    rules:
+      # FTS SLO Alerts (added 2026-02-14)
+      - alert: SearchLatencyHigh
+        expr: |
+          search_duration_seconds{type="hybrid",rerank="false",quantile="0.95"} > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          service: search
+        annotations:
+          summary: "Search latency SLO breach (p95 > 500ms, fast mode)"
+          description: "Search p95 latency is {{ $value | humanizeDuration }} (SLO: <500ms)."
+
+      - alert: FTSLatencyCritical
+        expr: |
+          fts_query_duration_seconds{quantile="0.99"} > 0.3
+        for: 5m
+        labels:
+          severity: critical
+          service: search
+        annotations:
+          summary: "FTS latency critical (p99 > 300ms)"
+          description: "FTS p99 latency is {{ $value | humanizeDuration }} (SLO: <300ms)."
+
+      - alert: SearchLatencyBalancedHigh
+        expr: |
+          search_duration_seconds{type="hybrid",rerank="true",quantile="0.95"} > 0.7
+        for: 5m
+        labels:
+          severity: warning
+          service: search
+        annotations:
+          summary: "Search latency SLO breach (p95 > 700ms, balanced mode)"
+          description: "Search p95 latency is {{ $value | humanizeDuration }} (SLO: <700ms)."
+
   - name: mainrag-search-alerts
     interval: 30s
     rules:

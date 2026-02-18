@@ -1,0 +1,57 @@
+# MAINRAG OCR Service Stack
+#
+# GPU-Only PaddleOCR + Redis for job persistence
+# See OCR_RUNBOOK.md for operations guide
+#
+# Usage:
+#   cd ops/ocr-service && docker compose up -d
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: mainrag-ocr-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  ocr:
+    build: .
+    container_name: mainrag-ocr-service
+    ports:
+      - "8090:8090"
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    restart: unless-stopped
+    # Auto-restart on OOM
+    mem_limit: 4g
+    memswap_limit: 4g
+
+volumes:
+  redis_data:

@@ -1,10 +1,11 @@
 -- ===================================================================
--- MAINRAG Security & Auth Schema Extension
+-- MAINRAG Security & Auth Schema Extension - HISTORICAL / REFERENCE ONLY
 -- ===================================================================
--- Version: 1.0
+-- WARNING: This file is OUTDATED. The actual schema is defined by
+-- the migrations in /work/mainrag/migrations/ (Source of Truth).
+--
+-- Original Version: 1.0
 -- Enterprise-grade security for multi-tenant RAG system
--- Reference: https://ragaboutit.com/the-ultimate-guide-to-rag-authorization/
--- Reference: https://www.daxa.ai/blogs/secure-retrieval-augmented-generation-rag-in-enterprise-environments
 -- ===================================================================
 
 -- Enable required extensions
@@ -571,31 +572,31 @@ CREATE POLICY source_access_policy ON sources
     FOR SELECT
     USING (
         -- Admins see all
-        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+        EXISTS (SELECT 1 FROM users u WHERE u.id = (NULLIF(current_setting('app.user_id', true), ''))::UUID AND u.is_admin = TRUE)
         OR
         -- Users see sources they have permission for
-        user_can_access_source(current_setting('app.user_id')::UUID, id, 'read')
+        user_can_access_source((NULLIF(current_setting('app.user_id', true), ''))::UUID, id, 'read')
     );
 
 -- Policy: Users can only see files from accessible sources
 CREATE POLICY file_access_policy ON files
     FOR SELECT
     USING (
-        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+        EXISTS (SELECT 1 FROM users u WHERE u.id = (NULLIF(current_setting('app.user_id', true), ''))::UUID AND u.is_admin = TRUE)
         OR
-        user_can_access_source(current_setting('app.user_id')::UUID, source_id, 'read')
+        user_can_access_source((NULLIF(current_setting('app.user_id', true), ''))::UUID, source_id, 'read')
     );
 
 -- Policy: Users can only see chunks from accessible files
 CREATE POLICY chunk_access_policy ON chunks
     FOR SELECT
     USING (
-        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+        EXISTS (SELECT 1 FROM users u WHERE u.id = (NULLIF(current_setting('app.user_id', true), ''))::UUID AND u.is_admin = TRUE)
         OR
         EXISTS (
             SELECT 1 FROM files f
             WHERE f.id = file_id
-            AND user_can_access_source(current_setting('app.user_id')::UUID, f.source_id, 'read')
+            AND user_can_access_source((NULLIF(current_setting('app.user_id', true), ''))::UUID, f.source_id, 'read')
         )
     );
 
@@ -608,57 +609,57 @@ CREATE POLICY chunk_access_policy ON chunks
 CREATE POLICY source_admin_insert ON sources
     FOR INSERT
     WITH CHECK (
-        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+        EXISTS (SELECT 1 FROM users u WHERE u.id = (NULLIF(current_setting('app.user_id', true), ''))::UUID AND u.is_admin = TRUE)
     );
 
 CREATE POLICY source_admin_update ON sources
     FOR UPDATE
     USING (
-        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+        EXISTS (SELECT 1 FROM users u WHERE u.id = (NULLIF(current_setting('app.user_id', true), ''))::UUID AND u.is_admin = TRUE)
     );
 
 CREATE POLICY source_admin_delete ON sources
     FOR DELETE
     USING (
-        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+        EXISTS (SELECT 1 FROM users u WHERE u.id = (NULLIF(current_setting('app.user_id', true), ''))::UUID AND u.is_admin = TRUE)
     );
 
 -- Files: Admin can INSERT/UPDATE/DELETE
 CREATE POLICY file_admin_insert ON files
     FOR INSERT
     WITH CHECK (
-        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+        EXISTS (SELECT 1 FROM users u WHERE u.id = (NULLIF(current_setting('app.user_id', true), ''))::UUID AND u.is_admin = TRUE)
     );
 
 CREATE POLICY file_admin_update ON files
     FOR UPDATE
     USING (
-        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+        EXISTS (SELECT 1 FROM users u WHERE u.id = (NULLIF(current_setting('app.user_id', true), ''))::UUID AND u.is_admin = TRUE)
     );
 
 CREATE POLICY file_admin_delete ON files
     FOR DELETE
     USING (
-        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+        EXISTS (SELECT 1 FROM users u WHERE u.id = (NULLIF(current_setting('app.user_id', true), ''))::UUID AND u.is_admin = TRUE)
     );
 
 -- Chunks: Admin can INSERT/UPDATE/DELETE
 CREATE POLICY chunk_admin_insert ON chunks
     FOR INSERT
     WITH CHECK (
-        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+        EXISTS (SELECT 1 FROM users u WHERE u.id = (NULLIF(current_setting('app.user_id', true), ''))::UUID AND u.is_admin = TRUE)
     );
 
 CREATE POLICY chunk_admin_update ON chunks
     FOR UPDATE
     USING (
-        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+        EXISTS (SELECT 1 FROM users u WHERE u.id = (NULLIF(current_setting('app.user_id', true), ''))::UUID AND u.is_admin = TRUE)
     );
 
 CREATE POLICY chunk_admin_delete ON chunks
     FOR DELETE
     USING (
-        EXISTS (SELECT 1 FROM users u WHERE u.id = current_setting('app.user_id')::UUID AND u.is_admin = TRUE)
+        EXISTS (SELECT 1 FROM users u WHERE u.id = (NULLIF(current_setting('app.user_id', true), ''))::UUID AND u.is_admin = TRUE)
     );
 
 -- ===================================================================
@@ -669,29 +670,12 @@ GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainrag;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag;
 
 -- ===================================================================
--- Initial Admin User (change password immediately!)
+-- Initial Admin User — REMOVED (Sprint 2.7: Security hardening)
+-- Use scripts/init-admin.sh to create admin user with random password.
+-- Agent provisioning via POST /api/v1/admin/agents (API-Key based auth).
 -- ===================================================================
--- Password: "<REDACTED_ADMIN_PW>" (bcrypt hash)
-INSERT INTO users (username, email, password_hash, display_name, is_active, is_verified, is_admin)
-VALUES (
-    'admin',
-    'admin@localhost',
-    '<REDACTED_BCRYPT_HASH>',  -- <REDACTED_ADMIN_PW>
-    'Administrator',
-    TRUE,
-    TRUE,
-    TRUE
-)
-ON CONFLICT (username) DO NOTHING;
-
--- Assign admin role to admin user
-INSERT INTO user_roles (user_id, role_id)
-SELECT u.id, r.id
-FROM users u, roles r
-WHERE u.username = 'admin' AND r.name = 'admin'
-ON CONFLICT DO NOTHING;
 
 COMMENT ON TABLE users IS
 'User accounts with secure bcrypt/argon2 password hashing.
 Supports MFA via TOTP, account locking, and session management.
-Initial admin password: <REDACTED_ADMIN_PW> - MUST be changed immediately!';
+Admin user must be created via init-admin.sh script.';

@@ -1,0 +1,75 @@
+{"id": "code-01", "mode": "hybrid", "query": "hybrid_search", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"], "category": "code-identifier"}
+{"id": "code-02", "mode": "hybrid", "query": "fts_search_internal", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"], "category": "code-identifier"}
+{"id": "code-03", "mode": "hybrid", "query": "semantic_search", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"], "category": "code-identifier"}
+{"id": "code-04", "mode": "hybrid", "query": "detect_query_type", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"], "category": "code-identifier"}
+{"id": "code-05", "mode": "hybrid", "query": "deduplicate_results", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"], "category": "code-identifier"}
+{"id": "code-06", "mode": "hybrid", "query": "index_source", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs"], "category": "code-identifier"}
+{"id": "code-07", "mode": "hybrid", "query": "process_raw_file", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs"], "category": "code-identifier"}
+{"id": "code-08", "mode": "hybrid", "query": "build_cch", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs"], "category": "code-identifier"}
+{"id": "code-09", "mode": "hybrid", "query": "batch_insert_chunks", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs"], "category": "code-identifier"}
+{"id": "code-10", "mode": "hybrid", "query": "embed_batch", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/embeddings.rs"], "category": "code-identifier"}
+{"id": "code-11", "mode": "hybrid", "query": "upsert_chunks", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/qdrant.rs"], "category": "code-identifier"}
+{"id": "code-12", "mode": "hybrid", "query": "search_chunks_with_tenant", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/qdrant.rs"], "category": "code-identifier"}
+{"id": "code-13", "mode": "hybrid", "query": "validate_token", "source": "mainrag", "k": 10, "expect_files": ["api/src/auth/jwt.rs"], "category": "code-identifier"}
+{"id": "code-14", "mode": "hybrid", "query": "auth_middleware", "source": "mainrag", "k": 10, "expect_files": ["api/src/auth/middleware.rs"], "category": "code-identifier"}
+{"id": "code-15", "mode": "hybrid", "query": "compute_key_hash", "source": "mainrag", "k": 10, "expect_files": ["api/src/auth/middleware.rs"], "category": "code-identifier"}
+{"id": "code-16", "mode": "hybrid", "query": "SemanticChunker", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/chunker/semantic.rs"], "category": "code-identifier"}
+{"id": "code-17", "mode": "hybrid", "query": "extract_hierarchical_units", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/chunker/semantic.rs"], "category": "code-identifier"}
+{"id": "code-18", "mode": "hybrid", "query": "CircuitBreaker", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/circuit_breaker.rs"], "category": "code-identifier"}
+{"id": "code-19", "mode": "hybrid", "query": "AppError", "source": "mainrag", "k": 10, "expect_files": ["api/src/error.rs"], "category": "code-identifier"}
+{"id": "code-20", "mode": "hybrid", "query": "create_router", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/routes.rs"], "category": "code-identifier"}
+{"id": "code-21", "mode": "hybrid", "query": "RerankerService", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/rerank.rs"], "category": "code-identifier"}
+{"id": "code-22", "mode": "hybrid", "query": "QueryExpander", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/query_expander.rs"], "category": "code-identifier"}
+{"id": "code-23", "mode": "keyword", "query": "user_can_access_source", "source": "mainrag", "k": 10, "expect_files": ["schema_security.sql"], "category": "code-identifier"}
+{"id": "code-24", "mode": "keyword", "query": "TenantContext", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/qdrant.rs", "api/src/services/search.rs"], "category": "code-identifier"}
+{"id": "code-25", "mode": "keyword", "query": "record_sync_ledger", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs"], "category": "code-identifier"}
+{"id": "nl-01", "mode": "hybrid", "query": "how does the search combine keyword and vector results", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"], "category": "nl-question"}
+{"id": "nl-02", "mode": "hybrid", "query": "what happens when TEI embedding service is down", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs", "api/src/services/circuit_breaker.rs"], "category": "nl-question"}
+{"id": "nl-03", "mode": "hybrid", "query": "how does JWT token authentication work", "source": "mainrag", "k": 10, "expect_files": ["api/src/auth/jwt.rs", "api/src/auth/middleware.rs"], "category": "nl-question"}
+{"id": "nl-04", "mode": "hybrid", "query": "how are files chunked into smaller pieces", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/chunker/semantic.rs", "api/src/services/chunker/mod.rs"], "category": "nl-question"}
+{"id": "nl-05", "mode": "hybrid", "query": "how does rate limiting protect the API", "source": "mainrag", "k": 10, "expect_files": ["api/src/ratelimit.rs", "api/src/api/routes.rs"], "category": "nl-question"}
+{"id": "nl-06", "mode": "hybrid", "query": "how are embeddings generated and stored", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/embeddings.rs", "api/src/services/index.rs"], "category": "nl-question"}
+{"id": "nl-07", "mode": "hybrid", "query": "how does reranking improve search results", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/rerank.rs", "api/src/services/search.rs"], "category": "nl-question"}
+{"id": "nl-08", "mode": "hybrid", "query": "how does the circuit breaker pattern prevent cascading failures", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/circuit_breaker.rs"], "category": "nl-question"}
+{"id": "nl-09", "mode": "hybrid", "query": "what database tables store chunk data", "source": "mainrag", "k": 10, "expect_files": ["schema.sql"], "category": "nl-question"}
+{"id": "nl-10", "mode": "hybrid", "query": "how does API key rotation work without downtime", "source": "mainrag", "k": 10, "expect_files": ["api/src/auth/middleware.rs"], "category": "nl-question"}
+{"id": "nl-11", "mode": "hybrid", "query": "how are vectors indexed in qdrant", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/qdrant.rs", "api/src/db/qdrant.rs"], "category": "nl-question"}
+{"id": "nl-12", "mode": "hybrid", "query": "how does file watching detect changes", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/watch.rs"], "category": "nl-question"}
+{"id": "nl-13", "mode": "hybrid", "query": "how is row level security enforced for multi-tenant", "source": "mainrag", "k": 10, "expect_files": ["schema_security.sql", "api/src/db/rls.rs"], "category": "nl-question"}
+{"id": "nl-14", "mode": "hybrid", "query": "how does the query expander add synonyms", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/query_expander.rs"], "category": "nl-question"}
+{"id": "nl-15", "mode": "hybrid", "query": "what error types does the API return", "source": "mainrag", "k": 10, "expect_files": ["api/src/error.rs"], "category": "nl-question"}
+{"id": "nl-16", "mode": "hybrid", "query": "how does the git source plugin clone and index repositories", "source": "mainrag", "k": 10, "expect_files": ["api/src/plugins/git.rs"], "category": "nl-question"}
+{"id": "nl-17", "mode": "hybrid", "query": "how is content compressed before storage", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/compressor.rs"], "category": "nl-question"}
+{"id": "nl-18", "mode": "hybrid", "query": "what routes are defined for the admin API", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/routes.rs"], "category": "nl-question"}
+{"id": "nl-19", "mode": "hybrid", "query": "how does tree-sitter parse source code into AST nodes", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/chunker/semantic.rs", "api/src/services/parser.rs"], "category": "nl-question"}
+{"id": "nl-20", "mode": "hybrid", "query": "how does the MCP server expose search tools", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/mcp.rs", "api/src/api/handlers/mcp.rs"], "category": "nl-question"}
+{"id": "path-01", "mode": "hybrid", "query": "search handler", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/handlers/search.rs", "api/src/services/search.rs"], "category": "path-based"}
+{"id": "path-02", "mode": "hybrid", "query": "auth middleware", "source": "mainrag", "k": 10, "expect_files": ["api/src/auth/middleware.rs"], "category": "path-based"}
+{"id": "path-03", "mode": "hybrid", "query": "qdrant client", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/qdrant.rs", "api/src/db/qdrant.rs"], "category": "path-based"}
+{"id": "path-04", "mode": "hybrid", "query": "semantic chunker", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/chunker/semantic.rs"], "category": "path-based"}
+{"id": "path-05", "mode": "hybrid", "query": "jwt authentication", "source": "mainrag", "k": 10, "expect_files": ["api/src/auth/jwt.rs"], "category": "path-based"}
+{"id": "path-06", "mode": "hybrid", "query": "admin handler", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/handlers/admin.rs"], "category": "path-based"}
+{"id": "path-07", "mode": "hybrid", "query": "database schema", "source": "mainrag", "k": 10, "expect_files": ["schema.sql"], "category": "path-based"}
+{"id": "path-08", "mode": "hybrid", "query": "error types", "source": "mainrag", "k": 10, "expect_files": ["api/src/error.rs"], "category": "path-based"}
+{"id": "path-09", "mode": "hybrid", "query": "git plugin", "source": "mainrag", "k": 10, "expect_files": ["api/src/plugins/git.rs"], "category": "path-based"}
+{"id": "path-10", "mode": "hybrid", "query": "config settings", "source": "mainrag", "k": 10, "expect_files": ["api/src/config.rs"], "category": "path-based"}
+{"id": "path-11", "mode": "hybrid", "query": "rate limiter", "source": "mainrag", "k": 10, "expect_files": ["api/src/ratelimit.rs"], "category": "path-based"}
+{"id": "path-12", "mode": "hybrid", "query": "reranker service", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/rerank.rs"], "category": "path-based"}
+{"id": "path-13", "mode": "hybrid", "query": "index service", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs"], "category": "path-based"}
+{"id": "path-14", "mode": "hybrid", "query": "embedding service", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/embeddings.rs"], "category": "path-based"}
+{"id": "path-15", "mode": "hybrid", "query": "web plugin", "source": "mainrag", "k": 10, "expect_files": ["api/src/plugins/web.rs"], "category": "path-based"}
+{"id": "concept-01", "mode": "hybrid", "query": "RRF reciprocal rank fusion scoring", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"], "category": "concept"}
+{"id": "concept-02", "mode": "hybrid", "query": "contextual chunk header CCH", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs", "api/src/services/chunker/mod.rs"], "category": "concept"}
+{"id": "concept-03", "mode": "hybrid", "query": "tenant isolation multi-tenant security", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/qdrant.rs", "schema_security.sql"], "category": "concept"}
+{"id": "concept-04", "mode": "hybrid", "query": "degraded search mode fallback", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"], "category": "concept"}
+{"id": "concept-05", "mode": "hybrid", "query": "HNSW vector index configuration", "source": "mainrag", "k": 10, "expect_files": ["schema.sql", "api/src/services/qdrant.rs"], "category": "concept"}
+{"id": "concept-06", "mode": "hybrid", "query": "batch embedding pipeline chunking", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs", "api/src/services/embeddings.rs"], "category": "concept"}
+{"id": "concept-07", "mode": "hybrid", "query": "full text search GIN index tsvector", "source": "mainrag", "k": 10, "expect_files": ["schema.sql"], "category": "concept"}
+{"id": "concept-08", "mode": "hybrid", "query": "CORS cross origin resource sharing headers", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/routes.rs"], "category": "concept"}
+{"id": "concept-09", "mode": "hybrid", "query": "BGE base embedding model 768 dimensions", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/embeddings.rs", "api/src/config.rs"], "category": "concept"}
+{"id": "concept-10", "mode": "hybrid", "query": "zstd content compression storage", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/compressor.rs"], "category": "concept"}
+{"id": "kw-01", "mode": "keyword", "query": "upsert_chunks_batch", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/qdrant.rs", "api/src/services/qdrant.rs"], "category": "keyword-exact"}
+{"id": "kw-02", "mode": "keyword", "query": "Claims struct jwt", "source": "mainrag", "k": 10, "expect_files": ["api/src/auth/jwt.rs"], "category": "keyword-exact"}
+{"id": "kw-03", "mode": "keyword", "query": "RRF_K constant", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"], "category": "keyword-exact"}
+{"id": "kw-04", "mode": "keyword", "query": "OVERLAP_MULTIPLIER", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"], "category": "keyword-exact"}
+{"id": "kw-05", "mode": "keyword", "query": "CREATE TABLE chunks", "source": "mainrag", "k": 10, "expect_files": ["schema.sql"], "category": "keyword-exact"}

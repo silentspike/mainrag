@@ -3,48 +3,38 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use thiserror::Error;
-
-/// Custom error types for API operations
-#[derive(Error, Debug)]
-pub enum ApiError {
-    #[error("HTTP error: {0}")]
-    HttpError(String),
-    #[error("API error: {0}")]
-    ApiErrorResponse(String),
-    #[error("Authentication failed: {0}")]
-    AuthError(String),
-    #[error("Network error: {0}")]
-    NetworkError(String),
-}
 
 // ============================================================================
 // Request/Response Types
 // ============================================================================
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SearchRequest {
-    pub query: String,
-    pub mode: String, // hybrid, keyword, semantic
-    pub limit: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SearchResult {
     pub chunk_id: i64,
     pub file_path: String,
     pub content: String,
+    /// Highlighted snippet showing match context (with **term** markers)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
     pub line_start: i32,
     pub line_end: i32,
     pub source_name: String,
     pub language: Option<String>,
     pub score: f32,
+    /// CCH (Contextual Chunk Header) prefix for hierarchical context
+    /// Format: "[source] path > parent_context"
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub context_prefix: Option<String>,
+    /// Compact location reference (e.g., "src/main.rs:10-25")
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub location: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SearchResponse {
+    /// LLM context explaining how to interpret the results
+    #[serde(default)]
+    pub llm_context: Option<String>,
     pub results: Vec<SearchResult>,
     pub total: usize,
     pub took_ms: u64,
@@ -89,18 +79,21 @@ pub struct SourcesResponse {
     pub total: usize,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct LoginRequest {
-    pub username: String,
-    pub password: String,
-}
-
 #[derive(Deserialize, Debug, Clone)]
 pub struct AuthResponse {
     pub token: String,
-    pub user_id: String,
+    #[allow(dead_code)]
+    pub token_type: String,
+    pub expires_in: i64,
+    pub user: AuthUser,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct AuthUser {
+    pub id: String,
     pub username: String,
-    pub expires_at: String,
+    pub email: String,
+    pub is_admin: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -113,6 +106,7 @@ pub struct StatsResponse {
     pub chunks_count: i64,
     pub total_size_bytes: i64,
     #[serde(default)]
+    #[allow(dead_code)]
     pub postgres_size: Option<String>,
 }
 
@@ -135,6 +129,7 @@ pub struct SyncSourceResponse {
     pub status: String,
     pub stats: SyncStats,
     #[serde(default)]
+    #[allow(dead_code)]
     pub error_details: Vec<String>,
 }
 
@@ -145,7 +140,16 @@ pub struct SyncStats {
     #[serde(default)]
     pub embeddings_generated: i64,
     #[serde(default)]
+    #[allow(dead_code)]
     pub errors: i64,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct SourceDeletionStats {
+    pub chunks: i64,
+    pub symbols: i64,
+    pub call_graph: i64,
+    pub qdrant_vectors: i64,
 }
 
 // ============================================================================
@@ -190,7 +194,14 @@ impl ApiClient {
             .to_path_buf();
 
         fs::create_dir_all(&config_dir)?;
-        fs::write(config_dir.join("token"), token)?;
+        let token_path = config_dir.join("token");
+        fs::write(&token_path, token)?;
+        // Sprint 4.5: Set token file permissions to 0o600 (owner-only read/write)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600))?;
+        }
         Ok(())
     }
 
@@ -291,13 +302,14 @@ impl ApiClient {
             "limit": limit,
         });
 
-        // Add source_id if provided (need to resolve name to ID)
+        // Add source_id if provided (resolve name to ID if needed)
         if let Some(s) = source {
-            // Try to parse as ID first, otherwise it's a name (API needs ID)
-            if let Ok(id) = s.parse::<i64>() {
-                body["source_id"] = serde_json::json!(id);
-            }
-            // Note: If source is a name, caller should resolve it first
+            let source_id = if let Ok(id) = s.parse::<i64>() {
+                id
+            } else {
+                self.get_source_id_by_name(s).await?
+            };
+            body["source_id"] = serde_json::json!(source_id);
         }
 
         // Add quality tier based on mode
@@ -450,6 +462,55 @@ impl ApiClient {
             .context("Failed to parse sync response")
     }
 
+    /// Sync specific files incrementally (for watch mode)
+    /// This is much faster than full sync as it only processes the specified files.
+    pub async fn sync_files(&self, source_name: &str, files: &[PathBuf]) -> Result<SyncSourceResponse> {
+        // Resolve name to ID
+        let source_id = self.get_source_id_by_name(source_name).await?;
+
+        let url = format!(
+            "{}/api/v1/admin/sources/{}/sync-files",
+            self.base_url, source_id
+        );
+
+        // Convert paths to strings
+        let file_paths: Vec<String> = files.iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+
+        let body = serde_json::json!({
+            "files": file_paths
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to sync files")?;
+
+        if response.status() == 401 {
+            return Err(anyhow!(
+                "Unauthorized. Please login first with: mainrag login"
+            ));
+        }
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(anyhow!("Failed to sync files: {}", error_text));
+        }
+
+        response
+            .json::<SyncSourceResponse>()
+            .await
+            .context("Failed to parse sync response")
+    }
+
     pub async fn delete_source(&self, source_name: &str) -> Result<()> {
         // Resolve name to ID
         let source_id = self.get_source_id_by_name(source_name).await?;
@@ -475,6 +536,37 @@ impl ApiClient {
         }
 
         Ok(())
+    }
+
+    /// Get detailed stats for a source before deletion
+    /// Returns chunk count, symbol count, call-graph entries, and qdrant vectors
+    pub async fn get_source_deletion_stats(&self, source_name: &str) -> Result<SourceDeletionStats> {
+        let source_id = self.get_source_id_by_name(source_name).await?;
+
+        let url = format!("{}/api/v1/admin/sources/{}/stats", self.base_url, source_id);
+
+        let response = self
+            .client
+            .get(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .send()
+            .await
+            .context("Failed to get source stats")?;
+
+        if !response.status().is_success() {
+            // Return zeroed stats if endpoint doesn't exist yet
+            return Ok(SourceDeletionStats {
+                chunks: 0,
+                symbols: 0,
+                call_graph: 0,
+                qdrant_vectors: 0,
+            });
+        }
+
+        response
+            .json::<SourceDeletionStats>()
+            .await
+            .context("Failed to parse source stats")
     }
 
     // ========================================================================
@@ -507,44 +599,6 @@ impl ApiClient {
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(anyhow!("Login failed: {}", error_text));
-        }
-
-        response
-            .json::<AuthResponse>()
-            .await
-            .context("Failed to parse auth response")
-    }
-
-    pub async fn register(&self, username: &str, password: &str, email: Option<&str>) -> Result<AuthResponse> {
-        let url = format!("{}/api/v1/auth/register", self.base_url);
-
-        let mut req = serde_json::json!({
-            "username": username,
-            "password": password,
-        });
-
-        if let Some(e) = email {
-            req["email"] = serde_json::json!(e);
-        }
-
-        let response = self
-            .client
-            .post(&url)
-            .json(&req)
-            .send()
-            .await
-            .context("Failed to connect to register endpoint")?;
-
-        if response.status() == 409 {
-            return Err(anyhow!("Username already exists"));
-        }
-
-        if !response.status().is_success() {
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(anyhow!("Registration failed: {}", error_text));
         }
 
         response
@@ -616,6 +670,34 @@ impl ApiClient {
 
         response.json::<Vec<String>>().await.context("Failed to parse callees response")
     }
+
+    /// Trigger orphaned chunk backfill (admin-only maintenance)
+    /// Finds chunks without embeddings and processes them in batches
+    pub async fn backfill_orphaned(&self) -> Result<BackfillResult> {
+        let url = format!("{}/api/v1/admin/backfill/orphaned", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .send()
+            .await
+            .context("Failed to trigger backfill")?;
+
+        if response.status() == 401 {
+            return Err(anyhow!("Unauthorized. Please login first with: mainrag auth login"));
+        }
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(anyhow!("Backfill failed: {}", error_text));
+        }
+
+        response
+            .json::<BackfillResult>()
+            .await
+            .context("Failed to parse backfill response")
+    }
 }
 
 // Intelligence types
@@ -638,18 +720,10 @@ pub struct CallerInfo {
     pub line: i32,
 }
 
+// Admin/Maintenance types
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct CallGraphNode {
-    pub symbol_id: i64,
-    pub name: String,
-    pub symbol_type: String,
-    pub file_path: String,
-    pub line_start: i32,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct CallGraphResponse {
-    pub symbol: SymbolInfo,
-    pub callers: Vec<CallGraphNode>,
-    pub callees: Vec<String>,
+pub struct BackfillResult {
+    pub processed: usize,
+    pub batches: usize,
+    pub message: String,
 }

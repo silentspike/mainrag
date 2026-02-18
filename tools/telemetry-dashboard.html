@@ -1,0 +1,893 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MainRAG Enterprise Telemetry</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #0a0a0f;
+            --bg-card: #12121a;
+            --bg-elevated: #1a1a25;
+            --bg-input: #0f0f15;
+            --border: rgba(255,255,255,0.08);
+            --border-focus: rgba(99,102,241,0.5);
+            --text: #f4f4f5;
+            --text-muted: #a1a1aa;
+            --text-dim: #71717a;
+            --accent-primary: #6366f1;
+            --accent-secondary: #8b5cf6;
+            --accent-success: #22c55e;
+            --accent-warning: #f59e0b;
+            --accent-error: #ef4444;
+            --accent-info: #3b82f6;
+            --gradient-primary: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            --gradient-success: linear-gradient(135deg, #22c55e 0%, #10b981 100%);
+            --gradient-warm: linear-gradient(135deg, #f59e0b 0%, #ef4444 100%);
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+            --shadow-md: 0 4px 12px rgba(0,0,0,0.4);
+            --shadow-lg: 0 8px 24px rgba(0,0,0,0.5);
+            --shadow-glow: 0 0 20px rgba(99,102,241,0.3);
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Background gradient effect */
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background:
+                radial-gradient(ellipse at 20% 0%, rgba(99,102,241,0.15) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 100%, rgba(139,92,246,0.1) 0%, transparent 50%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .app {
+            position: relative;
+            z-index: 1;
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        /* Header */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 32px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .logo {
+            width: 48px;
+            height: 48px;
+            background: var(--gradient-primary);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: var(--shadow-glow);
+        }
+
+        .logo svg { width: 28px; height: 28px; color: white; }
+
+        .brand-text h1 {
+            font-size: 24px;
+            font-weight: 600;
+            letter-spacing: -0.5px;
+        }
+
+        .brand-text span {
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        .status-pill {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 100px;
+            padding: 8px 16px;
+        }
+
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--accent-success);
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        .status-indicator.error { background: var(--accent-error); animation: none; }
+        .status-indicator.warning { background: var(--accent-warning); }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(34,197,94,0.4); }
+            50% { opacity: 0.8; box-shadow: 0 0 0 8px rgba(34,197,94,0); }
+        }
+
+        /* Meta bar */
+        .meta-bar {
+            display: flex;
+            gap: 24px;
+            margin-bottom: 24px;
+            padding: 16px 20px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+        }
+
+        .meta-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .meta-item svg { width: 16px; height: 16px; color: var(--text-dim); }
+        .meta-item span { color: var(--text-muted); font-size: 13px; }
+        .meta-item strong { color: var(--text); font-weight: 500; }
+
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        @media (max-width: 1200px) { .stats-grid { grid-template-columns: repeat(3, 1fr); } }
+        @media (max-width: 768px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } }
+
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 20px;
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }
+
+        .stat-card:hover {
+            border-color: var(--border-focus);
+            box-shadow: var(--shadow-md);
+            transform: translateY(-2px);
+        }
+
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+        }
+
+        .stat-card.cpu::before { background: var(--gradient-warm); }
+        .stat-card.memory::before { background: var(--accent-secondary); }
+        .stat-card.files::before { background: var(--accent-info); }
+        .stat-card.chunks::before { background: var(--accent-primary); }
+        .stat-card.symbols::before { background: var(--accent-warning); }
+        .stat-card.embeddings::before { background: var(--gradient-success); }
+
+        .stat-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .stat-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .stat-card.cpu .stat-icon { background: rgba(245,158,11,0.15); color: var(--accent-warning); }
+        .stat-card.memory .stat-icon { background: rgba(139,92,246,0.15); color: var(--accent-secondary); }
+        .stat-card.files .stat-icon { background: rgba(59,130,246,0.15); color: var(--accent-info); }
+        .stat-card.chunks .stat-icon { background: rgba(99,102,241,0.15); color: var(--accent-primary); }
+        .stat-card.symbols .stat-icon { background: rgba(245,158,11,0.15); color: var(--accent-warning); }
+        .stat-card.embeddings .stat-icon { background: rgba(34,197,94,0.15); color: var(--accent-success); }
+
+        .stat-icon svg { width: 20px; height: 20px; }
+
+        .stat-label {
+            font-size: 12px;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+        }
+
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            line-height: 1.2;
+            margin-bottom: 4px;
+        }
+
+        .stat-rate {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--accent-success);
+        }
+
+        .stat-rate.negative { color: var(--accent-error); }
+
+        .stat-rate svg { width: 14px; height: 14px; }
+
+        /* Progress Bar */
+        .progress-bar {
+            margin-top: 12px;
+            height: 6px;
+            background: var(--bg-input);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.5s ease;
+        }
+
+        .stat-card.cpu .progress-fill { background: var(--gradient-warm); }
+        .stat-card.memory .progress-fill { background: var(--accent-secondary); }
+
+        /* Pipeline Section */
+        .section {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            margin-bottom: 24px;
+            overflow: hidden;
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .section-title {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .section-title svg { width: 18px; height: 18px; color: var(--accent-primary); }
+
+        .section-content { padding: 20px; }
+
+        /* Pipeline Flow */
+        .pipeline-flow {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            overflow-x: auto;
+            padding: 8px 0;
+        }
+
+        .pipeline-stage {
+            flex: 1;
+            min-width: 140px;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px;
+            text-align: center;
+            position: relative;
+        }
+
+        .pipeline-stage::after {
+            content: '';
+            position: absolute;
+            right: -12px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 16px;
+            height: 2px;
+            background: var(--border);
+        }
+
+        .pipeline-stage:last-child::after { display: none; }
+
+        .stage-icon {
+            width: 40px;
+            height: 40px;
+            margin: 0 auto 10px;
+            background: var(--bg-card);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .stage-icon svg { width: 20px; height: 20px; color: var(--accent-primary); }
+
+        .stage-name {
+            font-size: 11px;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+
+        .stage-value {
+            font-size: 24px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .stage-unit {
+            font-size: 12px;
+            color: var(--text-dim);
+        }
+
+        /* Chart placeholder */
+        .chart-container {
+            height: 120px;
+            background: var(--bg-input);
+            border-radius: 8px;
+            display: flex;
+            align-items: flex-end;
+            padding: 8px;
+            gap: 2px;
+        }
+
+        .chart-bar {
+            flex: 1;
+            background: var(--accent-primary);
+            border-radius: 2px 2px 0 0;
+            min-height: 4px;
+            transition: height 0.3s ease;
+            opacity: 0.7;
+        }
+
+        .chart-bar:hover { opacity: 1; }
+
+        /* Log Viewer */
+        .log-viewer {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            line-height: 1.8;
+            background: var(--bg-input);
+            border-radius: 8px;
+            padding: 16px;
+            max-height: 280px;
+            overflow-y: auto;
+        }
+
+        .log-line {
+            display: flex;
+            gap: 12px;
+            padding: 4px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.03);
+        }
+
+        .log-line:last-child { border-bottom: none; }
+
+        .log-time { color: var(--text-dim); min-width: 70px; }
+        .log-metric { color: var(--accent-info); }
+        .log-rate { color: var(--accent-success); }
+        .log-sep { color: var(--text-dim); }
+
+        /* Mini sparkline */
+        .sparkline {
+            display: flex;
+            align-items: flex-end;
+            gap: 1px;
+            height: 24px;
+            margin-top: 8px;
+        }
+
+        .spark-bar {
+            flex: 1;
+            background: currentColor;
+            opacity: 0.3;
+            border-radius: 1px;
+        }
+
+        .spark-bar:last-child { opacity: 0.8; }
+
+        /* Footer */
+        footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 0;
+            margin-top: 16px;
+            border-top: 1px solid var(--border);
+            font-size: 12px;
+            color: var(--text-dim);
+        }
+
+        .footer-links {
+            display: flex;
+            gap: 16px;
+        }
+
+        .footer-links a {
+            color: var(--text-muted);
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+
+        .footer-links a:hover { color: var(--text); }
+
+        /* Responsive */
+        @media (max-width: 640px) {
+            .app { padding: 16px; }
+            header { flex-direction: column; gap: 16px; }
+            .meta-bar { flex-wrap: wrap; }
+            .stat-value { font-size: 24px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <!-- Header -->
+        <header>
+            <div class="brand">
+                <div class="logo">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+                    </svg>
+                </div>
+                <div class="brand-text">
+                    <h1>MainRAG Telemetry</h1>
+                    <span>Enterprise Pipeline Monitor</span>
+                </div>
+            </div>
+            <div class="status-pill">
+                <span class="status-indicator" id="statusDot"></span>
+                <span id="status">Connecting...</span>
+            </div>
+        </header>
+
+        <!-- Meta Bar -->
+        <div class="meta-bar">
+            <div class="meta-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+                </svg>
+                <span>Elapsed:</span>
+                <strong id="elapsed">--</strong>
+            </div>
+            <div class="meta-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
+                </svg>
+                <span>Last Update:</span>
+                <strong id="lastUpdate">--</strong>
+            </div>
+            <div class="meta-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                </svg>
+                <span>Source:</span>
+                <strong id="sourceName">kubernetes</strong>
+            </div>
+        </div>
+
+        <!-- Main Stats Grid -->
+        <div class="stats-grid">
+            <!-- CPU -->
+            <div class="stat-card cpu">
+                <div class="stat-header">
+                    <div class="stat-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="4" y="4" width="16" height="16" rx="2"/>
+                            <rect x="9" y="9" width="6" height="6"/>
+                            <line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/>
+                            <line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/>
+                            <line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="15" x2="23" y2="15"/>
+                            <line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="15" x2="4" y2="15"/>
+                        </svg>
+                    </div>
+                    <span class="stat-label">CPU</span>
+                </div>
+                <div class="stat-value" id="cpu">--%</div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="cpuBar" style="width: 0%"></div>
+                </div>
+            </div>
+
+            <!-- Memory -->
+            <div class="stat-card memory">
+                <div class="stat-header">
+                    <div class="stat-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M6 19v-3M10 19v-6M14 19v-9M18 19v-12"/>
+                        </svg>
+                    </div>
+                    <span class="stat-label">Memory</span>
+                </div>
+                <div class="stat-value" id="mem">--%</div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="memBar" style="width: 0%"></div>
+                </div>
+            </div>
+
+            <!-- Files -->
+            <div class="stat-card files">
+                <div class="stat-header">
+                    <div class="stat-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                            <polyline points="14 2 14 8 20 8"/>
+                        </svg>
+                    </div>
+                    <span class="stat-label">Files</span>
+                </div>
+                <div class="stat-value" id="files">--</div>
+                <div class="stat-rate" id="filesRate">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/>
+                    </svg>
+                    +0/s
+                </div>
+            </div>
+
+            <!-- Chunks -->
+            <div class="stat-card chunks">
+                <div class="stat-header">
+                    <div class="stat-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+                            <rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+                        </svg>
+                    </div>
+                    <span class="stat-label">Chunks</span>
+                </div>
+                <div class="stat-value" id="chunks">--</div>
+                <div class="stat-rate" id="chunksRate">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/>
+                    </svg>
+                    +0/s
+                </div>
+            </div>
+
+            <!-- Symbols -->
+            <div class="stat-card symbols">
+                <div class="stat-header">
+                    <div class="stat-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+                        </svg>
+                    </div>
+                    <span class="stat-label">Symbols</span>
+                </div>
+                <div class="stat-value" id="symbols">--</div>
+                <div class="stat-rate" id="symbolsRate">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/>
+                    </svg>
+                    +0/s
+                </div>
+            </div>
+
+            <!-- Embeddings -->
+            <div class="stat-card embeddings">
+                <div class="stat-header">
+                    <div class="stat-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="3"/>
+                            <path d="M12 1v6m0 6v10"/>
+                            <path d="m4.22 4.22 4.24 4.24m7.08 7.08 4.24 4.24"/>
+                            <path d="M1 12h6m6 0h10"/>
+                            <path d="m4.22 19.78 4.24-4.24m7.08-7.08 4.24-4.24"/>
+                        </svg>
+                    </div>
+                    <span class="stat-label">Embeddings</span>
+                </div>
+                <div class="stat-value" id="embeddings">--</div>
+                <div class="stat-rate" id="embeddingsRate">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/>
+                    </svg>
+                    +0/s
+                </div>
+            </div>
+        </div>
+
+        <!-- Pipeline Flow -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="22" y1="12" x2="2" y2="12"/>
+                        <polyline points="15 5 22 12 15 19"/>
+                    </svg>
+                    Pipeline Throughput
+                </div>
+            </div>
+            <div class="section-content">
+                <div class="pipeline-flow">
+                    <div class="pipeline-stage">
+                        <div class="stage-icon">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                            </svg>
+                        </div>
+                        <div class="stage-name">Scanning</div>
+                        <div class="stage-value" id="scanRate">--</div>
+                        <div class="stage-unit">files/s</div>
+                    </div>
+                    <div class="pipeline-stage">
+                        <div class="stage-icon">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+                            </svg>
+                        </div>
+                        <div class="stage-name">Tree-sitter</div>
+                        <div class="stage-value" id="parseRate">--</div>
+                        <div class="stage-unit">symbols/s</div>
+                    </div>
+                    <div class="pipeline-stage">
+                        <div class="stage-icon">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/>
+                            </svg>
+                        </div>
+                        <div class="stage-name">Chunking</div>
+                        <div class="stage-value" id="chunkRate">--</div>
+                        <div class="stage-unit">chunks/s</div>
+                    </div>
+                    <div class="pipeline-stage">
+                        <div class="stage-icon">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                            </svg>
+                        </div>
+                        <div class="stage-name">TEI/Embed</div>
+                        <div class="stage-value" id="embedRate">--</div>
+                        <div class="stage-unit">vectors/s</div>
+                    </div>
+                    <div class="pipeline-stage">
+                        <div class="stage-icon">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                                <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                                <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                            </svg>
+                        </div>
+                        <div class="stage-name">Qdrant</div>
+                        <div class="stage-value" id="qdrantRate">--</div>
+                        <div class="stage-unit">indexed/s</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Live Throughput Chart -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+                    </svg>
+                    Throughput History (last 60s)
+                </div>
+            </div>
+            <div class="section-content">
+                <div class="chart-container" id="throughputChart"></div>
+            </div>
+        </div>
+
+        <!-- Log Viewer -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                    </svg>
+                    Live Log Stream
+                </div>
+                <span style="font-size: 12px; color: var(--text-dim)">Last 20 entries</span>
+            </div>
+            <div class="section-content">
+                <div class="log-viewer" id="logContainer">
+                    <div class="log-line">
+                        <span class="log-time">--:--:--</span>
+                        <span>Waiting for telemetry data...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer>
+            <span>MainRAG Enterprise Telemetry v1.0</span>
+            <div class="footer-links">
+                <span>Auto-refresh: 2s</span>
+            </div>
+        </footer>
+    </div>
+
+    <script>
+        const LOG_FILE = '/mainrag-telemetry.jsonl';
+        const REFRESH_INTERVAL = 2000;
+        const CHART_HISTORY = 30;
+
+        let isConnected = false;
+        let chartData = [];
+
+        const formatNumber = (n) => n?.toLocaleString() ?? '--';
+        const formatRate = (n) => {
+            if (n === undefined || n === null) return '+0/s';
+            return n > 0 ? `+${n.toFixed(1)}/s` : '0/s';
+        };
+        const formatElapsed = (sec) => {
+            const h = Math.floor(sec / 3600);
+            const m = Math.floor((sec % 3600) / 60);
+            const s = sec % 60;
+            if (h > 0) return `${h}h ${m}m ${s}s`;
+            if (m > 0) return `${m}m ${s}s`;
+            return `${s}s`;
+        };
+
+        function updateChart(data) {
+            chartData.push(data.pipeline?.chunks?.rate || 0);
+            if (chartData.length > CHART_HISTORY) chartData.shift();
+
+            const container = document.getElementById('throughputChart');
+            const maxVal = Math.max(...chartData, 1);
+            container.innerHTML = chartData.map((val, i) => {
+                const height = Math.max(4, (val / maxVal) * 100);
+                const opacity = 0.3 + (i / chartData.length) * 0.7;
+                return `<div class="chart-bar" style="height: ${height}%; opacity: ${opacity}"></div>`;
+            }).join('');
+        }
+
+        async function fetchTelemetry() {
+            try {
+                const response = await fetch(LOG_FILE + '?' + Date.now());
+                if (!response.ok) throw new Error('Log not available');
+
+                const text = await response.text();
+                const lines = text.trim().split('\n').filter(l => l.length > 0);
+
+                if (!isConnected) {
+                    isConnected = true;
+                    document.getElementById('status').textContent = 'Live';
+                    document.getElementById('statusDot').classList.remove('error');
+                }
+
+                document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+
+                const progressLines = lines.filter(l => l.includes('"event":"progress"'));
+                if (progressLines.length > 0) {
+                    const latest = JSON.parse(progressLines[progressLines.length - 1]);
+                    updateDashboard(latest);
+                    updateChart(latest);
+                }
+
+                // Update log viewer
+                const logLines = progressLines.slice(-20).map(l => {
+                    try {
+                        const obj = JSON.parse(l);
+                        return `
+                            <div class="log-line">
+                                <span class="log-time">${formatElapsed(obj.elapsed_sec)}</span>
+                                <span class="log-metric">${obj.pipeline?.files?.count || 0}</span>
+                                <span class="log-sep">files</span>
+                                <span class="log-metric">${obj.pipeline?.chunks?.count || 0}</span>
+                                <span class="log-sep">chunks</span>
+                                <span class="log-rate">${formatRate(obj.pipeline?.chunks?.rate)}</span>
+                                <span class="log-metric">${obj.pipeline?.embeddings?.count || 0}</span>
+                                <span class="log-sep">embeds</span>
+                            </div>
+                        `;
+                    } catch { return ''; }
+                });
+
+                document.getElementById('logContainer').innerHTML = logLines.join('');
+                const container = document.getElementById('logContainer');
+                container.scrollTop = container.scrollHeight;
+
+            } catch (e) {
+                if (isConnected) {
+                    isConnected = false;
+                    document.getElementById('status').textContent = 'Disconnected';
+                    document.getElementById('statusDot').classList.add('error');
+                }
+            }
+        }
+
+        function updateDashboard(data) {
+            document.getElementById('elapsed').textContent = formatElapsed(data.elapsed_sec);
+
+            const cpu = data.system?.cpu_pct ?? 0;
+            const mem = data.system?.mem_pct ?? 0;
+            document.getElementById('cpu').textContent = `${cpu}%`;
+            document.getElementById('mem').textContent = `${mem}%`;
+            document.getElementById('cpuBar').style.width = `${Math.min(cpu, 100)}%`;
+            document.getElementById('memBar').style.width = `${Math.min(mem, 100)}%`;
+
+            const p = data.pipeline || {};
+
+            document.getElementById('files').textContent = formatNumber(p.files?.count);
+            document.getElementById('filesRate').innerHTML = `
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/>
+                </svg>
+                ${formatRate(p.files?.rate)}
+            `;
+
+            document.getElementById('chunks').textContent = formatNumber(p.chunks?.count);
+            document.getElementById('chunksRate').innerHTML = `
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/>
+                </svg>
+                ${formatRate(p.chunks?.rate)}
+            `;
+
+            document.getElementById('symbols').textContent = formatNumber(p.symbols?.count);
+            document.getElementById('symbolsRate').innerHTML = `
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/>
+                </svg>
+                ${formatRate(p.symbols?.rate)}
+            `;
+
+            document.getElementById('embeddings').textContent = formatNumber(p.embeddings?.count);
+            document.getElementById('embeddingsRate').innerHTML = `
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/>
+                </svg>
+                ${formatRate(p.embeddings?.rate)}
+            `;
+
+            // Pipeline rates
+            document.getElementById('scanRate').textContent = (p.files?.rate ?? 0).toFixed(1);
+            document.getElementById('parseRate').textContent = (p.symbols?.rate ?? 0).toFixed(1);
+            document.getElementById('chunkRate').textContent = (p.chunks?.rate ?? 0).toFixed(1);
+            document.getElementById('embedRate').textContent = (p.embeddings?.rate ?? 0).toFixed(1);
+            document.getElementById('qdrantRate').textContent = (p.embeddings?.rate ?? 0).toFixed(1);
+        }
+
+        setInterval(fetchTelemetry, REFRESH_INTERVAL);
+        fetchTelemetry();
+
+        // Initialize chart
+        for (let i = 0; i < CHART_HISTORY; i++) chartData.push(0);
+        updateChart({ pipeline: { chunks: { rate: 0 } } });
+    </script>
+</body>
+</html>

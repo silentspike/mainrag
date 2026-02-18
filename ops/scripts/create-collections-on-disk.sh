@@ -6,7 +6,7 @@
 set -e
 
 QDRANT_URL="${QDRANT_URL:-http://localhost:6333}"
-API_KEY="${QDRANT_API_KEY:-<REDACTED_QDRANT_API_KEY>}"
+API_KEY="${QDRANT_API_KEY:?QDRANT_API_KEY must be set}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

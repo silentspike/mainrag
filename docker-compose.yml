@@ -27,7 +27,7 @@ services:
       - LOG_LEVEL=info
       - HF_HUB_ENABLE_HF_TRANSFER=1
       - CUDA_VISIBLE_DEVICES=0
-      - CUDA_MEMORY_FRACTION=0.6  # 60% of 4GB = 2.4GB for embeddings
+      - CUDA_MEMORY_FRACTION=0.55  # 55% of 4GB = 2.2GB for embeddings (Sprint 7.3c: 80% total VRAM)
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     command:
@@ -76,7 +76,7 @@ services:
       - LOG_LEVEL=info
       - HF_HUB_ENABLE_HF_TRANSFER=1
       - CUDA_VISIBLE_DEVICES=0
-      - CUDA_MEMORY_FRACTION=0.3  # 30% of 4GB = 1.2GB for reranker
+      - CUDA_MEMORY_FRACTION=0.25  # 25% of 4GB = 1.0GB for reranker (Sprint 7.3c: 80% total VRAM)
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     command:
