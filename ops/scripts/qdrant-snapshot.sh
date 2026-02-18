@@ -5,7 +5,7 @@
 set -euo pipefail
 
 QDRANT_URL="${QDRANT_URL:-http://localhost:6333}"
-API_KEY="${QDRANT_API_KEY:-<REDACTED_QDRANT_API_KEY>}"
+API_KEY="${QDRANT_API_KEY:?QDRANT_API_KEY must be set}"
 SNAPSHOT_DIR="/data/qdrant/snapshots"
 RETENTION_DAYS=7
 

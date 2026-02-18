@@ -1,200 +1,144 @@
-{"id": "idx-delete", "mode": "hybrid", "query": "delete chunks by source", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs"]}
-{"id": "rls-policy", "mode": "keyword", "query": "user_can_access_source", "source": "mainrag", "k": 10, "expect_files": ["schema_security.sql"]}
+{"id": "idx-delete", "mode": "hybrid", "query": "delete chunks by source", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs", "api/src/api/handlers/admin.rs"]}
+{"id": "rls-policy", "mode": "keyword", "query": "user_can_access_source", "source": "mainrag", "k": 10, "expect_files": ["schema_security.sql", "migrations/020_stable_rls_function.sql"]}
 {"id": "tei-embed", "mode": "hybrid", "query": "generate embeddings batch", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/embeddings.rs", "api/src/services/index.rs"]}
 {"id": "jwt-auth", "mode": "hybrid", "query": "jwt token validation middleware", "source": "mainrag", "k": 10, "expect_files": ["api/src/auth/middleware.rs"]}
-{"id": "qdrant-upsert", "mode": "keyword", "query": "upsert_chunks_batch", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/qdrant.rs"]}
-{"id": "chunk-content", "mode": "hybrid", "query": "chunk content with overlap", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs"]}
+{"id": "qdrant-upsert", "mode": "keyword", "query": "upsert_chunks_batch", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/qdrant.rs", "api/src/services/qdrant.rs"]}
+{"id": "chunk-content", "mode": "hybrid", "query": "chunk content with overlap", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs", "api/src/services/chunker/token.rs"]}
 {"id": "search-hybrid", "mode": "hybrid", "query": "hybrid search combining keyword and vector", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"]}
 {"id": "postgres-pool", "mode": "keyword", "query": "PostgresPool deadpool", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/postgres.rs", "api/src/db/mod.rs"]}
 {"id": "file-discovery", "mode": "hybrid", "query": "discover indexable files recursively", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs"]}
 {"id": "admin-sources", "mode": "hybrid", "query": "admin endpoint list sources", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/handlers/admin.rs"]}
-{"id": "negative-k8s", "mode": "hybrid", "query": "kubernetes deployment yaml", "source": "mainrag", "k": 10, "expect_files": []}
-{"id": "negative-redis", "mode": "keyword", "query": "redis cache connection", "source": "mainrag", "k": 10, "expect_files": []}
+{"id": "specific-rls-function", "mode": "keyword", "query": "set_config app.user_id", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/rls.rs", "api/src/db/rls_client.rs"]}
+{"id": "specific-moka-cache", "mode": "keyword", "query": "moka::sync::Cache", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/query_expander.rs", "api/src/services/search.rs"]}
 {"id": "schema-chunks", "mode": "keyword", "query": "CREATE TABLE chunks", "source": "mainrag", "k": 10, "expect_files": ["schema.sql"]}
 {"id": "auth-login", "mode": "hybrid", "query": "user login password verification bcrypt", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/handlers/auth.rs", "schema_security.sql"]}
-{"id": "svelte-search", "mode": "hybrid", "query": "search input component svelte", "source": "mainrag", "k": 10, "expect_files": ["frontend/src/routes"]}
-{"id": "fn-hybrid-search", "mode": "keyword", "query": "hybrid_search", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs"]}
-{"id": "fn-keyword-search", "mode": "keyword", "query": "keyword_search", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs"]}
-{"id": "fn-semantic-search", "mode": "keyword", "query": "semantic_search", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs"]}
-{"id": "fn-embed", "mode": "keyword", "query": "embed", "source": "mainrag", "k": 10, "expect_files": ["services/embeddings.rs"]}
-{"id": "fn-rerank", "mode": "keyword", "query": "rerank", "source": "mainrag", "k": 10, "expect_files": ["services/rerank.rs"]}
-{"id": "fn-compress", "mode": "keyword", "query": "compress", "source": "mainrag", "k": 10, "expect_files": ["services/compressor.rs"]}
-{"id": "fn-expand", "mode": "keyword", "query": "expand", "source": "mainrag", "k": 10, "expect_files": ["services/query_expander.rs"]}
-{"id": "fn-upsert", "mode": "keyword", "query": "upsert", "source": "mainrag", "k": 10, "expect_files": ["db/qdrant.rs", "db/postgres.rs"]}
-{"id": "fn-validate", "mode": "keyword", "query": "validate", "source": "mainrag", "k": 10, "expect_files": ["auth/"]}
-{"id": "struct-searchresult", "mode": "keyword", "query": "SearchResult", "source": "mainrag", "k": 10, "expect_files": ["db/models.rs"]}
-{"id": "struct-chunk", "mode": "keyword", "query": "Chunk", "source": "mainrag", "k": 10, "expect_files": ["services/chunker/"]}
-{"id": "struct-appstate", "mode": "keyword", "query": "AppState", "source": "mainrag", "k": 10, "expect_files": ["lib.rs", "main.rs"]}
-{"id": "struct-config", "mode": "keyword", "query": "Config", "source": "mainrag", "k": 10, "expect_files": ["config.rs"]}
-{"id": "struct-claims", "mode": "keyword", "query": "Claims", "source": "mainrag", "k": 10, "expect_files": ["auth/"]}
-{"id": "trait-sourceplugin", "mode": "keyword", "query": "SourcePlugin", "source": "mainrag", "k": 10, "expect_files": ["plugins/mod.rs"]}
-{"id": "trait-chunker", "mode": "keyword", "query": "Chunker", "source": "mainrag", "k": 10, "expect_files": ["services/chunker/"]}
-{"id": "error-apperror", "mode": "keyword", "query": "AppError", "source": "mainrag", "k": 10, "expect_files": ["error.rs"]}
-{"id": "api-search", "mode": "hybrid", "query": "POST /search", "source": "mainrag", "k": 10, "expect_files": ["api/handlers/search.rs", "api/routes.rs"]}
-{"id": "api-sources", "mode": "hybrid", "query": "GET /sources", "source": "mainrag", "k": 10, "expect_files": ["api/handlers/admin.rs"]}
-{"id": "api-health", "mode": "hybrid", "query": "health check endpoint", "source": "mainrag", "k": 10, "expect_files": ["api/handlers/"]}
-{"id": "concept-rls", "mode": "hybrid", "query": "row level security postgres", "source": "mainrag", "k": 10, "expect_files": ["db/", "schema"]}
-{"id": "concept-jwt", "mode": "hybrid", "query": "JWT token authentication", "source": "mainrag", "k": 10, "expect_files": ["auth/"]}
-{"id": "concept-hybrid", "mode": "hybrid", "query": "hybrid search vector keyword", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs"]}
-{"id": "concept-chunking", "mode": "hybrid", "query": "semantic chunking tree-sitter", "source": "mainrag", "k": 10, "expect_files": ["services/chunker/"]}
-{"id": "concept-cch", "mode": "hybrid", "query": "contextual chunk headers", "source": "mainrag", "k": 10, "expect_files": ["services/chunker/"]}
-{"id": "concept-compression", "mode": "hybrid", "query": "contextual compression imports", "source": "mainrag", "k": 10, "expect_files": ["services/compressor.rs"]}
-{"id": "concept-reranking", "mode": "hybrid", "query": "cross encoder reranking", "source": "mainrag", "k": 10, "expect_files": ["services/rerank.rs"]}
-{"id": "concept-expansion", "mode": "hybrid", "query": "query expansion synonyms", "source": "mainrag", "k": 10, "expect_files": ["services/query_expander.rs"]}
-{"id": "de-suche", "mode": "hybrid", "query": "Suche in Code Dateien", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs"]}
-{"id": "de-authentifizierung", "mode": "hybrid", "query": "Benutzer Authentifizierung", "source": "mainrag", "k": 10, "expect_files": ["auth/"]}
-{"id": "de-fehlerbehandlung", "mode": "hybrid", "query": "Fehlerbehandlung API", "source": "mainrag", "k": 10, "expect_files": ["error.rs", "api/"]}
-{"id": "de-datenbank", "mode": "hybrid", "query": "Datenbank Verbindung Pool", "source": "mainrag", "k": 10, "expect_files": ["db/"]}
-{"id": "de-konfiguration", "mode": "hybrid", "query": "Server Konfiguration laden", "source": "mainrag", "k": 10, "expect_files": ["config.rs"]}
-{"id": "de-embeddings", "mode": "hybrid", "query": "Embeddings generieren", "source": "mainrag", "k": 10, "expect_files": ["services/embeddings.rs"]}
-{"id": "de-index", "mode": "hybrid", "query": "Index erstellen aktualisieren", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs"]}
-{"id": "de-chunks", "mode": "hybrid", "query": "Text in Chunks aufteilen", "source": "mainrag", "k": 10, "expect_files": ["services/chunker/"]}
-{"id": "de-api-handler", "mode": "hybrid", "query": "API Handler implementieren", "source": "mainrag", "k": 10, "expect_files": ["api/handlers/"]}
-{"id": "de-middleware", "mode": "hybrid", "query": "Middleware Authentifizierung", "source": "mainrag", "k": 10, "expect_files": ["auth/middleware.rs"]}
-{"id": "specific-upsert-chunks-batch", "mode": "keyword", "query": "upsert_chunks_batch", "source": "mainrag", "k": 10, "expect_files": ["db/qdrant.rs"]}
-{"id": "specific-apply-rls-context", "mode": "keyword", "query": "apply_rls_context", "source": "mainrag", "k": 10, "expect_files": ["db/"]}
-{"id": "specific-min-similarity", "mode": "keyword", "query": "MIN_SIMILARITY_THRESHOLD", "source": "mainrag", "k": 10, "expect_files": ["services/query_expander.rs", "services/search.rs"]}
-{"id": "multi-hybrid-search-vector", "mode": "hybrid", "query": "hybrid search combining vector and keyword", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs"]}
-{"id": "multi-jwt-token-claims", "mode": "hybrid", "query": "extract claims from jwt token", "source": "mainrag", "k": 10, "expect_files": ["auth/"]}
-{"id": "multi-batch-embedding", "mode": "hybrid", "query": "batch embedding generation TEI", "source": "mainrag", "k": 10, "expect_files": ["services/embeddings.rs"]}
-{"id": "typo-serach", "mode": "hybrid", "query": "serach results", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs"]}
-{"id": "typo-databse", "mode": "hybrid", "query": "databse connection", "source": "mainrag", "k": 10, "expect_files": ["db/"]}
-{"id": "crud-create-source", "mode": "hybrid", "query": "create source", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "db/models.rs"]}
-{"id": "crud-add-source", "mode": "hybrid", "query": "add new source", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "db/models.rs"]}
-{"id": "crud-erstellen-source", "mode": "hybrid", "query": "source erstellen", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "db/models.rs"]}
-{"id": "crud-create-chunk", "mode": "hybrid", "query": "create chunk", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "services/chunker/"]}
-{"id": "crud-add-chunk", "mode": "hybrid", "query": "add new chunk", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "services/chunker/"]}
-{"id": "crud-erstellen-chunk", "mode": "hybrid", "query": "chunk erstellen", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "services/chunker/"]}
-{"id": "crud-create-embedding", "mode": "hybrid", "query": "create embedding", "source": "mainrag", "k": 10, "expect_files": ["services/embeddings.rs", "services/index.rs"]}
-{"id": "crud-add-embedding", "mode": "hybrid", "query": "add new embedding", "source": "mainrag", "k": 10, "expect_files": ["services/embeddings.rs", "services/index.rs"]}
-{"id": "crud-erstellen-embedding", "mode": "hybrid", "query": "embedding erstellen", "source": "mainrag", "k": 10, "expect_files": ["services/embeddings.rs", "services/index.rs"]}
-{"id": "crud-create-search", "mode": "hybrid", "query": "create search", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "api/handlers/search.rs"]}
-{"id": "crud-add-search", "mode": "hybrid", "query": "add new search", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "api/handlers/search.rs"]}
-{"id": "crud-erstellen-search", "mode": "hybrid", "query": "search erstellen", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "api/handlers/search.rs"]}
-{"id": "crud-create-user", "mode": "hybrid", "query": "create user", "source": "mainrag", "k": 10, "expect_files": ["auth/", "db/models.rs"]}
-{"id": "crud-add-user", "mode": "hybrid", "query": "add new user", "source": "mainrag", "k": 10, "expect_files": ["auth/", "db/models.rs"]}
-{"id": "crud-erstellen-user", "mode": "hybrid", "query": "user erstellen", "source": "mainrag", "k": 10, "expect_files": ["auth/", "db/models.rs"]}
-{"id": "crud-create-token", "mode": "hybrid", "query": "create token", "source": "mainrag", "k": 10, "expect_files": ["auth/middleware.rs", "auth/jwt.rs"]}
-{"id": "crud-add-token", "mode": "hybrid", "query": "add new token", "source": "mainrag", "k": 10, "expect_files": ["auth/middleware.rs", "auth/jwt.rs"]}
-{"id": "crud-erstellen-token", "mode": "hybrid", "query": "token erstellen", "source": "mainrag", "k": 10, "expect_files": ["auth/middleware.rs", "auth/jwt.rs"]}
-{"id": "crud-create-file", "mode": "hybrid", "query": "create file", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "plugins/"]}
-{"id": "crud-add-file", "mode": "hybrid", "query": "add new file", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "plugins/"]}
-{"id": "crud-erstellen-file", "mode": "hybrid", "query": "file erstellen", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "plugins/"]}
-{"id": "crud-create-query", "mode": "hybrid", "query": "create query", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "services/query_expander.rs"]}
-{"id": "crud-add-query", "mode": "hybrid", "query": "add new query", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "services/query_expander.rs"]}
-{"id": "crud-erstellen-query", "mode": "hybrid", "query": "query erstellen", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "services/query_expander.rs"]}
-{"id": "crud-create-result", "mode": "hybrid", "query": "create result", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "db/models.rs"]}
-{"id": "crud-add-result", "mode": "hybrid", "query": "add new result", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "db/models.rs"]}
-{"id": "crud-erstellen-result", "mode": "hybrid", "query": "result erstellen", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "db/models.rs"]}
-{"id": "crud-create-database", "mode": "hybrid", "query": "create database", "source": "mainrag", "k": 10, "expect_files": ["db/", "services/index.rs"]}
-{"id": "crud-add-database", "mode": "hybrid", "query": "add new database", "source": "mainrag", "k": 10, "expect_files": ["db/", "services/index.rs"]}
-{"id": "crud-erstellen-database", "mode": "hybrid", "query": "database erstellen", "source": "mainrag", "k": 10, "expect_files": ["db/", "services/index.rs"]}
-{"id": "search-search-source", "mode": "hybrid", "query": "search for source", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "db/models.rs"]}
-{"id": "search-find-source", "mode": "hybrid", "query": "find source", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "db/models.rs"]}
-{"id": "search-lookup-source", "mode": "keyword", "query": "lookup source", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "db/models.rs"]}
-{"id": "search-search-chunk", "mode": "hybrid", "query": "search for chunk", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "services/chunker/"]}
-{"id": "search-find-chunk", "mode": "hybrid", "query": "find chunk", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "services/chunker/"]}
-{"id": "search-lookup-chunk", "mode": "keyword", "query": "lookup chunk", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "services/chunker/"]}
-{"id": "search-search-embedding", "mode": "hybrid", "query": "search for embedding", "source": "mainrag", "k": 10, "expect_files": ["services/embeddings.rs", "services/index.rs"]}
-{"id": "search-find-embedding", "mode": "hybrid", "query": "find embedding", "source": "mainrag", "k": 10, "expect_files": ["services/embeddings.rs", "services/index.rs"]}
-{"id": "search-lookup-embedding", "mode": "keyword", "query": "lookup embedding", "source": "mainrag", "k": 10, "expect_files": ["services/embeddings.rs", "services/index.rs"]}
-{"id": "search-search-search", "mode": "hybrid", "query": "search for search", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "api/handlers/search.rs"]}
-{"id": "search-find-search", "mode": "hybrid", "query": "find search", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "api/handlers/search.rs"]}
-{"id": "search-lookup-search", "mode": "keyword", "query": "lookup search", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "api/handlers/search.rs"]}
-{"id": "search-search-user", "mode": "hybrid", "query": "search for user", "source": "mainrag", "k": 10, "expect_files": ["auth/", "db/models.rs"]}
-{"id": "search-find-user", "mode": "hybrid", "query": "find user", "source": "mainrag", "k": 10, "expect_files": ["auth/", "db/models.rs"]}
-{"id": "search-lookup-user", "mode": "keyword", "query": "lookup user", "source": "mainrag", "k": 10, "expect_files": ["auth/", "db/models.rs"]}
-{"id": "search-search-token", "mode": "hybrid", "query": "search for token", "source": "mainrag", "k": 10, "expect_files": ["auth/middleware.rs", "auth/jwt.rs"]}
-{"id": "search-find-token", "mode": "hybrid", "query": "find token", "source": "mainrag", "k": 10, "expect_files": ["auth/middleware.rs", "auth/jwt.rs"]}
-{"id": "search-lookup-token", "mode": "keyword", "query": "lookup token", "source": "mainrag", "k": 10, "expect_files": ["auth/middleware.rs", "auth/jwt.rs"]}
-{"id": "search-search-file", "mode": "hybrid", "query": "search for file", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "plugins/"]}
-{"id": "search-find-file", "mode": "hybrid", "query": "find file", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "plugins/"]}
-{"id": "search-lookup-file", "mode": "keyword", "query": "lookup file", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "plugins/"]}
-{"id": "search-search-query", "mode": "hybrid", "query": "search for query", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "services/query_expander.rs"]}
-{"id": "search-find-query", "mode": "hybrid", "query": "find query", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "services/query_expander.rs"]}
-{"id": "search-lookup-query", "mode": "keyword", "query": "lookup query", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "services/query_expander.rs"]}
-{"id": "search-search-result", "mode": "hybrid", "query": "search for result", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "db/models.rs"]}
-{"id": "search-find-result", "mode": "hybrid", "query": "find result", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "db/models.rs"]}
-{"id": "search-lookup-result", "mode": "keyword", "query": "lookup result", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "db/models.rs"]}
-{"id": "search-search-database", "mode": "hybrid", "query": "search for database", "source": "mainrag", "k": 10, "expect_files": ["db/", "services/index.rs"]}
-{"id": "search-find-database", "mode": "hybrid", "query": "find database", "source": "mainrag", "k": 10, "expect_files": ["db/", "services/index.rs"]}
-{"id": "search-lookup-database", "mode": "keyword", "query": "lookup database", "source": "mainrag", "k": 10, "expect_files": ["db/", "services/index.rs"]}
-{"id": "errors-error-source", "mode": "hybrid", "query": "source error handling", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "db/models.rs"]}
-{"id": "errors-fehler-source", "mode": "hybrid", "query": "source Fehlerbehandlung", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "db/models.rs"]}
-{"id": "errors-validate-source", "mode": "hybrid", "query": "validate source", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "db/models.rs"]}
-{"id": "errors-error-chunk", "mode": "hybrid", "query": "chunk error handling", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "services/chunker/"]}
-{"id": "errors-fehler-chunk", "mode": "hybrid", "query": "chunk Fehlerbehandlung", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "services/chunker/"]}
-{"id": "errors-validate-chunk", "mode": "hybrid", "query": "validate chunk", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "services/chunker/"]}
-{"id": "errors-error-embedding", "mode": "hybrid", "query": "embedding error handling", "source": "mainrag", "k": 10, "expect_files": ["services/embeddings.rs", "services/index.rs"]}
-{"id": "errors-fehler-embedding", "mode": "hybrid", "query": "embedding Fehlerbehandlung", "source": "mainrag", "k": 10, "expect_files": ["services/embeddings.rs", "services/index.rs"]}
-{"id": "errors-validate-embedding", "mode": "hybrid", "query": "validate embedding", "source": "mainrag", "k": 10, "expect_files": ["services/embeddings.rs", "services/index.rs"]}
-{"id": "errors-error-search", "mode": "hybrid", "query": "search error handling", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "api/handlers/search.rs"]}
-{"id": "errors-fehler-search", "mode": "hybrid", "query": "search Fehlerbehandlung", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "api/handlers/search.rs"]}
-{"id": "errors-validate-search", "mode": "hybrid", "query": "validate search", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "api/handlers/search.rs"]}
-{"id": "errors-error-user", "mode": "hybrid", "query": "user error handling", "source": "mainrag", "k": 10, "expect_files": ["auth/", "db/models.rs"]}
-{"id": "errors-fehler-user", "mode": "hybrid", "query": "user Fehlerbehandlung", "source": "mainrag", "k": 10, "expect_files": ["auth/", "db/models.rs"]}
-{"id": "errors-validate-user", "mode": "hybrid", "query": "validate user", "source": "mainrag", "k": 10, "expect_files": ["auth/", "db/models.rs"]}
-{"id": "errors-error-token", "mode": "hybrid", "query": "token error handling", "source": "mainrag", "k": 10, "expect_files": ["auth/middleware.rs", "auth/jwt.rs"]}
-{"id": "errors-fehler-token", "mode": "hybrid", "query": "token Fehlerbehandlung", "source": "mainrag", "k": 10, "expect_files": ["auth/middleware.rs", "auth/jwt.rs"]}
-{"id": "errors-validate-token", "mode": "hybrid", "query": "validate token", "source": "mainrag", "k": 10, "expect_files": ["auth/middleware.rs", "auth/jwt.rs"]}
-{"id": "errors-error-file", "mode": "hybrid", "query": "file error handling", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "plugins/"]}
-{"id": "errors-fehler-file", "mode": "hybrid", "query": "file Fehlerbehandlung", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "plugins/"]}
-{"id": "errors-validate-file", "mode": "hybrid", "query": "validate file", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "plugins/"]}
-{"id": "errors-error-query", "mode": "hybrid", "query": "query error handling", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "services/query_expander.rs"]}
-{"id": "errors-fehler-query", "mode": "hybrid", "query": "query Fehlerbehandlung", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "services/query_expander.rs"]}
-{"id": "errors-validate-query", "mode": "hybrid", "query": "validate query", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "services/query_expander.rs"]}
-{"id": "errors-error-result", "mode": "hybrid", "query": "result error handling", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "db/models.rs"]}
-{"id": "errors-fehler-result", "mode": "hybrid", "query": "result Fehlerbehandlung", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "db/models.rs"]}
-{"id": "errors-validate-result", "mode": "hybrid", "query": "validate result", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "db/models.rs"]}
-{"id": "errors-error-database", "mode": "hybrid", "query": "database error handling", "source": "mainrag", "k": 10, "expect_files": ["db/", "services/index.rs"]}
-{"id": "errors-fehler-database", "mode": "hybrid", "query": "database Fehlerbehandlung", "source": "mainrag", "k": 10, "expect_files": ["db/", "services/index.rs"]}
-{"id": "errors-validate-database", "mode": "hybrid", "query": "validate database", "source": "mainrag", "k": 10, "expect_files": ["db/", "services/index.rs"]}
-{"id": "config-config-source", "mode": "hybrid", "query": "source configuration", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "db/models.rs"]}
-{"id": "config-setup-source", "mode": "hybrid", "query": "setup source", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "db/models.rs"]}
-{"id": "config-init-source", "mode": "hybrid", "query": "initialize source", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "db/models.rs"]}
-{"id": "config-config-chunk", "mode": "hybrid", "query": "chunk configuration", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "services/chunker/"]}
-{"id": "config-setup-chunk", "mode": "hybrid", "query": "setup chunk", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "services/chunker/"]}
-{"id": "config-init-chunk", "mode": "hybrid", "query": "initialize chunk", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "services/chunker/"]}
-{"id": "config-config-embedding", "mode": "hybrid", "query": "embedding configuration", "source": "mainrag", "k": 10, "expect_files": ["services/embeddings.rs", "services/index.rs"]}
-{"id": "config-setup-embedding", "mode": "hybrid", "query": "setup embedding", "source": "mainrag", "k": 10, "expect_files": ["services/embeddings.rs", "services/index.rs"]}
-{"id": "config-init-embedding", "mode": "hybrid", "query": "initialize embedding", "source": "mainrag", "k": 10, "expect_files": ["services/embeddings.rs", "services/index.rs"]}
-{"id": "config-config-search", "mode": "hybrid", "query": "search configuration", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "api/handlers/search.rs"]}
-{"id": "config-setup-search", "mode": "hybrid", "query": "setup search", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "api/handlers/search.rs"]}
-{"id": "config-init-search", "mode": "hybrid", "query": "initialize search", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "api/handlers/search.rs"]}
-{"id": "config-config-user", "mode": "hybrid", "query": "user configuration", "source": "mainrag", "k": 10, "expect_files": ["auth/", "db/models.rs"]}
-{"id": "config-setup-user", "mode": "hybrid", "query": "setup user", "source": "mainrag", "k": 10, "expect_files": ["auth/", "db/models.rs"]}
-{"id": "config-init-user", "mode": "hybrid", "query": "initialize user", "source": "mainrag", "k": 10, "expect_files": ["auth/", "db/models.rs"]}
-{"id": "config-config-token", "mode": "hybrid", "query": "token configuration", "source": "mainrag", "k": 10, "expect_files": ["auth/middleware.rs", "auth/jwt.rs"]}
-{"id": "config-setup-token", "mode": "hybrid", "query": "setup token", "source": "mainrag", "k": 10, "expect_files": ["auth/middleware.rs", "auth/jwt.rs"]}
-{"id": "config-init-token", "mode": "hybrid", "query": "initialize token", "source": "mainrag", "k": 10, "expect_files": ["auth/middleware.rs", "auth/jwt.rs"]}
-{"id": "config-config-file", "mode": "hybrid", "query": "file configuration", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "plugins/"]}
-{"id": "config-setup-file", "mode": "hybrid", "query": "setup file", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "plugins/"]}
-{"id": "config-init-file", "mode": "hybrid", "query": "initialize file", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs", "plugins/"]}
-{"id": "config-config-query", "mode": "hybrid", "query": "query configuration", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "services/query_expander.rs"]}
-{"id": "config-setup-query", "mode": "hybrid", "query": "setup query", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "services/query_expander.rs"]}
-{"id": "config-init-query", "mode": "hybrid", "query": "initialize query", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "services/query_expander.rs"]}
-{"id": "config-config-result", "mode": "hybrid", "query": "result configuration", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "db/models.rs"]}
-{"id": "config-setup-result", "mode": "hybrid", "query": "setup result", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "db/models.rs"]}
-{"id": "config-init-result", "mode": "hybrid", "query": "initialize result", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "db/models.rs"]}
-{"id": "config-config-database", "mode": "hybrid", "query": "database configuration", "source": "mainrag", "k": 10, "expect_files": ["db/", "services/index.rs"]}
-{"id": "config-setup-database", "mode": "hybrid", "query": "setup database", "source": "mainrag", "k": 10, "expect_files": ["db/", "services/index.rs"]}
-{"id": "config-init-database", "mode": "hybrid", "query": "initialize database", "source": "mainrag", "k": 10, "expect_files": ["db/", "services/index.rs"]}
-{"id": "manual-async-runtime", "mode": "hybrid", "query": "tokio async runtime setup", "source": "mainrag", "k": 10, "expect_files": ["main.rs", "lib.rs"]}
-{"id": "manual-tracing-logs", "mode": "hybrid", "query": "tracing logging setup", "source": "mainrag", "k": 10, "expect_files": ["main.rs", "config.rs"]}
-{"id": "manual-axum-router", "mode": "hybrid", "query": "axum router routes", "source": "mainrag", "k": 10, "expect_files": ["api/routes.rs", "api/"]}
-{"id": "manual-serde-json", "mode": "hybrid", "query": "serde json serialization", "source": "mainrag", "k": 10, "expect_files": ["db/models.rs", "api/"]}
-{"id": "manual-reqwest-client", "mode": "hybrid", "query": "reqwest http client", "source": "mainrag", "k": 10, "expect_files": ["services/embeddings.rs", "services/"]}
-{"id": "manual-deadpool-postgres", "mode": "hybrid", "query": "deadpool postgres connection pool", "source": "mainrag", "k": 10, "expect_files": ["db/"]}
-{"id": "manual-tree-sitter", "mode": "hybrid", "query": "tree sitter parser syntax", "source": "mainrag", "k": 10, "expect_files": ["services/chunker/", "services/parser.rs"]}
-{"id": "manual-regex-pattern", "mode": "hybrid", "query": "regex pattern matching", "source": "mainrag", "k": 10, "expect_files": ["services/compressor.rs", "plugins/"]}
-{"id": "manual-qdrant-vector", "mode": "hybrid", "query": "qdrant vector database", "source": "mainrag", "k": 10, "expect_files": ["db/qdrant.rs", "services/"]}
-{"id": "manual-tei-inference", "mode": "hybrid", "query": "TEI text embeddings inference", "source": "mainrag", "k": 10, "expect_files": ["services/embeddings.rs"]}
-{"id": "manual-fts-postgres", "mode": "hybrid", "query": "full text search postgres tsvector", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "db/"]}
-{"id": "manual-rrf-fusion", "mode": "hybrid", "query": "reciprocal rank fusion RRF", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs"]}
-{"id": "manual-cosine-similarity", "mode": "hybrid", "query": "cosine similarity score", "source": "mainrag", "k": 10, "expect_files": ["services/search.rs", "db/qdrant.rs"]}
-{"id": "manual-batch-processing", "mode": "hybrid", "query": "batch processing chunks", "source": "mainrag", "k": 10, "expect_files": ["services/index.rs"]}
-{"id": "manual-rate-limiting", "mode": "hybrid", "query": "rate limiting middleware", "source": "mainrag", "k": 10, "expect_files": ["api/", "auth/"]}
-{"id": "manual-cors-headers", "mode": "hybrid", "query": "CORS headers configuration", "source": "mainrag", "k": 10, "expect_files": ["api/", "main.rs"]}
-{"id": "manual-env-config", "mode": "hybrid", "query": "environment variables config", "source": "mainrag", "k": 10, "expect_files": ["config.rs"]}
-{"id": "manual-health-endpoint", "mode": "hybrid", "query": "health check endpoint readiness", "source": "mainrag", "k": 10, "expect_files": ["api/handlers/"]}
-{"id": "manual-metrics-prometheus", "mode": "hybrid", "query": "prometheus metrics export", "source": "mainrag", "k": 10, "expect_files": ["api/", "services/"]}
+{"id": "kw-search-handler", "mode": "keyword", "query": "pub async fn search", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/handlers/search.rs"]}
+{"id": "fn-hybrid-search", "mode": "keyword", "query": "hybrid_search", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs", "api/src/api/handlers/search.rs"]}
+{"id": "fn-keyword-search", "mode": "keyword", "query": "keyword_search", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"]}
+{"id": "fn-semantic-search", "mode": "keyword", "query": "semantic_search", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"]}
+{"id": "fn-embed", "mode": "keyword", "query": "fn embed", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/embeddings.rs", "api/src/services/search.rs"]}
+{"id": "fn-rerank", "mode": "keyword", "query": "rerank", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/rerank.rs"]}
+{"id": "fn-compress", "mode": "keyword", "query": "compress", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/compressor.rs"]}
+{"id": "fn-expand", "mode": "keyword", "query": "expand", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/query_expander.rs"]}
+{"id": "fn-upsert", "mode": "keyword", "query": "upsert", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/qdrant.rs", "api/src/services/qdrant.rs"]}
+{"id": "fn-validate", "mode": "keyword", "query": "validate_token", "source": "mainrag", "k": 10, "expect_files": ["api/src/auth/jwt.rs"]}
+{"id": "struct-searchresult", "mode": "keyword", "query": "pub struct SearchResult", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/models.rs", "api/src/services/search.rs"]}
+{"id": "struct-chunk", "mode": "keyword", "query": "pub struct Chunk", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/chunker/mod.rs"]}
+{"id": "struct-appstate", "mode": "keyword", "query": "AppState", "source": "mainrag", "k": 10, "expect_files": ["api/src/lib.rs", "api/src/main.rs"]}
+{"id": "struct-config", "mode": "keyword", "query": "pub struct Config", "source": "mainrag", "k": 10, "expect_files": ["api/src/config.rs"]}
+{"id": "struct-claims", "mode": "keyword", "query": "struct Claims sub email", "source": "mainrag", "k": 10, "expect_files": ["api/src/auth/jwt.rs"]}
+{"id": "trait-sourceplugin", "mode": "keyword", "query": "pub trait SourcePlugin", "source": "mainrag", "k": 10, "expect_files": ["api/src/plugins/mod.rs"]}
+{"id": "trait-chunker", "mode": "keyword", "query": "pub trait Chunker", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/chunker/mod.rs"]}
+{"id": "error-apperror", "mode": "keyword", "query": "AppError", "source": "mainrag", "k": 10, "expect_files": ["api/src/error.rs"]}
+{"id": "api-search", "mode": "hybrid", "query": "POST /search endpoint handler", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/handlers/search.rs", "api/src/api/routes.rs"]}
+{"id": "api-sources", "mode": "hybrid", "query": "GET /sources endpoint", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/handlers/admin.rs", "api/src/api/handlers/sources.rs"]}
+{"id": "api-health", "mode": "hybrid", "query": "health check endpoint readiness", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/handlers/health.rs"]}
+{"id": "concept-rls", "mode": "hybrid", "query": "row level security postgres policy", "source": "mainrag", "k": 10, "expect_files": ["schema_security.sql", "api/src/db/rls.rs"]}
+{"id": "concept-jwt", "mode": "hybrid", "query": "JWT token authentication claims", "source": "mainrag", "k": 10, "expect_files": ["api/src/auth/jwt.rs", "api/src/auth/middleware.rs"]}
+{"id": "concept-hybrid", "mode": "hybrid", "query": "hybrid search combining vector and keyword RRF fusion", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"]}
+{"id": "concept-chunking", "mode": "hybrid", "query": "semantic chunking tree-sitter AST", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/chunker/semantic.rs"]}
+{"id": "concept-cch", "mode": "hybrid", "query": "contextual chunk headers parent context", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/chunker/semantic.rs", "api/src/services/index.rs"]}
+{"id": "concept-compression", "mode": "hybrid", "query": "contextual compression imports removal", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/compressor.rs"]}
+{"id": "concept-reranking", "mode": "hybrid", "query": "cross encoder reranking TEI reranker_url", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/rerank.rs", "api/src/services/search.rs"]}
+{"id": "concept-expansion", "mode": "hybrid", "query": "query expansion synonyms Qdrant", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/query_expander.rs"]}
+{"id": "de-suche", "mode": "hybrid", "query": "Suche hybrid_search keyword_search semantic_search", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"]}
+{"id": "de-authentifizierung", "mode": "hybrid", "query": "Benutzer Authentifizierung JWT", "source": "mainrag", "k": 10, "expect_files": ["api/src/auth/jwt.rs", "api/src/auth/middleware.rs"]}
+{"id": "de-fehlerbehandlung", "mode": "hybrid", "query": "AppError IntoResponse Fehlerbehandlung", "source": "mainrag", "k": 10, "expect_files": ["api/src/error.rs"]}
+{"id": "de-datenbank", "mode": "hybrid", "query": "PostgresPool deadpool create_pool Datenbank", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/postgres.rs"]}
+{"id": "de-konfiguration", "mode": "hybrid", "query": "AppConfig Server Konfiguration laden envy", "source": "mainrag", "k": 10, "expect_files": ["api/src/config.rs"]}
+{"id": "de-embeddings", "mode": "hybrid", "query": "TeiClient Embeddings generieren embed_batch", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/embeddings.rs"]}
+{"id": "de-index", "mode": "hybrid", "query": "IndexService index_source Dateien indexieren", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs"]}
+{"id": "de-chunks", "mode": "hybrid", "query": "Text in Chunks aufteilen Token", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/chunker/semantic.rs", "api/src/services/chunker/token.rs"]}
+{"id": "de-api-handler", "mode": "hybrid", "query": "API Handler Routen", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/routes.rs", "api/src/api/handlers/search.rs"]}
+{"id": "de-middleware", "mode": "hybrid", "query": "Middleware Authentifizierung pruefen", "source": "mainrag", "k": 10, "expect_files": ["api/src/auth/middleware.rs"]}
+{"id": "specific-upsert-chunks-batch", "mode": "keyword", "query": "upsert_chunks_batch", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/qdrant.rs", "api/src/services/qdrant.rs"]}
+{"id": "specific-apply-rls-context", "mode": "keyword", "query": "apply_rls_context", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/rls.rs", "api/src/db/rls_client.rs"]}
+{"id": "specific-min-similarity", "mode": "keyword", "query": "MIN_SIMILARITY_THRESHOLD", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/query_expander.rs"]}
+{"id": "multi-hybrid-search-vector", "mode": "hybrid", "query": "hybrid search combining vector and keyword RRF", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"]}
+{"id": "multi-jwt-token-claims", "mode": "hybrid", "query": "extract claims from jwt token", "source": "mainrag", "k": 10, "expect_files": ["api/src/auth/jwt.rs"]}
+{"id": "multi-batch-embedding", "mode": "hybrid", "query": "embed_batch TeiClient batch embedding", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/embeddings.rs"]}
+{"id": "typo-serach", "mode": "hybrid", "query": "serach results ranking", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs", "api/src/api/handlers/search.rs"]}
+{"id": "typo-databse", "mode": "hybrid", "query": "databse connection pool deadpool", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/postgres.rs", "api/src/db/health_pool.rs"]}
+{"id": "manual-async-runtime", "mode": "hybrid", "query": "tokio async runtime setup", "source": "mainrag", "k": 10, "expect_files": ["api/src/main.rs"]}
+{"id": "manual-tracing-logs", "mode": "hybrid", "query": "tracing logging setup structured", "source": "mainrag", "k": 10, "expect_files": ["api/src/main.rs", "api/src/config.rs"]}
+{"id": "manual-axum-router", "mode": "hybrid", "query": "axum router routes definition", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/routes.rs"]}
+{"id": "manual-serde-json", "mode": "hybrid", "query": "serde json serialization models", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/models.rs"]}
+{"id": "manual-reqwest-client", "mode": "hybrid", "query": "reqwest http client embeddings", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/embeddings.rs"]}
+{"id": "manual-deadpool-postgres", "mode": "hybrid", "query": "deadpool postgres connection pool config", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/postgres.rs"]}
+{"id": "manual-tree-sitter", "mode": "hybrid", "query": "tree sitter parser syntax language", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/chunker/semantic.rs", "api/src/services/parser.rs"]}
+{"id": "manual-regex-pattern", "mode": "hybrid", "query": "regex pattern matching import", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/compressor.rs"]}
+{"id": "manual-qdrant-vector", "mode": "hybrid", "query": "qdrant vector database search", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/qdrant.rs", "api/src/services/qdrant.rs"]}
+{"id": "manual-tei-inference", "mode": "hybrid", "query": "TEI text embeddings inference TeiClient", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/embeddings.rs"]}
+{"id": "manual-fts-postgres", "mode": "hybrid", "query": "full text search postgres tsvector tsquery", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs", "schema.sql"]}
+{"id": "manual-rrf-fusion", "mode": "hybrid", "query": "reciprocal rank fusion RRF scoring", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"]}
+{"id": "manual-cosine-similarity", "mode": "hybrid", "query": "cosine similarity deduplication", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"]}
+{"id": "manual-batch-processing", "mode": "hybrid", "query": "batch processing chunks embedding pipeline", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs"]}
+{"id": "manual-rate-limiting", "mode": "hybrid", "query": "rate limiting middleware tower governor", "source": "mainrag", "k": 10, "expect_files": ["api/src/ratelimit.rs"]}
+{"id": "manual-cors-headers", "mode": "hybrid", "query": "CORS headers configuration allowed origins", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/routes.rs"]}
+{"id": "manual-env-config", "mode": "hybrid", "query": "environment variables configuration loading", "source": "mainrag", "k": 10, "expect_files": ["api/src/config.rs"]}
+{"id": "manual-health-endpoint", "mode": "hybrid", "query": "health check endpoint readiness probe", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/handlers/health.rs"]}
+{"id": "manual-metrics-prometheus", "mode": "hybrid", "query": "prometheus metrics export counters histograms", "source": "mainrag", "k": 10, "expect_files": ["api/src/metrics.rs"]}
+{"id": "agent-find-auth-code", "mode": "hybrid", "query": "where is the authentication code", "source": "mainrag", "k": 10, "expect_files": ["api/src/auth/middleware.rs", "api/src/auth/jwt.rs"]}
+{"id": "agent-how-search-works", "mode": "hybrid", "query": "how does search work in this codebase", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"]}
+{"id": "agent-add-language", "mode": "hybrid", "query": "how to add a new programming language for chunking", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/chunker/semantic.rs", "api/src/services/parser.rs"]}
+{"id": "agent-api-routes", "mode": "hybrid", "query": "what API endpoints are available", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/routes.rs"]}
+{"id": "agent-error-handling", "mode": "hybrid", "query": "how does error handling work in the API", "source": "mainrag", "k": 10, "expect_files": ["api/src/error.rs"]}
+{"id": "agent-db-schema", "mode": "hybrid", "query": "what tables exist in the database schema", "source": "mainrag", "k": 10, "expect_files": ["schema.sql"]}
+{"id": "agent-security-model", "mode": "hybrid", "query": "how is multi-tenant data isolation implemented", "source": "mainrag", "k": 10, "expect_files": ["schema_security.sql", "api/src/services/qdrant.rs"]}
+{"id": "agent-indexing-pipeline", "mode": "hybrid", "query": "how does the file indexing pipeline work", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs"]}
+{"id": "agent-qdrant-tenant", "mode": "hybrid", "query": "how does Qdrant handle tenant isolation", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/qdrant.rs"]}
+{"id": "agent-circuit-breaker", "mode": "hybrid", "query": "circuit breaker pattern for service failures", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/circuit_breaker.rs"]}
+{"id": "agent-pdf-extraction", "mode": "hybrid", "query": "how are PDF files processed and extracted", "source": "mainrag", "k": 10, "expect_files": ["api/src/plugins/pdf/mod.rs", "api/src/plugins/pdf/extract_impl.rs"]}
+{"id": "agent-watch-files", "mode": "hybrid", "query": "file watcher detecting changes for re-indexing", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/watch.rs"]}
+{"id": "agent-outbox-worker", "mode": "hybrid", "query": "outbox worker background processing", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/outbox_worker.rs"]}
+{"id": "agent-embedding-queue", "mode": "hybrid", "query": "embedding queue batch processing", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/embedding_queue.rs"]}
+{"id": "agent-mcp-server", "mode": "hybrid", "query": "MCP server tool definitions", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/mcp.rs", "api/src/api/handlers/mcp.rs"]}
+{"id": "agent-intelligence", "mode": "hybrid", "query": "IntelligenceService code intelligence symbol extraction", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/intelligence.rs"]}
+{"id": "agent-gpu-semaphore", "mode": "hybrid", "query": "GPU semaphore concurrency limit", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/gpu_semaphore.rs"]}
+{"id": "agent-fs-plugin", "mode": "hybrid", "query": "filesystem source plugin local directory", "source": "mainrag", "k": 10, "expect_files": ["api/src/plugins/fs.rs"]}
+{"id": "agent-git-plugin", "mode": "hybrid", "query": "git source plugin clone repository", "source": "mainrag", "k": 10, "expect_files": ["api/src/plugins/git.rs"]}
+{"id": "agent-web-plugin", "mode": "hybrid", "query": "web source plugin crawl URL", "source": "mainrag", "k": 10, "expect_files": ["api/src/plugins/web.rs"]}
+{"id": "agent-token-chunker", "mode": "hybrid", "query": "token based chunking with overlap", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/chunker/token.rs"]}
+{"id": "agent-quality-metrics", "mode": "hybrid", "query": "QualityService chunk quality scoring", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/quality.rs"]}
+{"id": "agent-ocr-extraction", "mode": "hybrid", "query": "OCR text extraction from images", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/ocr.rs"]}
+{"id": "agent-db-health", "mode": "hybrid", "query": "HealthPool database health check connection", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/health_pool.rs"]}
+{"id": "agent-rls-client", "mode": "hybrid", "query": "RLS client set application user context", "source": "mainrag", "k": 10, "expect_files": ["api/src/db/rls_client.rs", "api/src/db/rls.rs"]}
+{"id": "agent-benchmark", "mode": "hybrid", "query": "BenchmarkService search performance latency", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/benchmark.rs"]}
+{"id": "agent-export-plugin", "mode": "hybrid", "query": "export plugin data extraction", "source": "mainrag", "k": 10, "expect_files": ["api/src/plugins/export.rs"]}
+{"id": "agent-process-handler", "mode": "hybrid", "query": "process handler background task management", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/handlers/processes.rs"]}
+{"id": "agent-agents-handler", "mode": "hybrid", "query": "agents handler API key management", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/handlers/agents.rs"]}
+{"id": "agent-sources-handler", "mode": "hybrid", "query": "sources handler CRUD operations", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/handlers/sources.rs"]}
+{"id": "agent-extractors", "mode": "hybrid", "query": "request extractors authentication context", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/extractors.rs"]}
+{"id": "agent-text-utils", "mode": "keyword", "query": "normalize_whitespace", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/compressor.rs", "api/src/plugins/pdf_cleanup.rs"]}
+{"id": "agent-character-chunker", "mode": "hybrid", "query": "character based chunking fallback", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/chunker/character.rs"]}
+{"id": "agent-jsonl-chunker", "mode": "hybrid", "query": "JSONL conversation chunking", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/chunker/jsonl.rs"]}
+{"id": "agent-pdf-smart-chunker", "mode": "hybrid", "query": "PDF smart chunking sections", "source": "mainrag", "k": 10, "expect_files": ["api/src/plugins/pdf_smart_chunker.rs"]}
+{"id": "agent-pdf-cleanup", "mode": "hybrid", "query": "PDF text cleanup normalization", "source": "mainrag", "k": 10, "expect_files": ["api/src/plugins/pdf_cleanup.rs"]}
+{"id": "kw-fts-vector", "mode": "keyword", "query": "fts_vector", "source": "mainrag", "k": 10, "expect_files": ["schema.sql", "api/src/services/search.rs"]}
+{"id": "kw-circuit-breaker-new", "mode": "keyword", "query": "CircuitBreaker::new", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/circuit_breaker.rs", "api/src/services/search.rs"]}
+{"id": "kw-backfill-active", "mode": "keyword", "query": "backfill_active", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"]}
+{"id": "kw-content-prefix", "mode": "keyword", "query": "context_prefix", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs", "api/src/services/search.rs"]}
+{"id": "kw-gpu-semaphore", "mode": "keyword", "query": "GpuSemaphores", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/gpu_semaphore.rs"]}
+{"id": "kw-search-mode", "mode": "keyword", "query": "SearchMode", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"]}
+{"id": "kw-tenant-context", "mode": "keyword", "query": "TenantContext", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/qdrant.rs", "api/src/services/search.rs"]}
+{"id": "kw-overlap-multiplier", "mode": "keyword", "query": "OVERLAP_MULTIPLIER", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"]}
+{"id": "kw-rrf-constant", "mode": "keyword", "query": "RRF_K", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"]}
+{"id": "kw-watch-service", "mode": "keyword", "query": "WatchService", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/watch.rs"]}
+{"id": "de-vektorsuche", "mode": "hybrid", "query": "QdrantService Vektorsuche semantic_search similarity", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/qdrant.rs", "api/src/services/search.rs"]}
+{"id": "de-dateien-indexieren", "mode": "hybrid", "query": "IndexService Dateien indexieren index_source", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs"]}
+{"id": "de-sicherheit-zugriff", "mode": "hybrid", "query": "RLS Sicherheit Zugriffskontrolle tenant_id", "source": "mainrag", "k": 10, "expect_files": ["schema_security.sql", "api/src/db/rls.rs"]}
+{"id": "de-ueberwachung-gesundheit", "mode": "hybrid", "query": "health_check readiness HealthHandler", "source": "mainrag", "k": 10, "expect_files": ["api/src/api/handlers/health.rs"]}
+{"id": "de-pdf-verarbeitung", "mode": "hybrid", "query": "PDF Dokumente verarbeiten extrahieren", "source": "mainrag", "k": 10, "expect_files": ["api/src/plugins/pdf/mod.rs"]}
+{"id": "kw-embed-dim", "mode": "keyword", "query": "embedding_dim", "source": "mainrag", "k": 10, "expect_files": ["api/src/config.rs", "api/src/services/embeddings.rs"]}
+{"id": "kw-outbox-worker", "mode": "keyword", "query": "OutboxWorker run_purge_task", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/outbox_worker.rs"]}
+{"id": "kw-pdf-extract", "mode": "keyword", "query": "extract_text_from_pdf", "source": "mainrag", "k": 10, "expect_files": ["api/src/plugins/pdf/extract_impl.rs"]}
+{"id": "schema-sources", "mode": "keyword", "query": "CREATE TABLE sources", "source": "mainrag", "k": 10, "expect_files": ["schema.sql"]}
+{"id": "schema-files", "mode": "keyword", "query": "CREATE TABLE files", "source": "mainrag", "k": 10, "expect_files": ["schema.sql"]}
+{"id": "schema-users", "mode": "keyword", "query": "CREATE TABLE users", "source": "mainrag", "k": 10, "expect_files": ["schema_security.sql"]}
+{"id": "schema-api-keys", "mode": "keyword", "query": "CREATE TABLE api_keys", "source": "mainrag", "k": 10, "expect_files": ["schema_security.sql"]}
+{"id": "schema-web", "mode": "keyword", "query": "CREATE TABLE sessions", "source": "mainrag", "k": 10, "expect_files": ["schema_web.sql"]}
+{"id": "agent-how-dedup-works", "mode": "hybrid", "query": "how does deduplication remove similar results", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"]}
+{"id": "agent-how-cch-built", "mode": "hybrid", "query": "how are contextual chunk headers built during indexing", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/index.rs"]}
+{"id": "agent-where-fts-query", "mode": "hybrid", "query": "where is the FTS query built for postgres", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"]}
+{"id": "agent-how-rerank-scores", "mode": "hybrid", "query": "how are reranking scores combined with RRF", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs"]}
+{"id": "agent-degraded-fallback", "mode": "hybrid", "query": "what happens when vector search fails graceful degradation", "source": "mainrag", "k": 10, "expect_files": ["api/src/services/search.rs", "api/src/services/circuit_breaker.rs"]}

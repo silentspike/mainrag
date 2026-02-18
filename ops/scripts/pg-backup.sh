@@ -9,8 +9,8 @@ RETENTION_DAYS=7
 DATE=$(date +%Y%m%d_%H%M%S)
 BACKUP_FILE="${BACKUP_DIR}/mainrag_${DATE}.sql.gz"
 
-# Export password from environment or use default
-export PGPASSWORD="${POSTGRES_PASSWORD:-<REDACTED_DB_PW>}"
+# Export password from environment (required)
+export PGPASSWORD="${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
 
 echo "[$(date)] Starting PostgreSQL backup..."
 

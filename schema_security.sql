@@ -1,10 +1,11 @@
 -- ===================================================================
--- MAINRAG Security & Auth Schema Extension
+-- MAINRAG Security & Auth Schema Extension - HISTORICAL / REFERENCE ONLY
 -- ===================================================================
--- Version: 1.0
+-- WARNING: This file is OUTDATED. The actual schema is defined by
+-- the migrations in /work/mainrag/migrations/ (Source of Truth).
+--
+-- Original Version: 1.0
 -- Enterprise-grade security for multi-tenant RAG system
--- Reference: https://ragaboutit.com/the-ultimate-guide-to-rag-authorization/
--- Reference: https://www.daxa.ai/blogs/secure-retrieval-augmented-generation-rag-in-enterprise-environments
 -- ===================================================================
 
 -- Enable required extensions

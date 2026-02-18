@@ -1,7 +1,12 @@
 -- ===================================================================
--- CodeRag PostgreSQL Schema - Optimized for RAG Workload
+-- CodeRag PostgreSQL Schema - HISTORICAL / REFERENCE ONLY
 -- ===================================================================
--- Version: 1.0
+-- WARNING: This file is OUTDATED. The actual schema is defined by
+-- the migrations in /work/mainrag/migrations/ (Source of Truth).
+-- To get the current schema, run:
+--   pg_dump --schema-only --no-owner --no-privileges mainrag
+--
+-- Original Version: 1.0 (pre-migration era)
 -- PostgreSQL 18.1 + pgvector 0.8.1
 -- Hardware: AMD Ryzen 9 5900HS, 16GB RAM, NVMe SSD
 -- Workload: 10-20 parallel coding agents

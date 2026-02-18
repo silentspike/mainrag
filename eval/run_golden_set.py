@@ -78,7 +78,10 @@ def load_golden_set(path: Path) -> list[TestCase]:
 def check_hit(result_files: list[str], expect_files: list[str]) -> bool:
     """
     Check if any expected file appears in results.
-    Uses endswith() matching for path flexibility.
+
+    Supports two match modes:
+    - Directory patterns (ending with "/"): match if any result file contains the directory
+    - File patterns: match if any result file ends with the expected path
 
     For negative cases (expect_files=[]), returns True only if no results.
     """
@@ -88,7 +91,11 @@ def check_hit(result_files: list[str], expect_files: list[str]) -> bool:
 
     for expected in expect_files:
         for actual in result_files:
-            if actual.endswith(expected):
+            if expected.endswith("/"):
+                # Directory match: check if file is inside directory
+                if f"/{expected}" in f"/{actual}" or actual.startswith(expected):
+                    return True
+            elif actual.endswith(expected):
                 return True
     return False
 
