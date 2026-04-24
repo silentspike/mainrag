@@ -50,8 +50,6 @@ urlencoding = "2.1"
 notify = "6"
 notify-debouncer-mini = "0.4"
 
-[profile.release]
-strip = true
-lto = true
-codegen-units = 1
-opt-level = "z"
+# [profile.release] lives in the workspace root Cargo.toml — Cargo ignores
+# non-root profiles since 1.84 and emits a warning. Keep profile settings
+# centralized there.

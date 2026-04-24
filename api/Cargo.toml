@@ -167,8 +167,6 @@ trybuild = "1"
 name = "query_expansion_bench"
 harness = false
 
-[profile.release]
-lto = true
-codegen-units = 1
-opt-level = 3
-strip = true
+# [profile.release] lives in the workspace root Cargo.toml — Cargo ignores
+# non-root profiles since 1.84 and emits a warning. Keep profile settings
+# centralized there.
