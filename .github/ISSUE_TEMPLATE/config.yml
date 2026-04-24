@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Search existing issues
+    url: https://github.com/silentspike/mainrag/issues?q=is%3Aissue
+    about: Please search before filing a new issue.

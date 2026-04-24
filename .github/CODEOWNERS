@@ -1,0 +1,8 @@
+# Default owner for everything in the repo.
+*                   @obtFusi
+
+# Infrastructure + release machinery require extra scrutiny.
+/.github/           @obtFusi
+/docker-compose.yml @obtFusi
+/ops/               @obtFusi
+/LICENSE            @obtFusi

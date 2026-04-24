@@ -1,0 +1,25 @@
+version: 2
+updates:
+  # Rust workspace dependencies (root + members inherit via workspace.dependencies)
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "rust"]
+    groups:
+      tree-sitter-grammars:
+        patterns: ["tree-sitter-*"]
+      tokio-ecosystem:
+        patterns: ["tokio*", "tower*", "hyper*"]
+      axum-ecosystem:
+        patterns: ["axum*", "reqwest*"]
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    labels: ["dependencies", "ci"]
