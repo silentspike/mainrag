@@ -196,12 +196,18 @@ max_parallel_workers = 8
 
 ## Credentials
 
-**Location**: `/work/mainrag/credentials.json`
+**Location**: `/etc/mainrag/mainrag.env` (systemd `EnvironmentFile=`,
+  mode `600`, owner `mainrag:mainrag`). A redacted reference template
+  lives in `mainrag.env.example` at the repository root.
 
-| User | Password | Purpose |
-|------|----------|---------|
-| coderag | <REDACTED_OLD_PG_PW> | Application DB user |
-| admin | <REDACTED_ADMIN_PW> | Initial admin (CHANGE!) |
+| User        | Purpose              | Secret source                       |
+|-------------|----------------------|-------------------------------------|
+| `mainrag`   | Application DB user  | `$POSTGRES_PASSWORD` in env file    |
+| `admin`     | Initial admin login  | `<REDACTED>` — must be rotated on first login; dual-key graceful rotation via `API_KEY_PEPPER_PREVIOUS` |
+
+Bcrypt password column in `users`: Argon2id (`$argon2id$v=19$...`) — the
+specific parameters are `m=65536,t=3,p=4`. Real hashes are never
+committed; use `argon2 <password>` locally to generate one.
 
 ## Files
 
@@ -210,7 +216,7 @@ max_parallel_workers = 8
 | `schema.sql` | Core RAG tables (742 lines) |
 | `schema_security.sql` | Security/auth tables (601 lines) |
 | `schema_web.sql` | Web frontend tables (487 lines) |
-| `credentials.json` | All credentials (DO NOT COMMIT) |
+| `mainrag.env.example` | Env-var template with redacted placeholders |
 | `ARCHITECTURE.md` | This file |
 
 ## References
