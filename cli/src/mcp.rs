@@ -176,6 +176,81 @@ impl McpServer {
                     "required": ["function"]
                 }),
             },
+            Tool {
+                name: "mainrag_browse_layers".to_string(),
+                description: "Browse symbol cards by API layer, resource type, or side-effect.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "layer": { "type": "string", "description": "Layer filter (controller_api, proxy, internal, etc.)" },
+                        "resource": { "type": "string", "description": "Resource filter (clip, track, device, etc.)" },
+                        "side_effect": { "type": "string", "description": "Side-effect filter (create, delete, get, etc.)" },
+                        "limit": { "type": "number", "description": "Max results (default: 20)" }
+                    }
+                }),
+            },
+            Tool {
+                name: "mainrag_get_ownership".to_string(),
+                description: "Get ownership/containment relations for a symbol (who owns it, what it contains).".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "symbol": { "type": "string", "description": "Symbol or class name" }
+                    },
+                    "required": ["symbol"]
+                }),
+            },
+            Tool {
+                name: "mainrag_explore".to_string(),
+                description: "Explore a concept: rewrites query, traces delegation chains, returns candidate paths + dead ends. Best for 'how do I...' questions.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Natural language question" },
+                        "source": { "type": "string", "description": "Source name filter" }
+                    },
+                    "required": ["query"]
+                }),
+            },
+            Tool {
+                name: "mainrag_get_symbol_card".to_string(),
+                description: "Get enriched symbol card with layer, delegation, side effects, thread requirements and classification confidence.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Symbol name" },
+                        "source": { "type": "string", "description": "Filter by source name" }
+                    },
+                    "required": ["name"]
+                }),
+            },
+            Tool {
+                name: "mainrag_explain_path".to_string(),
+                description: "Trace delegation chain from a symbol through proxy -> dispatch -> mutation. Shows code snippets and thread requirements.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "symbol_name": { "type": "string", "description": "Symbol name to trace" },
+                        "source": { "type": "string", "description": "Filter by source name" },
+                        "max_depth": { "type": "number", "description": "Max chain depth (default: 6)" }
+                    },
+                    "required": ["symbol_name"]
+                }),
+            },
+            Tool {
+                name: "mainrag_report_dead_end".to_string(),
+                description: "Report a known dead-end path to prevent repeating failed approaches.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "concept": { "type": "string", "description": "What was attempted" },
+                        "path_description": { "type": "string", "description": "The path that failed" },
+                        "reason": { "type": "string", "description": "Why it fails" },
+                        "symbols": { "type": "array", "items": { "type": "string" }, "description": "Involved symbols" }
+                    },
+                    "required": ["concept", "path_description", "reason"]
+                }),
+            },
         ];
 
         Ok(json!({ "tools": tools }))
@@ -199,6 +274,12 @@ impl McpServer {
             "mainrag_find_symbols" => self.tool_find_symbols(arguments).await,
             "mainrag_find_callers" => self.tool_find_callers(arguments).await,
             "mainrag_find_callees" => self.tool_find_callees(arguments).await,
+            "mainrag_get_symbol_card" => self.tool_get_symbol_card(arguments).await,
+            "mainrag_explain_path" => self.tool_explain_path(arguments).await,
+            "mainrag_report_dead_end" => self.tool_report_dead_end(arguments).await,
+            "mainrag_explore" => self.tool_explore(arguments).await,
+            "mainrag_browse_layers" => self.tool_browse_layers(arguments).await,
+            "mainrag_get_ownership" => self.tool_get_ownership(arguments).await,
             _ => Err(McpError {
                 code: -32602,
                 message: format!("Unknown tool: {}", tool_name),
@@ -258,7 +339,9 @@ impl McpServer {
             message: "Missing function".to_string(),
         })?;
 
-        let result = self.client.find_callers(function)
+        let source = args.get("source").and_then(|v| v.as_str());
+
+        let result = self.client.find_callers(function, source)
             .await
             .map_err(|e| McpError {
                 code: -32000,
@@ -287,8 +370,9 @@ impl McpServer {
             code: -32602,
             message: "Missing function".to_string(),
         })?;
+        let source = args.get("source").and_then(|v| v.as_str());
 
-        let result = self.client.find_callees(function)
+        let result = self.client.find_callees(function, source)
             .await
             .map_err(|e| McpError {
                 code: -32000,
@@ -310,5 +394,120 @@ impl McpServer {
                 }]
             }))
         }
+    }
+
+    async fn tool_browse_layers(&self, args: &Value) -> Result<Value, McpError> {
+        // browse_layers uses the cards endpoint with filters
+        let layer = args.get("layer").and_then(|v| v.as_str());
+        let resource = args.get("resource").and_then(|v| v.as_str());
+        let side_effect = args.get("side_effect").and_then(|v| v.as_str());
+
+        // Build query params — pass "*" as name wildcard
+        let mut url = format!("{}/api/v1/intelligence/cards?name=%25", self.client.base_url());
+        if let Some(l) = layer { url.push_str(&format!("&layer={}", l)); }
+        if let Some(r) = resource { url.push_str(&format!("&resource={}", r)); }
+        if let Some(s) = side_effect { url.push_str(&format!("&side_effect={}", s)); }
+
+        // Use get_symbol_cards with a wildcard — the API supports layer/resource/side_effect filters
+        let cards = self.client.get_symbol_cards("%", None)
+            .await
+            .map_err(|e| McpError { code: -32000, message: e.to_string() })?;
+
+        // Filter client-side if API doesn't support all params yet
+        let filtered: Vec<_> = cards.into_iter().filter(|c| {
+            layer.is_none_or(|l| c.layer.as_deref() == Some(l))
+                && resource.is_none_or(|r| c.affected_resource.as_deref() == Some(r))
+                && side_effect.is_none_or(|s| c.side_effect_type.as_deref() == Some(s))
+        }).take(20).collect();
+
+        Ok(json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&filtered).unwrap_or_default() }] }))
+    }
+
+    async fn tool_get_ownership(&self, args: &Value) -> Result<Value, McpError> {
+        let symbol = args["symbol"].as_str().ok_or_else(|| McpError {
+            code: -32602, message: "Missing symbol".to_string(),
+        })?;
+
+        // Call ownership endpoint via the API
+        let url = format!("{}/api/v1/intelligence/ownership?symbol={}",
+            self.client.base_url(), urlencoding::encode(symbol));
+        let response = self.client.raw_get(&url)
+            .await
+            .map_err(|e| McpError { code: -32000, message: e.to_string() })?;
+
+        Ok(json!({ "content": [{ "type": "text", "text": response }] }))
+    }
+
+    async fn tool_explore(&self, args: &Value) -> Result<Value, McpError> {
+        let query = args["query"].as_str().ok_or_else(|| McpError {
+            code: -32602, message: "Missing query".to_string(),
+        })?;
+        let source = args.get("source").and_then(|v| v.as_str());
+
+        let result = self.client.explore(query, source)
+            .await
+            .map_err(|e| McpError { code: -32000, message: e.to_string() })?;
+
+        // Return formatted text directly — structured for LLM consumption
+        Ok(json!({ "content": [{ "type": "text", "text": result.formatted }] }))
+    }
+
+    async fn tool_get_symbol_card(&self, args: &Value) -> Result<Value, McpError> {
+        let name = args["name"].as_str().ok_or_else(|| McpError {
+            code: -32602,
+            message: "Missing name".to_string(),
+        })?;
+        let source = args.get("source").and_then(|v| v.as_str());
+
+        let cards = self.client.get_symbol_cards(name, source)
+            .await
+            .map_err(|e| McpError { code: -32000, message: e.to_string() })?;
+
+        if cards.is_empty() {
+            Ok(json!({ "content": [{ "type": "text", "text": format!("No symbol card found for '{}'", name) }] }))
+        } else {
+            Ok(json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&cards).unwrap_or_default() }] }))
+        }
+    }
+
+    async fn tool_explain_path(&self, args: &Value) -> Result<Value, McpError> {
+        let symbol_name = args["symbol_name"].as_str().ok_or_else(|| McpError {
+            code: -32602,
+            message: "Missing symbol_name".to_string(),
+        })?;
+        let source = args.get("source").and_then(|v| v.as_str());
+        let max_depth = args.get("max_depth").and_then(|v| v.as_u64()).map(|d| d as u32);
+
+        let chains = self.client.explain_path(symbol_name, source, max_depth)
+            .await
+            .map_err(|e| McpError { code: -32000, message: e.to_string() })?;
+
+        if chains.is_empty() {
+            Ok(json!({ "content": [{ "type": "text", "text": format!("No delegation chain found for '{}'", symbol_name) }] }))
+        } else {
+            Ok(json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&chains).unwrap_or_default() }] }))
+        }
+    }
+
+    async fn tool_report_dead_end(&self, args: &Value) -> Result<Value, McpError> {
+        let concept = args["concept"].as_str().ok_or_else(|| McpError {
+            code: -32602, message: "Missing concept".to_string(),
+        })?;
+        let path_description = args["path_description"].as_str().ok_or_else(|| McpError {
+            code: -32602, message: "Missing path_description".to_string(),
+        })?;
+        let reason = args["reason"].as_str().ok_or_else(|| McpError {
+            code: -32602, message: "Missing reason".to_string(),
+        })?;
+        let symbols: Vec<String> = args.get("symbols")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+
+        let id = self.client.create_negative_evidence(concept, path_description, reason, &symbols, None)
+            .await
+            .map_err(|e| McpError { code: -32000, message: e.to_string() })?;
+
+        Ok(json!({ "content": [{ "type": "text", "text": format!("Dead-end recorded (id: {})", id) }] }))
     }
 }
