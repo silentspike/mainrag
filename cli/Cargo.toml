@@ -47,7 +47,7 @@ url = "2.5"
 urlencoding = "2.1"
 
 # Watch Mode (Phase 11)
-notify = "6"
+notify = "8"
 notify-debouncer-mini = "0.4"
 
 # [profile.release] lives in the workspace root Cargo.toml — Cargo ignores

@@ -134,7 +134,7 @@ tree-sitter-scheme = "0.24"
 tree-sitter-sequel = "0.3"
 
 # Watch Mode (Phase 11)
-notify = "6"
+notify = "8"
 notify-debouncer-mini = "0.4"
 dashmap = "6"  # Thread-safe HashMap for watch service caches (TODO: migrate to moka)
 
