@@ -5,6 +5,10 @@ credentials.json
 *.key
 *.pem
 .cargo-remote.toml
+# Exceptions — redacted templates are part of the repo:
+!mainrag.env.example
+!.cargo-remote.toml.example
+!credentials.example.json
 
 # ─── Build artefacts ─────────────────────────────────────────────────
 target/
@@ -62,3 +66,7 @@ data/*
 !data/benchmarks/
 data/benchmarks/*
 !data/benchmarks/search_latency_20260424T140514Z.json
+
+# Temporary / intermediate run output (never committed):
+data/benchmarks/*.tmp
+eval/results/*.tmp

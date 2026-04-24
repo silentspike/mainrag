@@ -1,0 +1,14 @@
+# Optional: offload cargo builds to a remote machine via cargo-remote.
+#
+# Copy to `.cargo-remote.toml` at the repo root (or cli/ / api/ subdirs),
+# fill in your build host, and run `cargo remote -c -- build`. The real
+# file is gitignored.
+
+[[remote]]
+host = "<USER>@<BUILD_SERVER_HOST>"
+temp_dir = "/tmp/builds"
+
+# Multiple remotes are supported; cargo-remote picks the first reachable:
+# [[remote]]
+# host = "<fallback>@<secondary-host>"
+# temp_dir = "/tmp/builds"

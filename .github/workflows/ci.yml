@@ -71,3 +71,45 @@ jobs:
               sys.exit(1)
           print(f"README.md: {len(links)} relative links all resolve")
           PY
+
+  # Integration smoke test — brings up PostgreSQL + Qdrant as service
+  # containers and verifies the API can reach them. Does not try to load
+  # GTE embeddings (TEI needs a real GPU + model cache), so the API
+  # compile/link is verified but the retrieval round-trip is not.
+  integration:
+    name: integration services smoke
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: mainrag_ci
+          POSTGRES_USER: mainrag
+          POSTGRES_PASSWORD: ci_only_secret
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mainrag -d mainrag_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      qdrant:
+        image: qdrant/qdrant:v1.16.3
+        ports:
+          - 6333:6333
+          - 6334:6334
+        options: >-
+          --health-cmd "bash -c '</dev/tcp/localhost/6333'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify PostgreSQL reachable
+        run: |
+          PGPASSWORD=ci_only_secret psql -h localhost -U mainrag -d mainrag_ci -c 'SELECT version();'
+      - name: Verify Qdrant reachable
+        run: |
+          curl -sf http://localhost:6333/readyz
+          curl -sf http://localhost:6333/collections | python3 -m json.tool
