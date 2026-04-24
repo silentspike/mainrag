@@ -123,6 +123,79 @@ enum Commands {
         /// Direction: callers, callees, or both (default)
         #[arg(short, long, default_value = "both")]
         direction: String,
+
+        /// Filter by source name (e.g. bitwig6-decompiled)
+        #[arg(short, long)]
+        source: Option<String>,
+
+        /// N-hop depth for transitive call chain (default: 1 = direct only)
+        #[arg(long, default_value = "1")]
+        depth: i32,
+    },
+
+    /// Show enriched symbol card (layer, delegation, side effects, confidence)
+    Card {
+        /// Symbol name
+        symbol: String,
+
+        /// Filter by source name
+        #[arg(short, long)]
+        source: Option<String>,
+    },
+
+    /// Trace delegation chain through proxy -> dispatch -> mutation
+    Explain {
+        /// Symbol name to trace
+        symbol: String,
+
+        /// Filter by source name
+        #[arg(short, long)]
+        source: Option<String>,
+
+        /// Maximum chain depth
+        #[arg(short, long, default_value = "6")]
+        depth: u32,
+    },
+
+    /// Browse API layers, resources, and side-effects
+    Layers {
+        /// Filter by layer (e.g. controller_api, proxy, internal)
+        #[arg(short, long)]
+        layer: Option<String>,
+
+        /// Filter by resource (e.g. clip, track, device)
+        #[arg(short, long)]
+        resource: Option<String>,
+
+        /// Filter by side-effect (e.g. create, delete, get)
+        #[arg(short = 'e', long)]
+        side_effect: Option<String>,
+
+        /// Maximum results
+        #[arg(long, default_value = "20")]
+        limit: u32,
+    },
+
+    /// Show ownership/containment relations for a symbol
+    Ownership {
+        /// Symbol or class name
+        symbol: String,
+    },
+
+    /// Explore a concept: query rewriting + path tracing + dead-end warnings
+    Explore {
+        /// Natural language question (e.g. "how do I delete an arranger clip")
+        query: String,
+
+        /// Filter by source name
+        #[arg(short, long)]
+        source: Option<String>,
+    },
+
+    /// Record or search known dead-end paths
+    DeadEnd {
+        #[command(subcommand)]
+        action: DeadEndAction,
     },
 
     /// Admin maintenance commands (requires admin privileges)
@@ -186,6 +259,38 @@ enum ConfigAction {
     Set {
         key: String,
         value: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum DeadEndAction {
+    /// Record a dead-end path
+    Add {
+        /// What was attempted (e.g. "delete arranger clip")
+        #[arg(long)]
+        concept: String,
+
+        /// The path that failed (e.g. "clearTime")
+        #[arg(long)]
+        path: String,
+
+        /// Why it fails
+        #[arg(long)]
+        reason: String,
+
+        /// Involved symbol names (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        symbols: Vec<String>,
+
+        /// Source name
+        #[arg(short, long)]
+        source: Option<String>,
+    },
+
+    /// Search for known dead-ends
+    List {
+        /// Search concept
+        concept: String,
     },
 }
 
@@ -267,9 +372,38 @@ async fn main() -> anyhow::Result<()> {
             commands::symbols::run(&client, &query, symbol_type.as_deref(), limit, cli.json).await
         }
 
-        Commands::CallGraph { function, direction } => {
-            commands::call_graph::run(&client, &function, &direction, cli.json).await
+        Commands::CallGraph { function, direction, source, depth } => {
+            commands::call_graph::run(&client, &function, &direction, source.as_deref(), depth, cli.json).await
         }
+
+        Commands::Card { symbol, source } => {
+            commands::card::run(&client, &symbol, source.as_deref(), cli.json).await
+        }
+
+        Commands::Explain { symbol, source, depth } => {
+            commands::explain::run(&client, &symbol, source.as_deref(), Some(depth), cli.json).await
+        }
+
+        Commands::Layers { layer, resource, side_effect, limit } => {
+            commands::layers::run(&client, layer.as_deref(), resource.as_deref(), side_effect.as_deref(), limit, cli.json).await
+        }
+
+        Commands::Ownership { symbol } => {
+            commands::ownership::run(&client, &symbol, cli.json).await
+        }
+
+        Commands::Explore { query, source } => {
+            commands::explore::run(&client, &query, source.as_deref(), cli.json).await
+        }
+
+        Commands::DeadEnd { action } => match action {
+            DeadEndAction::Add { concept, path, reason, symbols, source } => {
+                commands::dead_end::run_add(&client, &concept, &path, &reason, &symbols, source.as_deref()).await
+            }
+            DeadEndAction::List { concept } => {
+                commands::dead_end::run_list(&client, &concept, cli.json).await
+            }
+        },
 
         Commands::Admin { action } => match action {
             AdminAction::Backfill { action: backfill_action } => match backfill_action {

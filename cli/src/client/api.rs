@@ -28,6 +28,15 @@ pub struct SearchResult {
     /// Compact location reference (e.g., "src/main.rs:10-25")
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub location: Option<String>,
+    /// Chunk type (code, conversation, function, class, etc.)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub chunk_type: Option<String>,
+    /// Hierarchy level
+    #[serde(default)]
+    pub level: Option<i32>,
+    /// Parent context (e.g., class signature for a function chunk)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub parent_context: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -165,11 +174,31 @@ pub struct ApiClient {
 impl ApiClient {
     /// Create new API client
     pub fn new(base_url: &str) -> Result<Self> {
+        // Long timeout: sync operations can run for hours on large sources (100GB+, 24k files)
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(24 * 3600)) // 24h
+            .build()?;
         Ok(ApiClient {
-            client: Client::new(),
+            client,
             base_url: base_url.trim_end_matches('/').to_string(),
             token: None,
         })
+    }
+
+    /// Get base URL
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Raw authenticated GET request, returns response body as string
+    pub async fn raw_get(&self, url: &str) -> Result<String> {
+        let response = self.client.get(url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .send().await.context("raw_get failed")?;
+        if !response.status().is_success() {
+            return Err(anyhow!("HTTP {}", response.status()));
+        }
+        response.text().await.context("read response body")
     }
 
     /// Load token from config file if exists
@@ -632,9 +661,12 @@ impl ApiClient {
     }
 
     /// Get callers of a function (direct endpoint)
-    pub async fn find_callers(&self, function_name: &str) -> Result<Vec<CallerInfo>> {
-        let url = format!("{}/api/v1/intelligence/callers?function={}",
+    pub async fn find_callers(&self, function_name: &str, source: Option<&str>) -> Result<Vec<CallerInfo>> {
+        let mut url = format!("{}/api/v1/intelligence/callers?function={}",
             self.base_url, urlencoding::encode(function_name));
+        if let Some(s) = source {
+            url.push_str(&format!("&source={}", urlencoding::encode(s)));
+        }
 
         let mut req = self.client.get(&url);
         if let Some(token) = &self.token {
@@ -652,9 +684,12 @@ impl ApiClient {
     }
 
     /// Get callees of a function (direct endpoint)
-    pub async fn find_callees(&self, function_name: &str) -> Result<Vec<String>> {
-        let url = format!("{}/api/v1/intelligence/callees?function={}",
+    pub async fn find_callees(&self, function_name: &str, source: Option<&str>) -> Result<Vec<String>> {
+        let mut url = format!("{}/api/v1/intelligence/callees?function={}",
             self.base_url, urlencoding::encode(function_name));
+        if let Some(s) = source {
+            url.push_str(&format!("&source={}", urlencoding::encode(s)));
+        }
 
         let mut req = self.client.get(&url);
         if let Some(token) = &self.token {
@@ -669,6 +704,32 @@ impl ApiClient {
         }
 
         response.json::<Vec<String>>().await.context("Failed to parse callees response")
+    }
+
+    /// N-hop call chain traversal
+    pub async fn find_call_chain(&self, function_name: &str, direction: &str, depth: i32, source: Option<&str>) -> Result<Vec<CallChainEntry>> {
+        let mut url = format!("{}/api/v1/intelligence/call-chain?function={}&direction={}&depth={}",
+            self.base_url, urlencoding::encode(function_name), direction, depth);
+        if let Some(s) = source {
+            url.push_str(&format!("&source={}", urlencoding::encode(s)));
+        }
+
+        let mut req = self.client.get(&url);
+        if let Some(token) = &self.token {
+            req = req.header("Authorization", format!("Bearer {}", token));
+        }
+
+        let response = req.send().await.context("Failed to find call chain")?;
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Call chain failed: {}", error_text));
+        }
+
+        let body: serde_json::Value = response.json().await?;
+        let entries: Vec<CallChainEntry> = serde_json::from_value(
+            body.get("entries").cloned().unwrap_or(serde_json::json!([]))
+        )?;
+        Ok(entries)
     }
 
     /// Trigger orphaned chunk backfill (admin-only maintenance)
@@ -698,6 +759,104 @@ impl ApiClient {
             .await
             .context("Failed to parse backfill response")
     }
+
+    // =================================================================
+    // Intelligence Layer Methods
+    // =================================================================
+
+    pub async fn get_symbol_cards(&self, name: &str, source: Option<&str>) -> Result<Vec<SymbolCard>> {
+        let mut url = format!("{}/api/v1/intelligence/cards?name={}", self.base_url, urlencoding::encode(name));
+        if let Some(s) = source {
+            url.push_str(&format!("&source_name={}", urlencoding::encode(s)));
+        }
+        let response = self.client.get(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .send().await.context("get_symbol_cards request failed")?;
+        if !response.status().is_success() {
+            return Err(anyhow!("get_symbol_cards failed: {}", response.status()));
+        }
+        response.json().await.context("parse symbol cards")
+    }
+
+    pub async fn explain_path(&self, symbol_name: &str, source: Option<&str>, max_depth: Option<u32>) -> Result<Vec<DelegationChain>> {
+        let url = format!("{}/api/v1/intelligence/explain_path", self.base_url);
+        let mut body = serde_json::json!({"symbol_name": symbol_name});
+        if let Some(d) = max_depth {
+            body["max_depth"] = serde_json::json!(d);
+        }
+        if let Some(s) = source {
+            // Resolve source name to source_id
+            if let Ok(sources) = self.list_sources().await {
+                if let Some(src) = sources.sources.iter().find(|si| si.name == s) {
+                    body["source_id"] = serde_json::json!(src.id);
+                }
+            }
+        }
+        let response = self.client.post(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .json(&body)
+            .send().await.context("explain_path request failed")?;
+        if !response.status().is_success() {
+            return Err(anyhow!("explain_path failed: {}", response.status()));
+        }
+        response.json().await.context("parse delegation chains")
+    }
+
+    pub async fn create_negative_evidence(
+        &self, concept: &str, path_description: &str, reason: &str,
+        symbols: &[String], source: Option<&str>,
+    ) -> Result<i64> {
+        let url = format!("{}/api/v1/intelligence/negative_evidence", self.base_url);
+        let mut body = serde_json::json!({
+            "concept": concept,
+            "path_description": path_description,
+            "reason": reason,
+            "symbols": symbols,
+        });
+        if let Some(s) = source {
+            if let Ok(sources) = self.list_sources().await {
+                if let Some(src) = sources.sources.iter().find(|si| si.name == s) {
+                    body["source_id"] = serde_json::json!(src.id);
+                }
+            }
+        }
+        let response = self.client.post(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .json(&body)
+            .send().await.context("create_negative_evidence failed")?;
+        if !response.status().is_success() {
+            return Err(anyhow!("create_negative_evidence failed: {}", response.status()));
+        }
+        let result: serde_json::Value = response.json().await?;
+        Ok(result["id"].as_i64().unwrap_or(0))
+    }
+
+    pub async fn search_negative_evidence(&self, concept: &str) -> Result<Vec<NegativeEvidence>> {
+        let url = format!("{}/api/v1/intelligence/negative_evidence?concept={}", self.base_url, urlencoding::encode(concept));
+        let response = self.client.get(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .send().await.context("search_negative_evidence failed")?;
+        if !response.status().is_success() {
+            return Err(anyhow!("search_negative_evidence failed: {}", response.status()));
+        }
+        response.json().await.context("parse negative evidence")
+    }
+
+    pub async fn explore(&self, query: &str, source: Option<&str>) -> Result<ExploreResponse> {
+        let url = format!("{}/api/v1/intelligence/explore", self.base_url);
+        let mut body = serde_json::json!({"query": query});
+        if let Some(s) = source {
+            body["source"] = serde_json::json!(s);
+        }
+        let response = self.client.post(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .json(&body)
+            .send().await.context("explore request failed")?;
+        if !response.status().is_success() {
+            return Err(anyhow!("explore failed: {}", response.status()));
+        }
+        response.json().await.context("parse explore response")
+    }
 }
 
 // Intelligence types
@@ -720,10 +879,128 @@ pub struct CallerInfo {
     pub line: i32,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CallChainEntry {
+    pub depth: u32,
+    pub from_name: String,
+    pub to_name: String,
+    pub file_path: String,
+    pub line: i32,
+}
+
 // Admin/Maintenance types
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BackfillResult {
     pub processed: usize,
     pub batches: usize,
     pub message: String,
+}
+
+// =============================================================================
+// Intelligence Layer Types
+// =============================================================================
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SymbolCard {
+    pub symbol_id: i64,
+    pub name: String,
+    pub qualified_name: Option<String>,
+    pub symbol_type: String,
+    pub signature: Option<String>,
+    pub file_path: String,
+    pub line_start: i32,
+    pub line_end: i32,
+    pub source_name: String,
+    #[serde(default)]
+    pub visibility: Option<String>,
+    #[serde(default)]
+    pub layer: Option<String>,
+    #[serde(default)]
+    pub side_effect_type: Option<String>,
+    #[serde(default)]
+    pub affected_resource: Option<String>,
+    #[serde(default)]
+    pub delegation_targets: Option<serde_json::Value>,
+    #[serde(default)]
+    pub thread_requirement: Option<String>,
+    #[serde(default)]
+    pub preconditions: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub classification_confidence: Option<f32>,
+    #[serde(default)]
+    pub domain_profile: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DelegationStep {
+    pub symbol: SymbolCard,
+    pub role: String,
+    pub dispatch_via: Option<String>,
+    pub code_snippet: Option<String>,
+    #[serde(default)]
+    pub step_annotations: Vec<AnnotationInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DelegationChain {
+    pub entry_point: SymbolCard,
+    pub steps: Vec<DelegationStep>,
+    #[serde(default)]
+    pub annotations: Vec<AnnotationInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AnnotationInfo {
+    pub annotation_type: String,
+    pub value: String,
+    pub confidence: f32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExploreResponse {
+    pub query: String,
+    #[serde(default)]
+    pub intent: Option<String>,
+    #[serde(default)]
+    pub domain: Option<String>,
+    #[serde(default)]
+    pub candidate_paths: Vec<CandidatePath>,
+    #[serde(default)]
+    pub negative_evidence: Vec<NegativeEvidence>,
+    #[serde(default)]
+    pub suggested_next: Vec<SuggestedQuery>,
+    pub formatted: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CandidatePath {
+    pub rank: u32,
+    pub title: String,
+    pub confidence: String,
+    pub chain: DelegationChain,
+    #[serde(default)]
+    pub why_relevant: Option<String>,
+    #[serde(default)]
+    pub why_might_not_work: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SuggestedQuery {
+    pub query: String,
+    pub rationale: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NegativeEvidence {
+    pub id: i64,
+    pub concept: String,
+    pub path_description: String,
+    pub reason: String,
+    #[serde(default)]
+    pub symbols: serde_json::Value,
+    pub severity: String,
+    pub created_by: Option<String>,
+    pub domain_profile: Option<String>,
 }
