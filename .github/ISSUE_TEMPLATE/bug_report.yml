@@ -1,0 +1,44 @@
+name: Bug report
+description: Something in MainRag is behaving incorrectly.
+labels: ["bug", "triage"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear, concise description of the bug.
+      placeholder: I searched for "foo" and expected bar, but got baz.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal commands / queries that reproduce the issue.
+      render: bash
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        - MainRag commit / version (`git rev-parse HEAD`)
+        - OS + kernel
+        - Rust version (`rustc --version`)
+        - GPU / CUDA (for TEI)
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Redact any secrets before pasting.
+      render: text

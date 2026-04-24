@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # tree-sitter grammars need a C toolchain; runners already ship it.
+      # Skip the pdf-mupdf feature (libmupdf-dev not preinstalled).
+      - run: cargo clippy --workspace --no-deps -- -D warnings
+
+  check:
+    name: cargo check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets
+
+  docs-links:
+    name: docs link sanity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify every relative link in README resolves
+        run: |
+          python3 - <<'PY'
+          import re, sys, os
+          content = open('README.md').read()
+          links = re.findall(r'\]\((?!https?://|#)([^)]+)\)', content)
+          missing = [p.split('#')[0].split('?')[0] for p in links
+                     if p and not os.path.exists(p.split('#')[0].split('?')[0])]
+          if missing:
+              print(f"Missing relative paths in README.md: {missing}")
+              sys.exit(1)
+          print(f"README.md: {len(links)} relative links all resolve")
+          PY
