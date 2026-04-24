@@ -1,9 +1,12 @@
 [package]
 name = "mainrag-api"
-version = "0.1.0"
-edition = "2021"
-description = "MAINRAG API Server - Hybrid RAG with PostgreSQL + Qdrant + TEI"
-authors = ["MAINRAG Team"]
+description = "MainRag API Server - hybrid retrieval with PostgreSQL + Qdrant + TEI + cross-encoder reranking"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [lib]
 name = "mainrag_api"

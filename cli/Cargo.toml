@@ -1,10 +1,12 @@
 [package]
 name = "mainrag-cli"
-version = "0.1.0"
-edition = "2021"
-description = "CLI for MAINRAG - Enterprise RAG system"
-authors = ["obtFusi <85476984+obtFusi@users.noreply.github.com>"]
-license = "MIT"
+description = "CLI for MainRag - hybrid retrieval & context system for code understanding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [[bin]]
 name = "mainrag"
