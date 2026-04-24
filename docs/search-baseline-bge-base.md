@@ -243,7 +243,7 @@ Source: claude-conversations
 Found 107 results (showing 5).
 
 #1 [claude-conversations] (0.71) /work/mainrag/session.jsonl:7952-7975
-  [user] [result] <REDACTED_WATCH_JWT>
+  [user] [result] <REDACTED_JWT>
   Expires: 2027-03-28 21:06:04
   [assistant] Token generiert, gültig bis März 2027. Jetzt verifizieren dass es funktioniert und für den Watcher speichern:
   [assistant] [tool:Bash] {...

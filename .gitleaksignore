@@ -1,0 +1,11 @@
+# Gitleaks allowlist — intentional test literals, not real secrets.
+# Format: commit:path:rule:line  — fingerprint from gitleaks -v output.
+# Regenerate by running: gitleaks detect --log-opts='--all'
+
+# Test placeholders for API-key auth smoke tests — literal strings, not live keys.
+# (security_smoke.rs asserts rejection of these patterns.)
+api/tests/security_smoke.rs:generic-api-key:230
+api/tests/security_smoke.rs:generic-api-key:241
+
+# Integration test that asserts "invalid_token_12345" gets rejected with 401.
+scripts/test-rls-regression.sh:curl-auth-header:147
