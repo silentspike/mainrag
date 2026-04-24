@@ -83,22 +83,14 @@ impl IntoResponse for AppError {
                 tracing::warn!("Forbidden: {}", msg);
                 (StatusCode::FORBIDDEN, "Access denied")
             }
-            AppError::NotFound(msg) => {
-                (StatusCode::NOT_FOUND, msg.as_str())
-            }
-            AppError::BadRequest(msg) => {
-                (StatusCode::BAD_REQUEST, msg.as_str())
-            }
-            AppError::Conflict(msg) => {
-                (StatusCode::CONFLICT, msg.as_str())
-            }
+            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.as_str()),
+            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.as_str()),
+            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.as_str()),
             AppError::Internal(msg) => {
                 tracing::error!("Internal error: {}", msg);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
             }
-            AppError::RateLimited => {
-                (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded")
-            }
+            AppError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded"),
         };
 
         let body = Json(json!({

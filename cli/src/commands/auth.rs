@@ -11,7 +11,9 @@ pub async fn run(
     use super::super::AuthAction;
 
     match action {
-        AuthAction::Login { username, password } => login(client, json_output, username, password).await,
+        AuthAction::Login { username, password } => {
+            login(client, json_output, username, password).await
+        }
         AuthAction::Logout => logout(json_output).await,
         AuthAction::Me => me(client, json_output).await,
     }
@@ -81,13 +83,23 @@ async fn login(
     }
 
     println!("{}", "\r✓ Login successful!".green());
-    println!("  User: {} ({})", auth_response.user.username.bold(), auth_response.user.email);
+    println!(
+        "  User: {} ({})",
+        auth_response.user.username.bold(),
+        auth_response.user.email
+    );
     if auth_response.user.is_admin {
         println!("  Role: {}", "Admin".yellow());
     }
-    println!("  Expires: {}", expires_at.format("%Y-%m-%d %H:%M UTC").to_string().dimmed());
+    println!(
+        "  Expires: {}",
+        expires_at.format("%Y-%m-%d %H:%M UTC").to_string().dimmed()
+    );
     println!();
-    println!("{}", "You are now logged in. Your token is saved in ~/.config/mainrag/token".dimmed());
+    println!(
+        "{}",
+        "You are now logged in. Your token is saved in ~/.config/mainrag/token".dimmed()
+    );
 
     Ok(())
 }

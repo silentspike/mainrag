@@ -8,9 +8,9 @@
 //! - MainRAG API running on localhost:3001
 //! - QUERY_EXPANSION_ENABLED=true
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use std::time::Duration;
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 const API_BASE: &str = "http://localhost:3001";
 
@@ -23,6 +23,7 @@ struct SearchRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // fields populated by serde::Deserialize; bench only cares about shape
 struct SearchResponse {
     results: Vec<serde_json::Value>,
     total: u64,
@@ -32,7 +33,14 @@ struct SearchResponse {
 
 fn api_available() -> bool {
     std::process::Command::new("curl")
-        .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", &format!("{}/health", API_BASE)])
+        .args([
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            &format!("{}/health", API_BASE),
+        ])
         .output()
         .map(|o| o.stdout.starts_with(b"200"))
         .unwrap_or(false)
@@ -61,27 +69,23 @@ fn bench_search_query(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(30));
 
     for (name, query) in test_queries {
-        group.bench_with_input(
-            BenchmarkId::new("search", name),
-            &query,
-            |b, query| {
-                b.to_async(&rt).iter(|| async {
-                    let response = client
-                        .post(format!("{}/api/v1/search", API_BASE))
-                        .json(&SearchRequest {
-                            query: query.to_string(),
-                            limit: 10,
-                            quality: Some("balanced".to_string()),
-                        })
-                        .send()
-                        .await
-                        .expect("request failed");
+        group.bench_with_input(BenchmarkId::new("search", name), &query, |b, query| {
+            b.to_async(&rt).iter(|| async {
+                let response = client
+                    .post(format!("{}/api/v1/search", API_BASE))
+                    .json(&SearchRequest {
+                        query: query.to_string(),
+                        limit: 10,
+                        quality: Some("balanced".to_string()),
+                    })
+                    .send()
+                    .await
+                    .expect("request failed");
 
-                    let result: SearchResponse = response.json().await.expect("parse failed");
-                    black_box(result)
-                });
-            },
-        );
+                let result: SearchResponse = response.json().await.expect("parse failed");
+                black_box(result)
+            });
+        });
     }
 
     group.finish();
@@ -100,27 +104,23 @@ fn bench_fast_vs_balanced(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(30));
 
     for tier in &["fast", "balanced"] {
-        group.bench_with_input(
-            BenchmarkId::new("tier", tier),
-            tier,
-            |b, tier| {
-                b.to_async(&rt).iter(|| async {
-                    let response = client
-                        .post(format!("{}/api/v1/search", API_BASE))
-                        .json(&SearchRequest {
-                            query: "error".to_string(),
-                            limit: 20,
-                            quality: Some(tier.to_string()),
-                        })
-                        .send()
-                        .await
-                        .expect("request failed");
+        group.bench_with_input(BenchmarkId::new("tier", tier), tier, |b, tier| {
+            b.to_async(&rt).iter(|| async {
+                let response = client
+                    .post(format!("{}/api/v1/search", API_BASE))
+                    .json(&SearchRequest {
+                        query: "error".to_string(),
+                        limit: 20,
+                        quality: Some(tier.to_string()),
+                    })
+                    .send()
+                    .await
+                    .expect("request failed");
 
-                    let result: SearchResponse = response.json().await.expect("parse failed");
-                    black_box(result)
-                });
-            },
-        );
+                let result: SearchResponse = response.json().await.expect("parse failed");
+                black_box(result)
+            });
+        });
     }
 
     group.finish();

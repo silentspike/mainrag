@@ -26,7 +26,8 @@ pub async fn run(client: &ApiClient, json_output: bool) -> anyhow::Result<()> {
 
     println!("{}", "\r✓ System Statistics".green());
     println!();
-    println!("  {} {}",
+    println!(
+        "  {} {}",
         "Sources:".cyan(),
         stats.sources_count.to_string().bold()
     );

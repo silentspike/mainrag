@@ -55,7 +55,7 @@ impl Default for WatchConfig {
             min_sync_interval: Duration::from_secs(min_sync_secs),
             idle_flush: Duration::from_millis(300),
             max_wait: Duration::from_millis(1200),
-            extensions: vec![],  // Empty = use SUPPORTED_EXTENSIONS
+            extensions: vec![], // Empty = use SUPPORTED_EXTENSIONS
             ignore_dirs: vec![
                 ".git".to_string(),
                 ".hg".to_string(),
@@ -92,14 +92,12 @@ impl Default for WatchConfig {
 /// Supported file extensions (must match IndexService)
 const SUPPORTED_EXTENSIONS: &[&str] = &[
     // Programming languages
-    "rs", "py", "pyw", "pyi", "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts",
-    "c", "cpp", "cc", "cxx", "h", "hpp", "hxx", "hh", "cs", "go", "zig", "lua",
-    "java", "rb", "rake", "gemspec", "php", "phtml", "sh", "bash", "zsh",
-    // Config/Data/Markup
-    "html", "htm", "css", "scss", "sass", "less", "xml", "xsl", "xsd", "svg",
-    "yaml", "yml", "json", "jsonc", "jsonl", "toml", "sql", "md", "markdown",
-    "scm", "ss", "rkt",
-    // Documents
+    "rs", "py", "pyw", "pyi", "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts", "c", "cpp",
+    "cc", "cxx", "h", "hpp", "hxx", "hh", "cs", "go", "zig", "lua", "java", "rb", "rake",
+    "gemspec", "php", "phtml", "sh", "bash", "zsh", // Config/Data/Markup
+    "html", "htm", "css", "scss", "sass", "less", "xml", "xsl", "xsd", "svg", "yaml", "yml",
+    "json", "jsonc", "jsonl", "toml", "sql", "md", "markdown", "scm", "ss",
+    "rkt", // Documents
     "txt", "pdf",
 ];
 
@@ -162,7 +160,8 @@ impl WatchMetrics {
     }
 
     fn record_event_filtered(reason: &str) {
-        counter!("mainrag_watch_events_filtered_total", "reason" => reason.to_string()).increment(1);
+        counter!("mainrag_watch_events_filtered_total", "reason" => reason.to_string())
+            .increment(1);
     }
 
     fn record_batch_dispatched(file_count: usize) {
@@ -292,15 +291,14 @@ impl WatchService {
 
         let (tx, rx) = std::sync::mpsc::channel();
 
-        let mut debouncer = new_debouncer(
-            Duration::from_millis(self.config.debounce_ms),
-            tx,
-        )?;
+        let mut debouncer = new_debouncer(Duration::from_millis(self.config.debounce_ms), tx)?;
 
         // Watch all source paths
         for source in self.sources.values() {
             info!("Watching: {} at {}", source.name, source.path.display());
-            debouncer.watcher().watch(&source.path, RecursiveMode::Recursive)?;
+            debouncer
+                .watcher()
+                .watch(&source.path, RecursiveMode::Recursive)?;
         }
 
         info!(
@@ -387,7 +385,10 @@ impl WatchService {
 
                         // Non-blocking send (drop if receiver is full)
                         if self.batch_tx.try_send(batch).is_err() {
-                            warn!("Batch channel full, dropping batch for source {}", source_id);
+                            warn!(
+                                "Batch channel full, dropping batch for source {}",
+                                source_id
+                            );
                             // Remove from in-flight since we couldn't dispatch
                             for path in &files {
                                 self.in_flight.invalidate(path);
@@ -408,7 +409,11 @@ impl WatchService {
         let path = &event.path;
 
         // Find which source this belongs to
-        let source = self.sources.values().find(|s| path.starts_with(&s.path))?.clone();
+        let source = self
+            .sources
+            .values()
+            .find(|s| path.starts_with(&s.path))?
+            .clone();
 
         // Check if file has supported extension
         if !self.is_supported_file(path) {
@@ -493,7 +498,12 @@ impl WatchService {
         for component in rel_path.components() {
             if let std::path::Component::Normal(name) = component {
                 let name_str = name.to_string_lossy();
-                if self.config.ignore_dirs.iter().any(|d| d == name_str.as_ref()) {
+                if self
+                    .config
+                    .ignore_dirs
+                    .iter()
+                    .any(|d| d == name_str.as_ref())
+                {
                     return true;
                 }
             }
@@ -574,7 +584,7 @@ impl WatchServiceHandle {
     /// Get current stats
     pub fn stats(&self) -> WatchStats {
         WatchStats {
-            sources: 0,  // Not tracked in handle
+            sources: 0, // Not tracked in handle
             signature_cache_size: self.signature_cache.entry_count() as usize,
             last_sync_cache_size: self.last_sync_time.entry_count() as usize,
             in_flight: self.in_flight.entry_count() as usize,

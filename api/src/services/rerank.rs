@@ -73,7 +73,8 @@ impl RerankerService {
             truncate: true,
         };
 
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/rerank", self.url))
             .json(&request)
             .send()
@@ -92,23 +93,33 @@ impl RerankerService {
     pub async fn rerank_results<T: AsRef<str>>(
         &self,
         query: &str,
-        results: Vec<(T, T)>,  // (id, text) pairs
+        results: Vec<(T, T)>, // (id, text) pairs
     ) -> Result<Vec<String>> {
         if results.is_empty() {
             return Ok(vec![]);
         }
 
-        let texts: Vec<String> = results.iter().map(|(_, t)| t.as_ref().to_string()).collect();
-        let ids: Vec<String> = results.iter().map(|(id, _)| id.as_ref().to_string()).collect();
+        let texts: Vec<String> = results
+            .iter()
+            .map(|(_, t)| t.as_ref().to_string())
+            .collect();
+        let ids: Vec<String> = results
+            .iter()
+            .map(|(id, _)| id.as_ref().to_string())
+            .collect();
 
         let reranked_indices = self.rerank(query, texts).await?;
 
-        Ok(reranked_indices.into_iter().map(|i| ids[i].clone()).collect())
+        Ok(reranked_indices
+            .into_iter()
+            .map(|i| ids[i].clone())
+            .collect())
     }
 
     /// Health check
     pub async fn health(&self) -> Result<bool> {
-        let response = self.client
+        let response = self
+            .client
             .get(format!("{}/health", self.url))
             .send()
             .await?;

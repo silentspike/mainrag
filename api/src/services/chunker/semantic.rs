@@ -2,17 +2,20 @@
 //! Respects function/class boundaries, fallback to token chunking for large units
 //! Phase 2: Hierarchical chunking with parent-child relationships
 
-use std::sync::Mutex;
+use super::{
+    token::{count_tokens, TokenChunker},
+    Chunk, ChunkType, Chunker, ChunkerConfig,
+};
 use std::collections::HashMap;
-use tree_sitter::{Parser, Tree, Node};
-use tracing::{warn, info, debug};
-use super::{Chunk, ChunkType, ChunkerConfig, Chunker, token::{TokenChunker, count_tokens}};
+use std::sync::Mutex;
+use tracing::{debug, info, warn};
+use tree_sitter::{Node, Parser, Tree};
 
 /// Semantic unit (function, class, etc.) extracted from AST
 #[derive(Debug, Clone)]
 struct SemanticUnit {
     kind: String,
-    name: Option<String>,  // Function/class name for CCH
+    name: Option<String>, // Function/class name for CCH
     text: String,
     start_byte: usize,
     end_byte: usize,
@@ -35,8 +38,8 @@ pub struct SemanticChunker {
 fn language_token_limit(language: &str, default: usize) -> usize {
     match language {
         "python" | "javascript" | "js" | "jsx" | "ruby" | "lua" | "scheme" | "php" => 200,
-        "rust" | "rs" | "c" | "cpp" | "cc" | "cxx" | "hpp" | "h" | "java"
-        | "csharp" | "go" | "zig" | "typescript" | "ts" | "tsx" => 300,
+        "rust" | "rs" | "c" | "cpp" | "cc" | "cxx" | "hpp" | "h" | "java" | "csharp" | "go"
+        | "zig" | "typescript" | "ts" | "tsx" => 300,
         "markdown" | "md" | "text" | "txt" | "html" | "xml" | "css" | "sql" => 400,
         "json" | "yaml" | "toml" | "bash" => 300,
         _ => default,
@@ -56,9 +59,29 @@ impl SemanticChunker {
         // Initialize parser per language (wrapped in Mutex for Sync)
         // Must match parser.rs Lang enum and index.rs code_extensions
         let languages = [
-            "rust", "python", "javascript", "typescript", "go", "c", "cpp", "java",
-            "json", "toml", "yaml", "bash", "markdown",
-            "csharp", "zig", "lua", "ruby", "php", "html", "css", "xml", "scheme", "sql",
+            "rust",
+            "python",
+            "javascript",
+            "typescript",
+            "go",
+            "c",
+            "cpp",
+            "java",
+            "json",
+            "toml",
+            "yaml",
+            "bash",
+            "markdown",
+            "csharp",
+            "zig",
+            "lua",
+            "ruby",
+            "php",
+            "html",
+            "css",
+            "xml",
+            "scheme",
+            "sql",
         ];
         let total = languages.len();
 
@@ -113,7 +136,12 @@ impl SemanticChunker {
 
     /// Extract hierarchical semantic units from AST
     /// Returns units with parent-child relationships preserved
-    fn extract_hierarchical_units(&self, tree: &Tree, source: &[u8], lang: &str) -> Vec<SemanticUnit> {
+    fn extract_hierarchical_units(
+        &self,
+        tree: &Tree,
+        source: &[u8],
+        lang: &str,
+    ) -> Vec<SemanticUnit> {
         let mut units = vec![];
         let root = tree.root_node();
 
@@ -159,7 +187,14 @@ impl SemanticChunker {
                 // Only recurse into container types (classes, modules, impl blocks)
                 // to find nested functions/methods
                 if Self::is_container_type(chunk_type) {
-                    self.extract_units_recursive(&child, source, lang, Some(unit_idx), depth + 1, units);
+                    self.extract_units_recursive(
+                        &child,
+                        source,
+                        lang,
+                        Some(unit_idx),
+                        depth + 1,
+                        units,
+                    );
                 }
             } else {
                 // Not a semantic unit, but might contain one (e.g., expression_statement)
@@ -173,21 +208,18 @@ impl SemanticChunker {
         // Wave 4a: SQL-specific nodes (tree-sitter-sequel uses short names, no _statement suffix)
         if lang == "sql" {
             match kind {
-                "create_table" | "create_view" | "create_materialized_view" |
-                "create_type" => return Some((ChunkType::Type, 1)),
+                "create_table" | "create_view" | "create_materialized_view" | "create_type" => {
+                    return Some((ChunkType::Type, 1))
+                }
 
-                "create_function" | "create_trigger" =>
-                    return Some((ChunkType::Function, 1)),
+                "create_function" | "create_trigger" => return Some((ChunkType::Function, 1)),
 
-                "create_index" | "create_extension" | "create_sequence" |
-                "create_schema" | "create_role" |
-                "alter_table" | "alter_type" | "alter_view" | "alter_index" |
-                "alter_sequence" | "alter_schema" | "alter_role" |
-                "drop_table" | "drop_view" | "drop_function" | "drop_index" |
-                "drop_type" | "drop_extension" |
-                "insert" | "select" | "update" | "delete" |
-                "comment_statement" | "set_statement" | "reset_statement" =>
-                    return Some((ChunkType::Code, 1)),
+                "create_index" | "create_extension" | "create_sequence" | "create_schema"
+                | "create_role" | "alter_table" | "alter_type" | "alter_view" | "alter_index"
+                | "alter_sequence" | "alter_schema" | "alter_role" | "drop_table" | "drop_view"
+                | "drop_function" | "drop_index" | "drop_type" | "drop_extension" | "insert"
+                | "select" | "update" | "delete" | "comment_statement" | "set_statement"
+                | "reset_statement" => return Some((ChunkType::Code, 1)),
 
                 // Note: GRANT, REVOKE, CREATE POLICY are not in tree-sitter-sequel grammar.
                 // They get captured by the gap-text collector instead.
@@ -197,15 +229,21 @@ impl SemanticChunker {
 
         match kind {
             // Functions/Methods (level 2, or level 1 if at top level)
-            "function_item" | "function_definition" | "function_declaration" |
-            "method_definition" | "method_declaration" | "arrow_function" => {
+            "function_item"
+            | "function_definition"
+            | "function_declaration"
+            | "method_definition"
+            | "method_declaration"
+            | "arrow_function" => {
                 let level = if depth == 0 { 1 } else { 2 };
                 Some((ChunkType::Function, level))
             }
 
             // Classes (level 1)
-            "class_definition" | "class_declaration" | "class_specifier" |
-            "interface_declaration" => Some((ChunkType::Class, 1)),
+            "class_definition"
+            | "class_declaration"
+            | "class_specifier"
+            | "interface_declaration" => Some((ChunkType::Class, 1)),
 
             // Modules/Namespaces (level 1)
             "impl_item" | "module_definition" | "namespace_definition" => {
@@ -213,20 +251,35 @@ impl SemanticChunker {
             }
 
             // Types (level 1)
-            "struct_item" | "type_declaration" | "type_spec" |
-            "struct_specifier" | "union_specifier" | "enum_specifier" |
-            "typedef_declaration" | "enum_item" | "enum_declaration" => {
-                Some((ChunkType::Type, 1))
-            }
+            "struct_item"
+            | "type_declaration"
+            | "type_spec"
+            | "struct_specifier"
+            | "union_specifier"
+            | "enum_specifier"
+            | "typedef_declaration"
+            | "enum_item"
+            | "enum_declaration" => Some((ChunkType::Type, 1)),
 
             // Wave 4b: Top-level declarations (constants, imports, macros, type aliases)
             // Only at top level (depth==0) to avoid chunking nested items
-            "const_item" | "const_declaration" | "static_item" |
-            "type_item" | "type_alias_declaration" |
-            "use_declaration" | "import_statement" | "import_declaration" |
-            "macro_definition" | "export_statement" |
-            "variable_declaration" | "lexical_declaration" => {
-                if depth == 0 { Some((ChunkType::Code, 1)) } else { None }
+            "const_item"
+            | "const_declaration"
+            | "static_item"
+            | "type_item"
+            | "type_alias_declaration"
+            | "use_declaration"
+            | "import_statement"
+            | "import_declaration"
+            | "macro_definition"
+            | "export_statement"
+            | "variable_declaration"
+            | "lexical_declaration" => {
+                if depth == 0 {
+                    Some((ChunkType::Code, 1))
+                } else {
+                    None
+                }
             }
 
             _ => None,
@@ -235,7 +288,10 @@ impl SemanticChunker {
 
     /// Check if a chunk type can contain nested definitions
     fn is_container_type(chunk_type: ChunkType) -> bool {
-        matches!(chunk_type, ChunkType::Class | ChunkType::Module | ChunkType::Type)
+        matches!(
+            chunk_type,
+            ChunkType::Class | ChunkType::Module | ChunkType::Type
+        )
     }
 
     /// Extract the name of a semantic unit (function name, class name, etc.)
@@ -253,7 +309,8 @@ impl SemanticChunker {
                     let mut inner_cursor = child.walk();
                     for inner_child in child.children(&mut inner_cursor) {
                         if inner_child.kind() == "identifier" {
-                            let name_bytes = &source[inner_child.start_byte()..inner_child.end_byte()];
+                            let name_bytes =
+                                &source[inner_child.start_byte()..inner_child.end_byte()];
                             return Some(String::from_utf8_lossy(name_bytes).to_string());
                         }
                     }
@@ -268,17 +325,28 @@ impl SemanticChunker {
     fn kind_to_type(kind: &str) -> ChunkType {
         match kind {
             // Functions/Methods
-            "function_item" | "function_definition" | "function_declaration"
-                | "method_definition" | "method_declaration" => ChunkType::Function,
+            "function_item"
+            | "function_definition"
+            | "function_declaration"
+            | "method_definition"
+            | "method_declaration" => ChunkType::Function,
             // Classes (OOP)
-            "class_definition" | "class_declaration" | "class_specifier"
-                | "interface_declaration" => ChunkType::Class,
+            "class_definition"
+            | "class_declaration"
+            | "class_specifier"
+            | "interface_declaration" => ChunkType::Class,
             // Modules/Namespaces
             "impl_item" | "module_definition" | "namespace_definition" => ChunkType::Module,
             // Types (structs, enums, typedefs, unions)
-            "struct_item" | "type_declaration" | "type_spec"
-                | "struct_specifier" | "union_specifier" | "enum_specifier"
-                | "typedef_declaration" | "enum_item" | "enum_declaration" => ChunkType::Type,
+            "struct_item"
+            | "type_declaration"
+            | "type_spec"
+            | "struct_specifier"
+            | "union_specifier"
+            | "enum_specifier"
+            | "typedef_declaration"
+            | "enum_item"
+            | "enum_declaration" => ChunkType::Type,
             _ => ChunkType::Code,
         }
     }
@@ -307,10 +375,14 @@ impl Chunker for SemanticChunker {
         // Conversation files get special conversation-aware chunking
         // Handles: Claude Code JSONL, Codex JSONL, Gemini JSON
         if lang == "jsonl" || lang == "json" {
-            if content.contains(r#""type":"user""#) || content.contains(r#""type":"assistant""#)
-               || content.contains(r#""type":"gemini""#) || content.contains(r#""type": "gemini""#)
-               || content.contains(r#""session_id""#)
-               || content.contains(r#""type":"response_item""#) || content.contains(r#""type": "response_item""#) {
+            if content.contains(r#""type":"user""#)
+                || content.contains(r#""type":"assistant""#)
+                || content.contains(r#""type":"gemini""#)
+                || content.contains(r#""type": "gemini""#)
+                || content.contains(r#""session_id""#)
+                || content.contains(r#""type":"response_item""#)
+                || content.contains(r#""type": "response_item""#)
+            {
                 info!("Using conversation chunker for file (lang={})", lang);
                 return super::jsonl::JsonlChunker::default().chunk(content, language);
             }
@@ -363,14 +435,20 @@ impl Chunker for SemanticChunker {
         let mut parser = match parser_mutex.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                warn!("Tree-sitter parser mutex poisoned for '{}', recovering", lang);
+                warn!(
+                    "Tree-sitter parser mutex poisoned for '{}', recovering",
+                    lang
+                );
                 poisoned.into_inner()
             }
         };
         let tree = match parser.parse(content, None) {
             Some(t) => t,
             None => {
-                warn!("Tree-sitter parse failed for '{}', falling back to token chunking", lang);
+                warn!(
+                    "Tree-sitter parse failed for '{}', falling back to token chunking",
+                    lang
+                );
                 return TokenChunker::default().chunk(content, language);
             }
         };
@@ -389,7 +467,9 @@ impl Chunker for SemanticChunker {
 
         for (unit_idx, unit) in units.iter().enumerate() {
             // Map parent index from unit space to chunk space
-            let parent_chunk_idx = unit.parent_idx.and_then(|p| unit_to_chunk_idx.get(&p).copied());
+            let parent_chunk_idx = unit
+                .parent_idx
+                .and_then(|p| unit_to_chunk_idx.get(&p).copied());
 
             // Build parent context for CCH
             let parent_context = Self::build_parent_context(&units, unit);
@@ -400,7 +480,8 @@ impl Chunker for SemanticChunker {
                     max_tokens: Some(effective_max_tokens),
                     overlap_tokens: Some(effective_overlap),
                     ..Default::default()
-                }).chunk(&unit.text, language);
+                })
+                .chunk(&unit.text, language);
 
                 let first_chunk_idx = chunks.len();
                 unit_to_chunk_idx.insert(unit_idx, first_chunk_idx);
@@ -435,7 +516,7 @@ impl Chunker for SemanticChunker {
                     chunk_type: Self::kind_to_type(&unit.kind),
                     level: unit.level,
                     parent_idx: parent_chunk_idx,
-                    context_prefix: None,  // Will be set by IndexService with source context
+                    context_prefix: None, // Will be set by IndexService with source context
                     metadata: Some(serde_json::json!({
                         "semantic_unit": unit.kind,
                         "name": unit.name,
@@ -453,16 +534,16 @@ impl Chunker for SemanticChunker {
         // Wave 4b: Collect gap text between semantic units.
         // Uncovered regions (e.g., GRANT/REVOKE/CREATE POLICY in SQL, or top-level
         // comments/constants in other languages) become additional chunks.
-        let mut covered: Vec<(usize, usize)> = units.iter()
-            .map(|u| (u.start_byte, u.end_byte))
-            .collect();
+        let mut covered: Vec<(usize, usize)> =
+            units.iter().map(|u| (u.start_byte, u.end_byte)).collect();
         covered.sort_by_key(|&(s, _)| s);
 
         let content_bytes = content.as_bytes();
         let mut gap_start = 0usize;
         for &(unit_start, unit_end) in &covered {
             if unit_start > gap_start {
-                let gap_text = String::from_utf8_lossy(&content_bytes[gap_start..unit_start]).to_string();
+                let gap_text =
+                    String::from_utf8_lossy(&content_bytes[gap_start..unit_start]).to_string();
                 let trimmed = gap_text.trim();
                 // Only create a chunk if the gap has meaningful content (>20 chars, not just whitespace/comments)
                 if trimmed.len() > 20 {
@@ -475,7 +556,8 @@ impl Chunker for SemanticChunker {
                             max_tokens: Some(effective_max_tokens),
                             overlap_tokens: Some(effective_overlap),
                             ..Default::default()
-                        }).chunk(trimmed, language);
+                        })
+                        .chunk(trimmed, language);
                         for mut sub in sub_chunks {
                             sub.start_line += start_line - 1;
                             sub.end_line += start_line - 1;
@@ -514,7 +596,8 @@ impl Chunker for SemanticChunker {
                         max_tokens: Some(effective_max_tokens),
                         overlap_tokens: Some(effective_overlap),
                         ..Default::default()
-                    }).chunk(trimmed, language);
+                    })
+                    .chunk(trimmed, language);
                     for mut sub in sub_chunks {
                         sub.start_line += start_line - 1;
                         sub.end_line += start_line - 1;
@@ -707,10 +790,11 @@ public class Sample implements Drawable {
 
         // Verify we found interface (Class)
         let has_interface = chunks.iter().any(|c| {
-            c.chunk_type == ChunkType::Class &&
-            c.metadata.as_ref().map_or(false, |m| {
-                m.get("semantic_unit").map_or(false, |v| v == "interface_declaration")
-            })
+            c.chunk_type == ChunkType::Class
+                && c.metadata.as_ref().map_or(false, |m| {
+                    m.get("semantic_unit")
+                        .map_or(false, |v| v == "interface_declaration")
+                })
         });
         assert!(has_interface, "No interface chunk found in Java file");
 
@@ -752,13 +836,11 @@ public:
 
         for ext in &["cpp", "cc", "cxx", "hpp"] {
             let chunks = chunker.chunk(content, Some(ext));
-            assert!(
-                !chunks.is_empty(),
-                "No chunks found for .{} file", ext
-            );
+            assert!(!chunks.is_empty(), "No chunks found for .{} file", ext);
             assert!(
                 chunks.iter().any(|c| c.chunk_type == ChunkType::Class),
-                "No Class chunk found in .{} file", ext
+                "No Class chunk found in .{} file",
+                ext
             );
         }
     }
@@ -790,12 +872,16 @@ impl Database {
         assert!(impl_chunk.is_some(), "No impl (Module) chunk found");
 
         // Find functions that have a parent (nested in impl)
-        let nested_funcs: Vec<_> = chunks.iter()
+        let nested_funcs: Vec<_> = chunks
+            .iter()
             .filter(|c| c.chunk_type == ChunkType::Function && c.parent_idx.is_some())
             .collect();
 
         // Should have at least one nested function (new or connect)
-        assert!(!nested_funcs.is_empty(), "No nested functions found in impl block");
+        assert!(
+            !nested_funcs.is_empty(),
+            "No nested functions found in impl block"
+        );
     }
 
     #[test]
@@ -812,10 +898,10 @@ impl Database {
 
     #[test]
     fn test_adaptive_overlap() {
-        assert_eq!(adaptive_overlap(200), 20);  // 200/10 = 20
-        assert_eq!(adaptive_overlap(300), 30);  // 300/10 = 30
-        assert_eq!(adaptive_overlap(400), 40);  // 400/10 = 40
-        assert_eq!(adaptive_overlap(100), 16);  // 100/10 = 10 < 16, clamped to 16
+        assert_eq!(adaptive_overlap(200), 20); // 200/10 = 20
+        assert_eq!(adaptive_overlap(300), 30); // 300/10 = 30
+        assert_eq!(adaptive_overlap(400), 40); // 400/10 = 40
+        assert_eq!(adaptive_overlap(100), 16); // 100/10 = 10 < 16, clamped to 16
     }
 
     #[test]
@@ -842,21 +928,46 @@ class Calculator:
         assert!(class_chunk.is_some(), "No Class chunk found");
 
         // Find methods that have a parent (nested in class)
-        let methods: Vec<_> = chunks.iter()
+        let methods: Vec<_> = chunks
+            .iter()
             .filter(|c| c.chunk_type == ChunkType::Function && c.parent_idx.is_some())
             .collect();
 
         // Should have methods (__init__, add, reset)
-        assert!(methods.len() >= 2, "Expected at least 2 methods in class, found {}", methods.len());
+        assert!(
+            methods.len() >= 2,
+            "Expected at least 2 methods in class, found {}",
+            methods.len()
+        );
     }
 
     /// Verify ALL 22 tree-sitter parsers can be initialized (ABI 15 compatibility check)
     #[test]
     fn test_all_parsers_initialize() {
         let expected_languages = [
-            "rust", "python", "javascript", "typescript", "go", "c", "cpp", "java",
-            "json", "toml", "yaml", "bash", "markdown",
-            "csharp", "zig", "lua", "ruby", "php", "html", "css", "xml", "scheme", "sql",
+            "rust",
+            "python",
+            "javascript",
+            "typescript",
+            "go",
+            "c",
+            "cpp",
+            "java",
+            "json",
+            "toml",
+            "yaml",
+            "bash",
+            "markdown",
+            "csharp",
+            "zig",
+            "lua",
+            "ruby",
+            "php",
+            "html",
+            "css",
+            "xml",
+            "scheme",
+            "sql",
         ];
         let mut failed = vec![];
         for lang in &expected_languages {

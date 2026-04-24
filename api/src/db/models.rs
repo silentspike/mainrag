@@ -96,7 +96,9 @@ impl SearchResult {
         }
 
         // 2. If snippet has no highlights, create one manually around query match
-        let has_highlights = self.snippet.as_ref()
+        let has_highlights = self
+            .snippet
+            .as_ref()
             .map(|s| s.contains("**"))
             .unwrap_or(false);
 
@@ -106,7 +108,9 @@ impl SearchResult {
 
             // Try each word in query
             for word in query.split_whitespace() {
-                if word.len() < 2 { continue; }
+                if word.len() < 2 {
+                    continue;
+                }
 
                 if let Some(pos) = find_ascii_case_insensitive(&self.content, word) {
                     // Find char boundaries for context window
@@ -273,7 +277,7 @@ pub struct AnnotationInfo {
 pub struct OwnershipInfo {
     pub symbol_name: String,
     pub relation_type: String,
-    pub direction: String,  // "outgoing" | "incoming"
+    pub direction: String, // "outgoing" | "incoming"
     pub target_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_file: Option<String>,

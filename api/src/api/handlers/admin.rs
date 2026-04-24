@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use crate::api::JsonBody;
 use crate::error::{AppError, Result};
-use crate::AppState;
 use crate::plugins;
+use crate::AppState;
 
 #[derive(Debug, Serialize)]
 pub struct SourceResponse {
@@ -30,7 +30,7 @@ pub struct CreateSourceRequest {
     pub name: Option<String>,
     pub source_type: Option<String>,
     pub path: String,
-    pub config: Option<serde_json::Value>,  // Flexible source-type-specific config
+    pub config: Option<serde_json::Value>, // Flexible source-type-specific config
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,10 +43,13 @@ pub async fn admin_list_sources(
     Extension(_claims): Extension<Arc<crate::auth::Claims>>,
 ) -> Result<Json<Vec<SourceResponse>>> {
     // K3: All DB operations in a single transaction via RlsClient
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        let rows = txn
-            .query(
-                r#"
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let rows = txn
+                    .query(
+                        r#"
                 SELECT
                     s.id,
                     s.name,
@@ -64,28 +67,30 @@ pub async fn admin_list_sources(
                 GROUP BY s.id
                 ORDER BY s.name
                 "#,
-                &[],
-            )
-            .await?;
+                        &[],
+                    )
+                    .await?;
 
-        let sources: Vec<SourceResponse> = rows
-            .iter()
-            .map(|row| SourceResponse {
-                id: row.get("id"),
-                name: row.get("name"),
-                source_type: row.get("source_type"),
-                path: row.get("path"),
-                file_count: row.get("file_count"),
-                chunk_count: row.get("chunk_count"),
-                total_size: row.get("total_size"),
-                last_synced: row.get("last_synced"),
-                created_at: row.get("created_at"),
-                updated_at: row.get("updated_at"),
+                let sources: Vec<SourceResponse> = rows
+                    .iter()
+                    .map(|row| SourceResponse {
+                        id: row.get("id"),
+                        name: row.get("name"),
+                        source_type: row.get("source_type"),
+                        path: row.get("path"),
+                        file_count: row.get("file_count"),
+                        chunk_count: row.get("chunk_count"),
+                        total_size: row.get("total_size"),
+                        last_synced: row.get("last_synced"),
+                        created_at: row.get("created_at"),
+                        updated_at: row.get("updated_at"),
+                    })
+                    .collect();
+
+                Ok(Json(sources))
             })
-            .collect();
-
-        Ok(Json(sources))
-    })).await
+        })
+        .await
 }
 
 pub async fn admin_create_source(
@@ -107,7 +112,8 @@ pub async fn admin_create_source(
         .map_err(|_| crate::error::AppError::Internal("Invalid user_id in claims".to_string()))?;
 
     // Auto-detect source type if not provided
-    let source_type = req.source_type
+    let source_type = req
+        .source_type
         .unwrap_or_else(|| plugins::detect_source_type(&req.path));
 
     // S2: Path traversal prevention — reject suspicious path components
@@ -120,46 +126,57 @@ pub async fn admin_create_source(
     let config = req.config;
 
     // K3: INSERT in transaction via RlsClient
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        // Try to insert, reject duplicates
-        match txn
-            .query_one(
-                r#"
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                // Try to insert, reject duplicates
+                match txn
+                    .query_one(
+                        r#"
                 INSERT INTO sources (name, type, path, config, user_id)
                 VALUES ($1, $2, $3, $4, $5)
                 RETURNING id, name, type as source_type, path, last_synced, created_at, updated_at,
                           COALESCE(file_count, 0)::bigint as file_count,
                           COALESCE(total_size, 0)::bigint as total_size
                 "#,
-                &[&name, &source_type, &path, &config, &owner_id],
-            )
-            .await
-        {
-            Ok(row) => {
-                let source = SourceResponse {
-                    id: row.get("id"),
-                    name: row.get("name"),
-                    source_type: row.get("source_type"),
-                    path: row.get("path"),
-                    file_count: row.get("file_count"),
-                    chunk_count: 0,
-                    total_size: row.get("total_size"),
-                    last_synced: row.get("last_synced"),
-                    created_at: row.get("created_at"),
-                    updated_at: row.get("updated_at"),
-                };
-                Ok((StatusCode::CREATED, Json(source)))
-            }
-            Err(e) => {
-                // Check if it's a unique constraint violation (error code 23505)
-                if e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
-                    Err(AppError::Conflict(format!("Source with name '{}' already exists", name)))
-                } else {
-                    Err(AppError::Internal(format!("Failed to create source: {}", e)))
+                        &[&name, &source_type, &path, &config, &owner_id],
+                    )
+                    .await
+                {
+                    Ok(row) => {
+                        let source = SourceResponse {
+                            id: row.get("id"),
+                            name: row.get("name"),
+                            source_type: row.get("source_type"),
+                            path: row.get("path"),
+                            file_count: row.get("file_count"),
+                            chunk_count: 0,
+                            total_size: row.get("total_size"),
+                            last_synced: row.get("last_synced"),
+                            created_at: row.get("created_at"),
+                            updated_at: row.get("updated_at"),
+                        };
+                        Ok((StatusCode::CREATED, Json(source)))
+                    }
+                    Err(e) => {
+                        // Check if it's a unique constraint violation (error code 23505)
+                        if e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
+                            Err(AppError::Conflict(format!(
+                                "Source with name '{}' already exists",
+                                name
+                            )))
+                        } else {
+                            Err(AppError::Internal(format!(
+                                "Failed to create source: {}",
+                                e
+                            )))
+                        }
+                    }
                 }
-            }
-        }
-    })).await
+            })
+        })
+        .await
 }
 
 pub async fn admin_update_source(
@@ -169,22 +186,25 @@ pub async fn admin_update_source(
     JsonBody(req): JsonBody<UpdateSourceRequest>,
 ) -> Result<Json<SourceResponse>> {
     // K3: All DB operations in a single transaction via RlsClient
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        // Build dynamic update query
-        let mut set_clauses = vec!["updated_at = NOW()".to_string()];
-        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![];
-        let mut param_idx = 1;
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                // Build dynamic update query
+                let mut set_clauses = vec!["updated_at = NOW()".to_string()];
+                let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![];
+                let mut param_idx = 1;
 
-        if let Some(ref name) = req.name {
-            set_clauses.push(format!("name = ${}", param_idx));
-            params.push(name);
-            param_idx += 1;
-        }
+                if let Some(ref name) = req.name {
+                    set_clauses.push(format!("name = ${}", param_idx));
+                    params.push(name);
+                    param_idx += 1;
+                }
 
-        params.push(&id);
+                params.push(&id);
 
-        let query = format!(
-            r#"
+                let query = format!(
+                    r#"
             UPDATE sources
             SET {}
             WHERE id = ${}
@@ -192,44 +212,46 @@ pub async fn admin_update_source(
                       COALESCE(file_count, 0)::bigint as file_count,
                       COALESCE(total_size, 0)::bigint as total_size
             "#,
-            set_clauses.join(", "),
-            param_idx
-        );
+                    set_clauses.join(", "),
+                    param_idx
+                );
 
-        let row = txn
-            .query_opt(&query, &params)
-            .await?
-            .ok_or_else(|| AppError::NotFound(format!("Source {} not found", id)))?;
+                let row = txn
+                    .query_opt(&query, &params)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound(format!("Source {} not found", id)))?;
 
-        // Get chunk count in same transaction
-        let chunk_count: i64 = txn
-            .query_one(
-                r#"
+                // Get chunk count in same transaction
+                let chunk_count: i64 = txn
+                    .query_one(
+                        r#"
                 SELECT COUNT(DISTINCT c.id)::bigint as chunk_count
                 FROM files f
                 LEFT JOIN chunks c ON c.file_id = f.id
                 WHERE f.source_id = $1
                 "#,
-                &[&id],
-            )
-            .await?
-            .get("chunk_count");
+                        &[&id],
+                    )
+                    .await?
+                    .get("chunk_count");
 
-        let source = SourceResponse {
-            id: row.get("id"),
-            name: row.get("name"),
-            source_type: row.get("source_type"),
-            path: row.get("path"),
-            file_count: row.get("file_count"),
-            chunk_count,
-            total_size: row.get("total_size"),
-            last_synced: row.get("last_synced"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        };
+                let source = SourceResponse {
+                    id: row.get("id"),
+                    name: row.get("name"),
+                    source_type: row.get("source_type"),
+                    path: row.get("path"),
+                    file_count: row.get("file_count"),
+                    chunk_count,
+                    total_size: row.get("total_size"),
+                    last_synced: row.get("last_synced"),
+                    created_at: row.get("created_at"),
+                    updated_at: row.get("updated_at"),
+                };
 
-        Ok(Json(source))
-    })).await
+                Ok(Json(source))
+            })
+        })
+        .await
 }
 
 pub async fn admin_delete_source(
@@ -238,38 +260,45 @@ pub async fn admin_delete_source(
     Path(id): Path<i64>,
 ) -> Result<StatusCode> {
     // K3: All DB deletes in a single atomic transaction via RlsClient
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        // Check source exists first
-        let exists: i64 = txn
-            .query_one("SELECT COUNT(*) FROM sources WHERE id = $1", &[&id])
-            .await?
-            .get(0);
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                // Check source exists first
+                let exists: i64 = txn
+                    .query_one("SELECT COUNT(*) FROM sources WHERE id = $1", &[&id])
+                    .await?
+                    .get(0);
 
-        if exists == 0 {
-            return Err(AppError::NotFound(format!("Source {} not found", id)));
-        }
+                if exists == 0 {
+                    return Err(AppError::NotFound(format!("Source {} not found", id)));
+                }
 
-        // BATCH DELETE: Delete dependent data explicitly to avoid slow CASCADE
-        // This is faster than letting CASCADE handle 100k+ rows in one transaction
+                // BATCH DELETE: Delete dependent data explicitly to avoid slow CASCADE
+                // This is faster than letting CASCADE handle 100k+ rows in one transaction
 
-        // 1. Delete outbox entries (prevents ON DELETE SET NULL timeout)
-        let cleaned_outbox: i64 = txn
-            .query_one(
-                "WITH deleted AS (
+                // 1. Delete outbox entries (prevents ON DELETE SET NULL timeout)
+                let cleaned_outbox: i64 = txn
+                    .query_one(
+                        "WITH deleted AS (
                     DELETE FROM indexing_outbox
                     WHERE file_id IN (SELECT id FROM files WHERE source_id = $1)
                     RETURNING 1
                 ) SELECT COUNT(*) FROM deleted",
-                &[&id],
-            )
-            .await?
-            .get(0);
-        tracing::info!(source_id = id, count = cleaned_outbox, "Deleted outbox entries");
+                        &[&id],
+                    )
+                    .await?
+                    .get(0);
+                tracing::info!(
+                    source_id = id,
+                    count = cleaned_outbox,
+                    "Deleted outbox entries"
+                );
 
-        // 2. Delete call_graph (depends on symbols)
-        let deleted_cg: i64 = txn
-            .query_one(
-                "WITH deleted AS (
+                // 2. Delete call_graph (depends on symbols)
+                let deleted_cg: i64 = txn
+                    .query_one(
+                        "WITH deleted AS (
                     DELETE FROM call_graph
                     WHERE caller_symbol_id IN (
                         SELECT s.id FROM symbols s
@@ -278,64 +307,73 @@ pub async fn admin_delete_source(
                     )
                     RETURNING 1
                 ) SELECT COUNT(*) FROM deleted",
-                &[&id],
-            )
-            .await?
-            .get(0);
-        tracing::info!(source_id = id, count = deleted_cg, "Deleted call_graph entries");
+                        &[&id],
+                    )
+                    .await?
+                    .get(0);
+                tracing::info!(
+                    source_id = id,
+                    count = deleted_cg,
+                    "Deleted call_graph entries"
+                );
 
-        // 3. Delete symbols (depends on files)
-        let deleted_sym: i64 = txn
-            .query_one(
-                "WITH deleted AS (
+                // 3. Delete symbols (depends on files)
+                let deleted_sym: i64 = txn
+                    .query_one(
+                        "WITH deleted AS (
                     DELETE FROM symbols
                     WHERE file_id IN (SELECT id FROM files WHERE source_id = $1)
                     RETURNING 1
                 ) SELECT COUNT(*) FROM deleted",
-                &[&id],
-            )
-            .await?
-            .get(0);
-        tracing::info!(source_id = id, count = deleted_sym, "Deleted symbols");
+                        &[&id],
+                    )
+                    .await?
+                    .get(0);
+                tracing::info!(source_id = id, count = deleted_sym, "Deleted symbols");
 
-        // 4. Delete chunks (depends on files)
-        let deleted_chunks: i64 = txn
-            .query_one(
-                "WITH deleted AS (
+                // 4. Delete chunks (depends on files)
+                let deleted_chunks: i64 = txn
+                    .query_one(
+                        "WITH deleted AS (
                     DELETE FROM chunks
                     WHERE file_id IN (SELECT id FROM files WHERE source_id = $1)
                     RETURNING 1
                 ) SELECT COUNT(*) FROM deleted",
-                &[&id],
-            )
-            .await?
-            .get(0);
-        tracing::info!(source_id = id, count = deleted_chunks, "Deleted chunks");
+                        &[&id],
+                    )
+                    .await?
+                    .get(0);
+                tracing::info!(source_id = id, count = deleted_chunks, "Deleted chunks");
 
-        // 5. Delete files
-        let deleted_files: i64 = txn
-            .query_one(
-                "WITH deleted AS (
+                // 5. Delete files
+                let deleted_files: i64 = txn
+                    .query_one(
+                        "WITH deleted AS (
                     DELETE FROM files WHERE source_id = $1 RETURNING 1
                 ) SELECT COUNT(*) FROM deleted",
-                &[&id],
-            )
-            .await?
-            .get(0);
-        tracing::info!(source_id = id, count = deleted_files, "Deleted files");
+                        &[&id],
+                    )
+                    .await?
+                    .get(0);
+                tracing::info!(source_id = id, count = deleted_files, "Deleted files");
 
-        // 6. Finally delete the source (now empty, fast)
-        txn.execute("DELETE FROM sources WHERE id = $1", &[&id]).await?;
+                // 6. Finally delete the source (now empty, fast)
+                txn.execute("DELETE FROM sources WHERE id = $1", &[&id])
+                    .await?;
 
-        tracing::info!(source_id = id,
-            files = deleted_files,
-            chunks = deleted_chunks,
-            symbols = deleted_sym,
-            call_graph = deleted_cg,
-            "Source deleted from PostgreSQL");
+                tracing::info!(
+                    source_id = id,
+                    files = deleted_files,
+                    chunks = deleted_chunks,
+                    symbols = deleted_sym,
+                    call_graph = deleted_cg,
+                    "Source deleted from PostgreSQL"
+                );
 
-        Ok(())
-    })).await?;
+                Ok(())
+            })
+        })
+        .await?;
 
     // Delete vectors from Qdrant (outside DB transaction, best-effort)
     // Done AFTER PostgreSQL commit to ensure consistency
@@ -364,11 +402,8 @@ pub async fn admin_sync_source(
 
     // K3: IndexService manages its own DB connections from the pool.
     // No RLS setup needed here — IndexService handles it internally.
-    let index_service = IndexService::new(
-        state.db.clone(),
-        state.tei.clone(),
-        state.qdrant.clone(),
-    )?;
+    let index_service =
+        IndexService::new(state.db.clone(), state.tei.clone(), state.qdrant.clone())?;
 
     // Run indexing (this can take a while for large sources)
     let stats = index_service.index_source(id).await?;
@@ -460,10 +495,13 @@ pub async fn admin_system_stats(
     Extension(_claims): Extension<Arc<crate::auth::Claims>>,
 ) -> Result<Json<SystemStats>> {
     // K3: System stats in a single transaction via RlsClient
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        let row = txn
-            .query_one(
-                r#"
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let row = txn
+                    .query_one(
+                        r#"
                 SELECT
                     (SELECT COUNT(*) FROM sources)::bigint as sources,
                     (SELECT COUNT(*) FROM files)::bigint as files,
@@ -471,18 +509,20 @@ pub async fn admin_system_stats(
                     (SELECT COALESCE(SUM(size_original), 0) FROM files)::bigint as total_size,
                     pg_size_pretty(pg_database_size(current_database())) as db_size
                 "#,
-                &[],
-            )
-            .await?;
+                        &[],
+                    )
+                    .await?;
 
-        Ok(Json(SystemStats {
-            sources: row.get("sources"),
-            files: row.get("files"),
-            chunks: row.get("chunks"),
-            total_size_bytes: row.get("total_size"),
-            postgres_size: row.get("db_size"),
-        }))
-    })).await
+                Ok(Json(SystemStats {
+                    sources: row.get("sources"),
+                    files: row.get("files"),
+                    chunks: row.get("chunks"),
+                    total_size_bytes: row.get("total_size"),
+                    postgres_size: row.get("db_size"),
+                }))
+            })
+        })
+        .await
 }
 
 /// Response for backfill operations
@@ -520,19 +560,18 @@ pub async fn admin_sync_files(
     }
 
     // Convert strings to PathBuf
-    let files: Vec<std::path::PathBuf> = req.files.iter()
-        .map(std::path::PathBuf::from)
-        .collect();
+    let files: Vec<std::path::PathBuf> = req.files.iter().map(std::path::PathBuf::from).collect();
 
-    tracing::info!(source_id = id, file_count = files.len(), "Incremental sync requested");
+    tracing::info!(
+        source_id = id,
+        file_count = files.len(),
+        "Incremental sync requested"
+    );
 
     // K3: IndexService manages its own DB connections from the pool.
     // No RLS setup needed here — IndexService handles it internally.
-    let index_service = IndexService::new(
-        state.db.clone(),
-        state.tei.clone(),
-        state.qdrant.clone(),
-    )?;
+    let index_service =
+        IndexService::new(state.db.clone(), state.tei.clone(), state.qdrant.clone())?;
 
     // Run incremental indexing
     let stats = index_service.sync_files(id, &files).await?;
@@ -574,80 +613,115 @@ pub async fn admin_backfill_orphaned(
     loop {
         // 1. Find orphaned chunks (BATCH with LIMIT) in one transaction
         // Returns owned data so the transaction can be committed immediately
-        let orphans: Vec<(i64, String, i64, i64)> = state.rls_client.with_system(|txn| Box::pin(async move {
-            let rows = txn.query(
-                "SELECT c.id, c.content_text, c.file_id, f.source_id
+        let orphans: Vec<(i64, String, i64, i64)> = state
+            .rls_client
+            .with_system(|txn| {
+                Box::pin(async move {
+                    let rows = txn
+                        .query(
+                            "SELECT c.id, c.content_text, c.file_id, f.source_id
                  FROM chunks c
                  JOIN files f ON f.id = c.file_id
                  LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.id
                  WHERE ce.chunk_id IS NULL
                  LIMIT $1",
-                &[&BACKFILL_BATCH_SIZE]
-            ).await?;
+                            &[&BACKFILL_BATCH_SIZE],
+                        )
+                        .await?;
 
-            let data: Vec<(i64, String, i64, i64)> = rows.iter().map(|r| {
-                (r.get("id"), r.get("content_text"), r.get("file_id"), r.get("source_id"))
-            }).collect();
+                    let data: Vec<(i64, String, i64, i64)> = rows
+                        .iter()
+                        .map(|r| {
+                            (
+                                r.get("id"),
+                                r.get("content_text"),
+                                r.get("file_id"),
+                                r.get("source_id"),
+                            )
+                        })
+                        .collect();
 
-            Ok(data)
-        })).await?;
+                    Ok(data)
+                })
+            })
+            .await?;
 
         if orphans.is_empty() {
             break; // No more orphans
         }
 
         let batch_size = orphans.len();
-        tracing::info!(batch = batch_count + 1, count = batch_size, "Processing orphan batch");
+        tracing::info!(
+            batch = batch_count + 1,
+            count = batch_size,
+            "Processing orphan batch"
+        );
 
         // 2. Collect texts for batch embedding (outside DB transaction)
-        let texts: Vec<&str> = orphans.iter()
+        let texts: Vec<&str> = orphans
+            .iter()
             .map(|(_, text, _, _)| text.as_str())
             .collect();
 
         // 3. Batch-embed via TEI (CRITICAL: batch call, not per-chunk!)
-        let embeddings = state.tei.embed_batch(&texts).await
+        let embeddings = state
+            .tei
+            .embed_batch(&texts)
+            .await
             .map_err(|e| AppError::Internal(format!("TEI batch embedding failed: {}", e)))?;
 
         if embeddings.len() != orphans.len() {
             return Err(AppError::Internal(format!(
                 "Embedding count mismatch: got {}, expected {}",
-                embeddings.len(), orphans.len()
+                embeddings.len(),
+                orphans.len()
             )));
         }
 
         // 4. Transaction: Insert embeddings + outbox entries for THIS BATCH
         let model_name_c = model_name.clone();
-        state.rls_client.with_system(|txn| Box::pin(async move {
-            for (orphan, embedding) in orphans.iter().zip(embeddings.iter()) {
-                let chunk_id = orphan.0;
-                let file_id = orphan.2;
-                let source_id = orphan.3;
-                let embedding_vec = Vector::from(embedding.clone());
+        state
+            .rls_client
+            .with_system(|txn| {
+                Box::pin(async move {
+                    for (orphan, embedding) in orphans.iter().zip(embeddings.iter()) {
+                        let chunk_id = orphan.0;
+                        let file_id = orphan.2;
+                        let source_id = orphan.3;
+                        let embedding_vec = Vector::from(embedding.clone());
 
-                // Insert embedding
-                txn.execute(
-                    "INSERT INTO chunk_embeddings (chunk_id, model, vector)
+                        // Insert embedding
+                        txn.execute(
+                            "INSERT INTO chunk_embeddings (chunk_id, model, vector)
                      VALUES ($1, $2, $3)
                      ON CONFLICT (chunk_id) DO UPDATE SET
                      vector = EXCLUDED.vector, model = EXCLUDED.model, created_at = NOW()",
-                    &[&chunk_id, &model_name_c, &embedding_vec]
-                ).await?;
+                            &[&chunk_id, &model_name_c, &embedding_vec],
+                        )
+                        .await?;
 
-                // Queue to outbox for Qdrant sync
-                txn.execute(
+                        // Queue to outbox for Qdrant sync
+                        txn.execute(
                     "INSERT INTO indexing_outbox (action, chunk_id, file_id, source_id, payload)
                      VALUES ('upsert', $1, $2, $3, '{}'::jsonb)",
                     &[&chunk_id, &file_id, &source_id]
                 ).await?;
-            }
+                    }
 
-            Ok(())
-        })).await?;
+                    Ok(())
+                })
+            })
+            .await?;
 
         total_processed += batch_size;
         batch_count += 1;
 
-        tracing::info!(batch = batch_count, processed = batch_size, total = total_processed, "Batch committed");
+        tracing::info!(
+            batch = batch_count,
+            processed = batch_size,
+            total = total_processed,
+            "Batch committed"
+        );
     }
 
     if total_processed == 0 {
@@ -658,12 +732,19 @@ pub async fn admin_backfill_orphaned(
         }));
     }
 
-    tracing::info!(total = total_processed, batches = batch_count, "Backfill completed successfully");
+    tracing::info!(
+        total = total_processed,
+        batches = batch_count,
+        "Backfill completed successfully"
+    );
 
     Ok(Json(BackfillResult {
         processed: total_processed,
         batches: batch_count,
-        message: format!("Backfilled {} orphaned chunks in {} batches", total_processed, batch_count),
+        message: format!(
+            "Backfilled {} orphaned chunks in {} batches",
+            total_processed, batch_count
+        ),
     }))
 }
 
@@ -679,24 +760,37 @@ pub async fn admin_backfill_qdrant_user_ids(
 ) -> Result<Json<BackfillResult>> {
     // 1. Create payload index for user_id (idempotent)
     tracing::info!("K4 Backfill: Creating user_id payload index on Qdrant...");
-    state.qdrant.create_payload_index("user_id", "keyword").await?;
+    state
+        .qdrant
+        .create_payload_index("user_id", "keyword")
+        .await?;
     tracing::info!("K4 Backfill: user_id payload index created (or already exists)");
 
     // 2. Get all source_id -> user_id mappings from PostgreSQL
-    let source_mappings: Vec<(i64, String)> = state.rls_client.with_system(|txn| Box::pin(async move {
-        let rows = txn.query(
-            "SELECT id, user_id::text FROM sources",
-            &[]
-        ).await?;
+    let source_mappings: Vec<(i64, String)> = state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let rows = txn
+                    .query("SELECT id, user_id::text FROM sources", &[])
+                    .await?;
 
-        Ok(rows.iter().map(|r| {
-            let id: i64 = r.get("id");
-            let user_id: String = r.get("user_id");
-            (id, user_id)
-        }).collect())
-    })).await?;
+                Ok(rows
+                    .iter()
+                    .map(|r| {
+                        let id: i64 = r.get("id");
+                        let user_id: String = r.get("user_id");
+                        (id, user_id)
+                    })
+                    .collect())
+            })
+        })
+        .await?;
 
-    tracing::info!(sources = source_mappings.len(), "K4 Backfill: Found sources to process");
+    tracing::info!(
+        sources = source_mappings.len(),
+        "K4 Backfill: Found sources to process"
+    );
 
     let mut total_sources = 0;
     let mut total_errors = 0;
@@ -707,7 +801,11 @@ pub async fn admin_backfill_qdrant_user_ids(
             "user_id": user_id
         });
 
-        match state.qdrant.set_payload_by_source(*source_id, payload).await {
+        match state
+            .qdrant
+            .set_payload_by_source(*source_id, payload)
+            .await
+        {
             Ok(()) => {
                 total_sources += 1;
                 tracing::info!(source_id, user_id, "K4 Backfill: Updated points for source");
@@ -725,10 +823,17 @@ pub async fn admin_backfill_qdrant_user_ids(
             total_sources, total_errors
         )
     } else {
-        format!("Backfilled user_id for all {} sources successfully", total_sources)
+        format!(
+            "Backfilled user_id for all {} sources successfully",
+            total_sources
+        )
     };
 
-    tracing::info!(sources = total_sources, errors = total_errors, "K4 Backfill complete");
+    tracing::info!(
+        sources = total_sources,
+        errors = total_errors,
+        "K4 Backfill complete"
+    );
 
     Ok(Json(BackfillResult {
         processed: total_sources,

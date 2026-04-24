@@ -4,11 +4,11 @@
 //! Uses SKIP LOCKED pattern for concurrent safety.
 
 use crate::db::DEFAULT_USER_ID;
-use crate::services::qdrant::{QdrantClient, Point};
+use crate::services::qdrant::{Point, QdrantClient};
 use deadpool_postgres::Pool;
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
-use tracing::{info, warn, error, debug};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 /// Outbox Worker for async Qdrant synchronization
@@ -31,16 +31,22 @@ impl OutboxWorker {
             poll_interval: Duration::from_millis(500),
             // Configurable via env (fallback to defaults)
             done_retention_hours: std::env::var("OUTBOX_DONE_RETENTION_HOURS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(24),
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(24),
             failed_retention_days: std::env::var("OUTBOX_FAILED_RETENTION_DAYS")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(7),
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(7),
         }
     }
 
     /// Run the worker (blocking loop)
     pub async fn run(&self) {
-        info!("Outbox worker started (batch_size: {}, poll_interval: {:?})",
-              self.batch_size, self.poll_interval);
+        info!(
+            "Outbox worker started (batch_size: {}, poll_interval: {:?})",
+            self.batch_size, self.poll_interval
+        );
 
         let mut ticker = interval(self.poll_interval);
 
@@ -58,19 +64,21 @@ impl OutboxWorker {
         let client = self.db.get().await?;
 
         // Set RLS context: claim_outbox_batch JOINs sources (RLS-enabled)
-        client.execute(
-            "SELECT set_config('app.user_id', $1::text, false)",
-            &[&DEFAULT_USER_ID.to_string()],
-        ).await?;
-        client.execute(
-            "SELECT set_config('app.is_admin', 'true', false)",
-            &[],
-        ).await?;
+        client
+            .execute(
+                "SELECT set_config('app.user_id', $1::text, false)",
+                &[&DEFAULT_USER_ID.to_string()],
+            )
+            .await?;
+        client
+            .execute("SELECT set_config('app.is_admin', 'true', false)", &[])
+            .await?;
 
         // Reaper: Reset stuck 'processing' entries after 5 minutes
         // Uses processing_started_at (not created_at) for accurate timeout detection
-        let stale_reset = client.execute(
-            "UPDATE indexing_outbox
+        let stale_reset = client
+            .execute(
+                "UPDATE indexing_outbox
              SET status = 'pending',
                  retry_count = retry_count + 1,
                  processing_started_at = NULL,
@@ -78,18 +86,18 @@ impl OutboxWorker {
              WHERE status = 'processing'
                AND processing_started_at < NOW() - INTERVAL '5 minutes'
                AND retry_count < 3",
-            &[]
-        ).await?;
+                &[],
+            )
+            .await?;
 
         if stale_reset > 0 {
             warn!("Reaper reset {} stale 'processing' entries", stale_reset);
         }
 
         // Claim batch with SKIP LOCKED - returns vector from chunk_embeddings JOIN
-        let rows = client.query(
-            "SELECT * FROM claim_outbox_batch($1)",
-            &[&self.batch_size]
-        ).await?;
+        let rows = client
+            .query("SELECT * FROM claim_outbox_batch($1)", &[&self.batch_size])
+            .await?;
 
         if rows.is_empty() {
             return Ok(());
@@ -101,8 +109,8 @@ impl OutboxWorker {
         // IMPORTANT: Separate tracking for correct error isolation
         let mut upsert_points: Vec<Point> = Vec::new();
         let mut delete_chunk_ids: Vec<u64> = Vec::new();
-        let mut upsert_outbox_ids: Vec<i64> = Vec::new();  // Track upserts separately
-        let mut delete_outbox_ids: Vec<i64> = Vec::new();  // Track deletes separately
+        let mut upsert_outbox_ids: Vec<i64> = Vec::new(); // Track upserts separately
+        let mut delete_outbox_ids: Vec<i64> = Vec::new(); // Track deletes separately
         let mut failed_ids: Vec<(i64, String)> = Vec::new();
 
         for row in &rows {
@@ -137,15 +145,18 @@ impl OutboxWorker {
                             vector: vec.to_vec(),
                             payload,
                         });
-                        upsert_outbox_ids.push(outbox_id);  // Track in upsert list
+                        upsert_outbox_ids.push(outbox_id); // Track in upsert list
                     } else {
-                        warn!("No embedding for chunk {} (outbox {}), marking failed", chunk_id, outbox_id);
+                        warn!(
+                            "No embedding for chunk {} (outbox {}), marking failed",
+                            chunk_id, outbox_id
+                        );
                         failed_ids.push((outbox_id, "No embedding found".to_string()));
                     }
                 }
                 "delete" => {
                     delete_chunk_ids.push(chunk_id as u64);
-                    delete_outbox_ids.push(outbox_id);  // Track in delete list
+                    delete_outbox_ids.push(outbox_id); // Track in delete list
                 }
                 _ => {
                     warn!("Unknown action '{}' for outbox {}", action, outbox_id);
@@ -179,7 +190,7 @@ impl OutboxWorker {
                 }
             }
         } else {
-            upsert_success = true;  // No upserts to process = success
+            upsert_success = true; // No upserts to process = success
         }
 
         // Batch delete from Qdrant
@@ -202,7 +213,7 @@ impl OutboxWorker {
                 }
             }
         } else {
-            delete_success = true;  // No deletes to process = success
+            delete_success = true; // No deletes to process = success
         }
 
         // Sprint 3.4: Batch UPDATE for success/failure instead of per-ID loops
@@ -230,7 +241,8 @@ impl OutboxWorker {
         // Mark pre-validation failed entries (each may have different error messages)
         // Group by error_message for batch updates where possible
         if !failed_ids.is_empty() {
-            let mut by_error: std::collections::HashMap<&str, Vec<i64>> = std::collections::HashMap::new();
+            let mut by_error: std::collections::HashMap<&str, Vec<i64>> =
+                std::collections::HashMap::new();
             for (id, msg) in &failed_ids {
                 by_error.entry(msg.as_str()).or_default().push(*id);
             }
@@ -246,8 +258,12 @@ impl OutboxWorker {
 
         let total_processed = upsert_outbox_ids.len() + delete_outbox_ids.len();
         if total_processed > 0 || !failed_ids.is_empty() {
-            info!("Outbox batch complete: {} upserts, {} deletes, {} failed",
-                  upsert_outbox_ids.len(), delete_outbox_ids.len(), failed_ids.len());
+            info!(
+                "Outbox batch complete: {} upserts, {} deletes, {} failed",
+                upsert_outbox_ids.len(),
+                delete_outbox_ids.len(),
+                failed_ids.len()
+            );
         }
 
         Ok(())
@@ -262,32 +278,41 @@ impl OutboxWorker {
         // Purge 'done' older than retention
         // NOTE: Use make_interval() with integer param (more robust than string concat)
         // CRITICAL: processed_at IS NOT NULL for 'done' entries
-        let done_deleted = client.execute(
-            "DELETE FROM indexing_outbox
+        let done_deleted = client
+            .execute(
+                "DELETE FROM indexing_outbox
              WHERE status = 'done'
                AND processed_at IS NOT NULL
                AND processed_at < NOW() - make_interval(hours => $1)",
-            &[&self.done_retention_hours],
-        ).await?;
+                &[&self.done_retention_hours],
+            )
+            .await?;
 
         if done_deleted > 0 {
-            info!("Purged {} 'done' entries (>{}h)", done_deleted, self.done_retention_hours);
-            metrics::counter!("outbox_entries_purged", "status" => "done")
-                .increment(done_deleted);
+            info!(
+                "Purged {} 'done' entries (>{}h)",
+                done_deleted, self.done_retention_hours
+            );
+            metrics::counter!("outbox_entries_purged", "status" => "done").increment(done_deleted);
         }
 
         // Purge 'failed' (retry_count >= 3) older than retention
         // CRITICAL: Use created_at, not processed_at (can be NULL for failed!)
-        let failed_deleted = client.execute(
-            "DELETE FROM indexing_outbox
+        let failed_deleted = client
+            .execute(
+                "DELETE FROM indexing_outbox
              WHERE status = 'failed'
                AND retry_count >= 3
                AND created_at < NOW() - make_interval(days => $1)",
-            &[&self.failed_retention_days],
-        ).await?;
+                &[&self.failed_retention_days],
+            )
+            .await?;
 
         if failed_deleted > 0 {
-            warn!("Purged {} 'failed' entries (>{}d)", failed_deleted, self.failed_retention_days);
+            warn!(
+                "Purged {} 'failed' entries (>{}d)",
+                failed_deleted, self.failed_retention_days
+            );
             metrics::counter!("outbox_entries_purged", "status" => "failed")
                 .increment(failed_deleted);
         }
@@ -301,13 +326,15 @@ impl OutboxWorker {
         let client = self.db.get().await?;
 
         // Single query with FILTER (efficient, single scan)
-        let metrics_row = client.query_one(
-            "SELECT
+        let metrics_row = client
+            .query_one(
+                "SELECT
                 COUNT(*) FILTER (WHERE status = 'pending') AS pending,
                 COUNT(*) FILTER (WHERE status = 'failed') AS failed
              FROM indexing_outbox",
-            &[],
-        ).await?;
+                &[],
+            )
+            .await?;
 
         let pending: i64 = metrics_row.get("pending");
         let failed: i64 = metrics_row.get("failed");
@@ -315,7 +342,10 @@ impl OutboxWorker {
         metrics::gauge!("outbox_pending_entries").set(pending as f64);
         metrics::gauge!("outbox_failed_entries").set(failed as f64);
 
-        debug!("Outbox metrics updated: pending={}, failed={}", pending, failed);
+        debug!(
+            "Outbox metrics updated: pending={}, failed={}",
+            pending, failed
+        );
 
         Ok(())
     }
@@ -323,8 +353,10 @@ impl OutboxWorker {
     /// Run the purge task (blocking loop, 1h interval)
     /// Spawned separately from the main worker
     pub async fn run_purge_task(&self) {
-        info!("Outbox purge task started (done_retention: {}h, failed_retention: {}d)",
-              self.done_retention_hours, self.failed_retention_days);
+        info!(
+            "Outbox purge task started (done_retention: {}h, failed_retention: {}d)",
+            self.done_retention_hours, self.failed_retention_days
+        );
 
         let mut ticker = interval(Duration::from_secs(3600)); // 1h
 

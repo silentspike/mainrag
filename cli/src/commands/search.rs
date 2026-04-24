@@ -17,7 +17,11 @@ pub async fn run(
     // Apply offset client-side (but keep original total for pagination display)
     let results = crate::client::api::SearchResponse {
         llm_context: all_results.llm_context.clone(),
-        results: all_results.results.into_iter().skip(offset as usize).collect(),
+        results: all_results
+            .results
+            .into_iter()
+            .skip(offset as usize)
+            .collect(),
         total: all_results.total,
         took_ms: all_results.took_ms,
         quality_tier: all_results.quality_tier,
@@ -26,21 +30,28 @@ pub async fn run(
 
     if json_output {
         // JSON mode: structured, no llm_context header, clean fields
-        let json_results: Vec<serde_json::Value> = results.results.iter().map(|r| {
-            json!({
-                "source": r.source_name,
-                "location": r.location,
-                "score": (r.score * 100.0).round() / 100.0,
-                "content": r.content,
-                "context": r.context_prefix,
+        let json_results: Vec<serde_json::Value> = results
+            .results
+            .iter()
+            .map(|r| {
+                json!({
+                    "source": r.source_name,
+                    "location": r.location,
+                    "score": (r.score * 100.0).round() / 100.0,
+                    "content": r.content,
+                    "context": r.context_prefix,
+                })
             })
-        }).collect();
+            .collect();
 
-        println!("{}", serde_json::to_string_pretty(&json!({
-            "query": query,
-            "total": results.total,
-            "results": json_results,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "query": query,
+                "total": results.total,
+                "results": json_results,
+            }))?
+        );
         return Ok(());
     }
 
@@ -68,10 +79,19 @@ pub async fn run(
             // Conversations: source + shortened path + line range
             let short_path = shorten_conversation_path(&result.file_path);
             let lines = format!("{}:{}-{}", short_path, result.line_start, result.line_end);
-            println!("#{} [{}] ({:.2}) {}", idx + 1, result.source_name, result.score, lines);
+            println!(
+                "#{} [{}] ({:.2}) {}",
+                idx + 1,
+                result.source_name,
+                result.score,
+                lines
+            );
         } else {
             // Code/docs: source + file + line range
-            let ctx = result.context_prefix.as_deref().unwrap_or(&result.source_name);
+            let ctx = result
+                .context_prefix
+                .as_deref()
+                .unwrap_or(&result.source_name);
             let loc = result.location.as_deref().unwrap_or(&result.file_path);
             println!("#{} {} ({:.2}) {}", idx + 1, ctx, result.score, loc);
         }
@@ -117,17 +137,14 @@ pub async fn run(
 /// → `sessions/2026/03/28/session.jsonl`
 fn shorten_conversation_path(path: &str) -> String {
     let parts: Vec<&str> = path.split('/').collect();
-    let shortened: Vec<&str> = parts.iter()
-        .filter(|p| !is_uuid_like(p))
-        .copied()
-        .collect();
+    let shortened: Vec<&str> = parts.iter().filter(|p| !is_uuid_like(p)).copied().collect();
 
     // Replace UUID-containing filename with "session" + extension
     if let Some(filename) = shortened.last() {
         if filename.contains('-') && filename.len() > 40 {
             // Filename has UUID in it — simplify
             let ext = filename.rsplit('.').next().unwrap_or("jsonl");
-            let mut result: Vec<&str> = shortened[..shortened.len()-1].to_vec();
+            let result: Vec<&str> = shortened[..shortened.len() - 1].to_vec();
             let short_name = format!("session.{}", ext);
             return format!("{}/{}", result.join("/"), short_name);
         }
@@ -139,6 +156,7 @@ fn shorten_conversation_path(path: &str) -> String {
 /// Shorten conversation file paths by removing UUIDs and tool-result hashes.
 /// `/work/coderag/1a3dfe21-f610-4991-b60e-3ba59b760cda/tool-results/toolu_01Vv...txt:12`
 /// → `coderag/.../tool-results/...:12`
+#[allow(dead_code)]
 fn shorten_location(location: &str, source: &str) -> String {
     // For conversation sources, aggressively shorten paths
     if source.contains("conversation") {
@@ -156,10 +174,7 @@ fn shorten_location(location: &str, source: &str) -> String {
 
         // Remove UUID segments (32-hex-char patterns with dashes)
         let parts: Vec<&str> = path_part.split('/').collect();
-        let shortened: Vec<&str> = parts.iter()
-            .filter(|p| !is_uuid_like(p))
-            .copied()
-            .collect();
+        let shortened: Vec<&str> = parts.iter().filter(|p| !is_uuid_like(p)).copied().collect();
 
         if shortened.len() < parts.len() {
             // Had UUIDs removed — join remaining parts

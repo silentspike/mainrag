@@ -4,15 +4,15 @@
 
 use async_trait::async_trait;
 use regex::Regex;
+use reqwest::Client;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::sync::LazyLock;
 use std::time::Duration;
-use reqwest::Client;
 use tracing::{info, warn};
 use url::Url;
 
-use super::{SourcePlugin, SyncResult, RawFile};
+use super::{RawFile, SourcePlugin, SyncResult};
 
 const MAX_PAGES: usize = 100;
 const MAX_DEPTH: usize = 3;
@@ -20,41 +20,32 @@ const REQUEST_DELAY_MS: u64 = 500;
 
 // --- Static compiled regexes (compiled once, reused forever) ---
 
-static RE_SITEMAP_LOC: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<loc>(.*?)</loc>").expect("sitemap loc regex")
-});
+static RE_SITEMAP_LOC: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<loc>(.*?)</loc>").expect("sitemap loc regex"));
 
-static RE_HREF: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"href=["']([^"']+)["']"#).expect("href regex")
-});
+static RE_HREF: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"href=["']([^"']+)["']"#).expect("href regex"));
 
-static RE_SCRIPT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<script[^>]*>.*?</script>").expect("script tag regex")
-});
+static RE_SCRIPT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)<script[^>]*>.*?</script>").expect("script tag regex"));
 
-static RE_STYLE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<style[^>]*>.*?</style>").expect("style tag regex")
-});
+static RE_STYLE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)<style[^>]*>.*?</style>").expect("style tag regex"));
 
-static RE_NAV: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<nav[^>]*>.*?</nav>").expect("nav tag regex")
-});
+static RE_NAV: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)<nav[^>]*>.*?</nav>").expect("nav tag regex"));
 
-static RE_HEADER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<header[^>]*>.*?</header>").expect("header tag regex")
-});
+static RE_HEADER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)<header[^>]*>.*?</header>").expect("header tag regex"));
 
-static RE_FOOTER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<footer[^>]*>.*?</footer>").expect("footer tag regex")
-});
+static RE_FOOTER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)<footer[^>]*>.*?</footer>").expect("footer tag regex"));
 
-static RE_ASIDE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<aside[^>]*>.*?</aside>").expect("aside tag regex")
-});
+static RE_ASIDE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)<aside[^>]*>.*?</aside>").expect("aside tag regex"));
 
-static RE_HTML_TAGS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<[^>]+>").expect("html tag regex")
-});
+static RE_HTML_TAGS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<[^>]+>").expect("html tag regex"));
 
 // --- SSRF Protection ---
 
@@ -172,13 +163,19 @@ fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
 /// Validate a URL against SSRF attacks by resolving DNS and checking the IP.
 /// Returns Ok(()) if the URL is safe to fetch, Err with a description otherwise.
 fn validate_url_ssrf(url_str: &str) -> anyhow::Result<()> {
-    let parsed = Url::parse(url_str)
-        .map_err(|e| anyhow::anyhow!("Invalid URL '{}': {}", url_str, e))?;
+    let parsed =
+        Url::parse(url_str).map_err(|e| anyhow::anyhow!("Invalid URL '{}': {}", url_str, e))?;
 
     // Only allow http and https schemes
     match parsed.scheme() {
         "http" | "https" => {}
-        scheme => return Err(anyhow::anyhow!("Blocked scheme '{}' in URL '{}'", scheme, url_str)),
+        scheme => {
+            return Err(anyhow::anyhow!(
+                "Blocked scheme '{}' in URL '{}'",
+                scheme,
+                url_str
+            ))
+        }
     }
 
     let host = parsed
@@ -301,7 +298,11 @@ impl WebPlugin {
     /// Load URLs from sitemap.xml
     async fn load_sitemap(&self, base_url: &str) -> Vec<String> {
         let sitemap_url = match Url::parse(base_url) {
-            Ok(u) => format!("{}://{}/sitemap.xml", u.scheme(), u.host_str().unwrap_or("")),
+            Ok(u) => format!(
+                "{}://{}/sitemap.xml",
+                u.scheme(),
+                u.host_str().unwrap_or("")
+            ),
             Err(_) => return vec![],
         };
 
@@ -500,7 +501,9 @@ mod tests {
     #[test]
     fn test_is_private_ipv4_loopback() {
         assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
-        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(127, 255, 255, 255))));
+        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(
+            127, 255, 255, 255
+        ))));
     }
 
     #[test]
@@ -511,17 +514,23 @@ mod tests {
         // 172.16.0.0/12
         assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
         assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(172, 31, 255, 255))));
-        assert!(!is_private_ip(&IpAddr::V4(Ipv4Addr::new(172, 15, 255, 255))));
+        assert!(!is_private_ip(&IpAddr::V4(Ipv4Addr::new(
+            172, 15, 255, 255
+        ))));
         assert!(!is_private_ip(&IpAddr::V4(Ipv4Addr::new(172, 32, 0, 0))));
         // 192.168.0.0/16
         assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))));
-        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(192, 168, 255, 255))));
+        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(
+            192, 168, 255, 255
+        ))));
     }
 
     #[test]
     fn test_is_private_ipv4_link_local() {
         // 169.254.0.0/16 - Cloud metadata endpoint
-        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))));
+        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(
+            169, 254, 169, 254
+        ))));
         assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(169, 254, 0, 1))));
     }
 
@@ -547,7 +556,9 @@ mod tests {
 
     #[test]
     fn test_is_private_ipv6_public() {
-        assert!(!is_private_ip(&IpAddr::V6("2606:4700::1111".parse().unwrap())));
+        assert!(!is_private_ip(&IpAddr::V6(
+            "2606:4700::1111".parse().unwrap()
+        )));
     }
 
     #[test]

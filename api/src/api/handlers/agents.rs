@@ -62,10 +62,14 @@ pub async fn admin_create_agent(
 ) -> Result<impl IntoResponse, AppError> {
     // Validate agent name: alphanumeric + hyphen, max 32 chars
     if req.name.is_empty() || req.name.len() > 32 {
-        return Err(AppError::BadRequest("Agent name must be 1-32 characters".to_string()));
+        return Err(AppError::BadRequest(
+            "Agent name must be 1-32 characters".to_string(),
+        ));
     }
     if !req.name.chars().all(|c| c.is_alphanumeric() || c == '-') {
-        return Err(AppError::BadRequest("Agent name must be alphanumeric with hyphens only".to_string()));
+        return Err(AppError::BadRequest(
+            "Agent name must be alphanumeric with hyphens only".to_string(),
+        ));
     }
 
     // Pre-compute key material outside the DB transaction
@@ -135,27 +139,38 @@ pub async fn admin_create_agent(
 pub async fn admin_list_agents(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AgentListResponse>, AppError> {
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        let rows = txn.query(
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let rows = txn.query(
             r#"SELECT id, agent_id, agent_name, key_prefix, status, created_at, last_used_at
                FROM api_keys
                ORDER BY created_at DESC"#,
             &[],
         ).await?;
 
-        let agents = rows.iter().map(|row| AgentResponse {
-            id: row.get::<_, Uuid>("id").to_string(),
-            agent_id: row.get::<_, Uuid>("agent_id").to_string(),
-            name: row.get("agent_name"),
-            key_prefix: row.get("key_prefix"),
-            status: row.get("status"),
-            created_at: row.get::<_, chrono::DateTime<chrono::Utc>>("created_at").to_rfc3339(),
-            last_used_at: row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("last_used_at")
-                .map(|t| t.to_rfc3339()),
-        }).collect();
+                let agents = rows
+                    .iter()
+                    .map(|row| AgentResponse {
+                        id: row.get::<_, Uuid>("id").to_string(),
+                        agent_id: row.get::<_, Uuid>("agent_id").to_string(),
+                        name: row.get("agent_name"),
+                        key_prefix: row.get("key_prefix"),
+                        status: row.get("status"),
+                        created_at: row
+                            .get::<_, chrono::DateTime<chrono::Utc>>("created_at")
+                            .to_rfc3339(),
+                        last_used_at: row
+                            .get::<_, Option<chrono::DateTime<chrono::Utc>>>("last_used_at")
+                            .map(|t| t.to_rfc3339()),
+                    })
+                    .collect();
 
-        Ok(Json(AgentListResponse { agents }))
-    })).await
+                Ok(Json(AgentListResponse { agents }))
+            })
+        })
+        .await
 }
 
 /// DELETE /api/v1/admin/agents/:id — Revoke an agent's API key
@@ -172,7 +187,9 @@ pub async fn admin_revoke_agent(
     })).await?;
 
     if result == 0 {
-        return Err(AppError::NotFound("Agent not found or already revoked".to_string()));
+        return Err(AppError::NotFound(
+            "Agent not found or already revoked".to_string(),
+        ));
     }
 
     tracing::info!(agent_id = %id, "Agent API key(s) revoked");
@@ -246,14 +263,13 @@ fn hmac_sha256_hash(_config: &crate::config::Config, raw_key: &[u8]) -> Vec<u8> 
 
     type HmacSha256 = Hmac<Sha256>;
 
-    let pepper = std::env::var("API_KEY_PEPPER")
-        .unwrap_or_else(|_| {
-            tracing::warn!("API_KEY_PEPPER not set — using fallback (INSECURE for production!)");
-            "mainrag_default_pepper_change_me".to_string()
-        });
+    let pepper = std::env::var("API_KEY_PEPPER").unwrap_or_else(|_| {
+        tracing::warn!("API_KEY_PEPPER not set — using fallback (INSECURE for production!)");
+        "mainrag_default_pepper_change_me".to_string()
+    });
 
-    let mut mac = HmacSha256::new_from_slice(pepper.as_bytes())
-        .expect("HMAC can take key of any size");
+    let mut mac =
+        HmacSha256::new_from_slice(pepper.as_bytes()).expect("HMAC can take key of any size");
     mac.update(raw_key);
     mac.finalize().into_bytes().to_vec()
 }

@@ -23,27 +23,51 @@ pub async fn run(
     }
 
     if chains.is_empty() {
-        println!("{}", format!("\rNo delegation chain found for '{}'", symbol).yellow());
+        println!(
+            "{}",
+            format!("\rNo delegation chain found for '{}'", symbol).yellow()
+        );
         return Ok(());
     }
 
-    println!("{}", format!("\r{} Found {} chain(s) for '{}'", "OK".green(), chains.len(), symbol).bold());
+    println!(
+        "{}",
+        format!(
+            "\r{} Found {} chain(s) for '{}'",
+            "OK".green(),
+            chains.len(),
+            symbol
+        )
+        .bold()
+    );
 
     for (i, chain) in chains.iter().enumerate() {
         println!();
         let entry = &chain.entry_point;
         let layer = entry.layer.as_deref().unwrap_or("?");
-        println!("  {} Chain {} — {} [{}]",
+        println!(
+            "  {} Chain {} — {} [{}]",
             ">>".blue().bold(),
             i + 1,
             entry.name.bold(),
             layer.cyan(),
         );
-        println!("    {} {}:{}-{}", "Entry:".dimmed(), entry.file_path, entry.line_start, entry.line_end);
+        println!(
+            "    {} {}:{}-{}",
+            "Entry:".dimmed(),
+            entry.file_path,
+            entry.line_start,
+            entry.line_end
+        );
 
         // Show entry annotations
         for ann in &chain.annotations {
-            println!("    {} {} = {}", "!".magenta(), ann.annotation_type.dimmed(), ann.value);
+            println!(
+                "    {} {} = {}",
+                "!".magenta(),
+                ann.annotation_type.dimmed(),
+                ann.value
+            );
         }
 
         // Show delegation steps
@@ -55,11 +79,14 @@ pub async fn run(
                 _ => step.role.dimmed().to_string(),
             };
 
-            let dispatch_info = step.dispatch_via.as_ref()
+            let dispatch_info = step
+                .dispatch_via
+                .as_ref()
                 .map(|d| format!(" via {}", d.yellow()))
                 .unwrap_or_default();
 
-            println!("    {} Step {} [{}]{} — {}",
+            println!(
+                "    {} Step {} [{}]{} — {}",
                 "->".blue(),
                 j + 1,
                 role_colored,
@@ -68,7 +95,10 @@ pub async fn run(
             );
 
             if !step.symbol.file_path.is_empty() {
-                println!("       {}:{}-{}", step.symbol.file_path, step.symbol.line_start, step.symbol.line_end);
+                println!(
+                    "       {}:{}-{}",
+                    step.symbol.file_path, step.symbol.line_start, step.symbol.line_end
+                );
             }
 
             // Code snippet
@@ -80,12 +110,20 @@ pub async fn run(
 
             // Step annotations
             for ann in &step.step_annotations {
-                println!("       {} {} = {}", "!".magenta(), ann.annotation_type.dimmed(), ann.value);
+                println!(
+                    "       {} {} = {}",
+                    "!".magenta(),
+                    ann.annotation_type.dimmed(),
+                    ann.value
+                );
             }
         }
 
         if chain.steps.is_empty() {
-            println!("    {} (no delegation targets — likely an interface/abstract definition)", "~".dimmed());
+            println!(
+                "    {} (no delegation targets — likely an interface/abstract definition)",
+                "~".dimmed()
+            );
         }
     }
 

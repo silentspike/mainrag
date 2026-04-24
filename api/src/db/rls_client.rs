@@ -18,8 +18,8 @@ use std::pin::Pin;
 use deadpool_postgres::Pool;
 use uuid::Uuid;
 
-use crate::error::{AppError, Result};
 use super::postgres::DEFAULT_USER_ID;
+use crate::error::{AppError, Result};
 
 /// Compile-Time Guard: The only way to run RLS-relevant DB queries.
 ///
@@ -57,9 +57,10 @@ impl RlsClient {
         ) -> Pin<Box<dyn Future<Output = Result<R>> + Send + 'a>>,
     {
         let mut client = self.pool.get().await?;
-        let txn = client.transaction().await.map_err(|e| {
-            AppError::Internal(format!("Failed to start RLS transaction: {}", e))
-        })?;
+        let txn = client
+            .transaction()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to start RLS transaction: {}", e)))?;
 
         // SET LOCAL: scoped to this transaction only, no pool leak
         txn.execute(
@@ -70,19 +71,16 @@ impl RlsClient {
         .map_err(|e| AppError::Internal(format!("Failed to set RLS user_id: {}", e)))?;
 
         if is_admin {
-            txn.execute(
-                "SELECT set_config('app.is_admin', 'true', true)",
-                &[],
-            )
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to set RLS is_admin: {}", e)))?;
+            txn.execute("SELECT set_config('app.is_admin', 'true', true)", &[])
+                .await
+                .map_err(|e| AppError::Internal(format!("Failed to set RLS is_admin: {}", e)))?;
         }
 
         let result = f(&txn).await?;
 
-        txn.commit().await.map_err(|e| {
-            AppError::Internal(format!("Failed to commit RLS transaction: {}", e))
-        })?;
+        txn.commit()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to commit RLS transaction: {}", e)))?;
 
         Ok(result)
     }

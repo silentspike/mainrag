@@ -35,7 +35,10 @@ pub struct JsonlChunker {
 
 impl JsonlChunker {
     pub fn new(config: ChunkerConfig) -> Self {
-        let target_size = config.max_tokens.map(|t| t * 4).unwrap_or(TARGET_CHUNK_SIZE);
+        let target_size = config
+            .max_tokens
+            .map(|t| t * 4)
+            .unwrap_or(TARGET_CHUNK_SIZE);
         Self {
             target_size,
             // Adaptive min: never exceed half of target, otherwise splits become impossible
@@ -57,7 +60,10 @@ impl JsonlChunker {
         }
 
         let message = json.get("message")?;
-        let role = message.get("role").and_then(|r| r.as_str()).unwrap_or(msg_type);
+        let role = message
+            .get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or(msg_type);
 
         // Extract content from content array
         let content = message.get("content")?;
@@ -75,11 +81,15 @@ impl JsonlChunker {
                         "tool_use" => {
                             // Include tool calls in content
                             if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
-                                let input = item.get("input")
+                                let input = item
+                                    .get("input")
                                     .map(|i| serde_json::to_string_pretty(i).unwrap_or_default())
                                     .unwrap_or_default();
-                                text_parts.push(format!("[tool:{}] {}", name,
-                                    safe_truncate(&input, 200)));
+                                text_parts.push(format!(
+                                    "[tool:{}] {}",
+                                    name,
+                                    safe_truncate(&input, 200)
+                                ));
                             }
                         }
                         "tool_result" => {
@@ -135,7 +145,10 @@ impl JsonlChunker {
         match payload_type {
             "message" => {
                 // Regular user/assistant message
-                let role = payload.get("role").and_then(|r| r.as_str()).unwrap_or("assistant");
+                let role = payload
+                    .get("role")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("assistant");
                 let content = payload.get("content")?;
                 let mut text_parts = Vec::new();
 
@@ -158,19 +171,37 @@ impl JsonlChunker {
                     }
                 }
 
-                if text_parts.is_empty() { return None; }
+                if text_parts.is_empty() {
+                    return None;
+                }
                 Some((role.to_string(), text_parts.join("\n")))
             }
             "function_call" | "custom_tool_call" => {
-                let name = payload.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-                let args = payload.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
-                if args.is_empty() { return None; }
-                Some(("assistant".to_string(), format!("[tool:{}] {}", name, safe_truncate(args, 200))))
+                let name = payload
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("unknown");
+                let args = payload
+                    .get("arguments")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("");
+                if args.is_empty() {
+                    return None;
+                }
+                Some((
+                    "assistant".to_string(),
+                    format!("[tool:{}] {}", name, safe_truncate(args, 200)),
+                ))
             }
             "function_call_output" | "custom_tool_call_output" => {
                 let output = payload.get("output").and_then(|o| o.as_str()).unwrap_or("");
-                if output.is_empty() { return None; }
-                Some(("user".to_string(), format!("[result] {}", safe_truncate(output, 500))))
+                if output.is_empty() {
+                    return None;
+                }
+                Some((
+                    "user".to_string(),
+                    format!("[result] {}", safe_truncate(output, 500)),
+                ))
             }
             "reasoning" => {
                 // Extract reasoning summary
@@ -185,8 +216,13 @@ impl JsonlChunker {
                         }
                     }
                 }
-                if texts.is_empty() { return None; }
-                Some(("assistant".to_string(), format!("[thinking] {}", texts.join("\n"))))
+                if texts.is_empty() {
+                    return None;
+                }
+                Some((
+                    "assistant".to_string(),
+                    format!("[thinking] {}", texts.join("\n")),
+                ))
             }
             _ => None,
         }
@@ -226,8 +262,14 @@ impl JsonlChunker {
         // Include thinking blocks (valuable for understanding reasoning)
         if let Some(thoughts) = msg.get("thoughts").and_then(|t| t.as_array()) {
             for thought in thoughts {
-                let subject = thought.get("subject").and_then(|s| s.as_str()).unwrap_or("");
-                let desc = thought.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                let subject = thought
+                    .get("subject")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("");
+                let desc = thought
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("");
                 if !desc.is_empty() {
                     text_parts.push(format!("[thinking: {}] {}", subject, desc));
                 }
@@ -238,8 +280,12 @@ impl JsonlChunker {
         if let Some(tool_calls) = msg.get("toolCalls").and_then(|t| t.as_array()) {
             for tc in tool_calls {
                 let name = tc.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-                let display = tc.get("displayName").and_then(|d| d.as_str()).unwrap_or(name);
-                let args = tc.get("args")
+                let display = tc
+                    .get("displayName")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or(name);
+                let args = tc
+                    .get("args")
                     .map(|a| serde_json::to_string(a).unwrap_or_default())
                     .unwrap_or_default();
                 text_parts.push(format!("[tool:{}] {}", display, safe_truncate(&args, 200)));
@@ -247,7 +293,8 @@ impl JsonlChunker {
                 // Extract tool result content
                 if let Some(results) = tc.get("result").and_then(|r| r.as_array()) {
                     for res in results {
-                        if let Some(output) = res.pointer("/functionResponse/response/output")
+                        if let Some(output) = res
+                            .pointer("/functionResponse/response/output")
                             .and_then(|o| o.as_str())
                         {
                             text_parts.push(format!("[result] {}", safe_truncate(output, 500)));
@@ -273,8 +320,8 @@ impl JsonlChunker {
     fn try_chunk_gemini_json(&self, content: &str) -> Option<Vec<Chunk>> {
         // Quick check before expensive work — handle both compact and pretty JSON
         let has_messages = content.contains(r#""messages""#);
-        let has_gemini = content.contains(r#""type":"gemini""#)
-            || content.contains(r#""type": "gemini""#);
+        let has_gemini =
+            content.contains(r#""type":"gemini""#) || content.contains(r#""type": "gemini""#);
         if !has_messages || !has_gemini {
             return None;
         }
@@ -309,8 +356,13 @@ impl JsonlChunker {
 
         loop {
             // Skip whitespace and commas between messages
-            while pos < len && (bytes[pos] == b' ' || bytes[pos] == b'\n' || bytes[pos] == b'\r'
-                || bytes[pos] == b'\t' || bytes[pos] == b',') {
+            while pos < len
+                && (bytes[pos] == b' '
+                    || bytes[pos] == b'\n'
+                    || bytes[pos] == b'\r'
+                    || bytes[pos] == b'\t'
+                    || bytes[pos] == b',')
+            {
                 pos += 1;
             }
 
@@ -344,8 +396,9 @@ impl JsonlChunker {
                 if b == b'"' {
                     in_string = !in_string;
                 } else if !in_string {
-                    if b == b'{' { depth += 1; }
-                    else if b == b'}' {
+                    if b == b'{' {
+                        depth += 1;
+                    } else if b == b'}' {
                         depth -= 1;
                         if depth == 0 {
                             pos += 1; // include closing brace
@@ -497,8 +550,8 @@ impl Chunker for JsonlChunker {
                             end_byte: 0,
                             chunk_type: ChunkType::Conversation,
                             metadata: Some(current_metadata.clone()),
-                            parent_idx: None,  // JSONL: flat structure
-                            level: 2,          // Default to leaf level
+                            parent_idx: None, // JSONL: flat structure
+                            level: 2,         // Default to leaf level
                             context_prefix: None,
                         });
 
@@ -540,15 +593,17 @@ impl Chunker for JsonlChunker {
                 end_byte: 0,
                 chunk_type: ChunkType::Conversation,
                 metadata: Some(current_metadata),
-                parent_idx: None,  // JSONL: flat structure
-                level: 2,          // Default to leaf level
+                parent_idx: None, // JSONL: flat structure
+                level: 2,         // Default to leaf level
                 context_prefix: None,
             });
         }
 
         // Fallback if no chunks created (not a valid JSONL conversation)
         if chunks.is_empty() {
-            tracing::warn!("JSONL chunker produced 0 chunks, content may not be conversation format");
+            tracing::warn!(
+                "JSONL chunker produced 0 chunks, content may not be conversation format"
+            );
         }
 
         tracing::info!(
@@ -607,7 +662,9 @@ mod tests {
 
         assert_eq!(chunks.len(), 1);
         assert!(chunks[0].text.contains("[user] welche md files"));
-        assert!(chunks[0].text.contains("[assistant] Ich sehe folgende Dateien"));
+        assert!(chunks[0]
+            .text
+            .contains("[assistant] Ich sehe folgende Dateien"));
         // session_meta should be skipped
         assert!(!chunks[0].text.contains("session_meta"));
         assert_eq!(chunks[0].chunk_type, ChunkType::Conversation);
@@ -632,7 +689,11 @@ mod tests {
         let chunks = chunker.chunk(&content, Some("jsonl"));
 
         // Should split into 2 chunks
-        assert!(chunks.len() >= 2, "Expected >=2 chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() >= 2,
+            "Expected >=2 chunks, got {}",
+            chunks.len()
+        );
     }
 
     #[test]

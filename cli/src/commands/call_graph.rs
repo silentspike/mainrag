@@ -23,39 +23,65 @@ pub async fn run(
     }
 
     let callers = if direction == "callers" || direction == "both" {
-        client.find_callers(function, source).await.unwrap_or_default()
+        client
+            .find_callers(function, source)
+            .await
+            .unwrap_or_default()
     } else {
         vec![]
     };
 
     let callees = if direction == "callees" || direction == "both" {
-        client.find_callees(function, source).await.unwrap_or_default()
+        client
+            .find_callees(function, source)
+            .await
+            .unwrap_or_default()
     } else {
         vec![]
     };
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "function": function,
-            "callers": callers,
-            "callees": callees
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "function": function,
+                "callers": callers,
+                "callees": callees
+            }))?
+        );
         return Ok(());
     }
 
-    println!("{}", format!("\r{} Call graph for '{}'", "OK".green(), function).bold());
+    println!(
+        "{}",
+        format!("\r{} Call graph for '{}'", "OK".green(), function).bold()
+    );
 
     if !callers.is_empty() {
         println!();
-        println!("  {} ({} functions)", "CALLERS".bold().blue(), callers.len());
+        println!(
+            "  {} ({} functions)",
+            "CALLERS".bold().blue(),
+            callers.len()
+        );
         for c in &callers {
-            println!("    {} {} ({}:{})", "<-".blue(), c.name, c.file_path, c.line);
+            println!(
+                "    {} {} ({}:{})",
+                "<-".blue(),
+                c.name,
+                c.file_path,
+                c.line
+            );
         }
     }
 
     if !callees.is_empty() {
         println!();
-        println!("  {} ({} functions)", "CALLEES".bold().magenta(), callees.len());
+        println!(
+            "  {} ({} functions)",
+            "CALLEES".bold().magenta(),
+            callees.len()
+        );
         for callee_name in &callees {
             println!("    {} {}", "->".magenta(), callee_name);
         }
@@ -78,7 +104,10 @@ async fn run_chain(
     json_output: bool,
 ) -> Result<()> {
     if !json_output {
-        eprint!("{}", format!("Tracing {}-hop {} chain...", depth, direction).cyan());
+        eprint!(
+            "{}",
+            format!("Tracing {}-hop {} chain...", depth, direction).cyan()
+        );
     }
 
     let directions = if direction == "both" {
@@ -94,18 +123,32 @@ async fn run_chain(
     }
 
     if json_output {
-        let chains: serde_json::Value = all_entries.iter().map(|(dir, entries)| {
-            (dir.clone(), serde_json::json!(entries))
-        }).collect::<serde_json::Map<String, serde_json::Value>>().into();
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "function": function,
-            "depth": depth,
-            "chains": chains,
-        }))?);
+        let chains: serde_json::Value = all_entries
+            .iter()
+            .map(|(dir, entries)| (dir.clone(), serde_json::json!(entries)))
+            .collect::<serde_json::Map<String, serde_json::Value>>()
+            .into();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "function": function,
+                "depth": depth,
+                "chains": chains,
+            }))?
+        );
         return Ok(());
     }
 
-    println!("{}", format!("\r{} {}-hop call chain for '{}'", "OK".green(), depth, function).bold());
+    println!(
+        "{}",
+        format!(
+            "\r{} {}-hop call chain for '{}'",
+            "OK".green(),
+            depth,
+            function
+        )
+        .bold()
+    );
 
     for (dir, entries) in &all_entries {
         if entries.is_empty() {
@@ -113,9 +156,17 @@ async fn run_chain(
         }
 
         println!();
-        let label = if *dir == "callers" { "CALLER CHAIN (who calls this, transitively)" }
-                    else { "CALLEE CHAIN (what this calls, transitively)" };
-        println!("  {} ({} edges, up to {} hops)", label.bold(), entries.len(), depth);
+        let label = if *dir == "callers" {
+            "CALLER CHAIN (who calls this, transitively)"
+        } else {
+            "CALLEE CHAIN (what this calls, transitively)"
+        };
+        println!(
+            "  {} ({} edges, up to {} hops)",
+            label.bold(),
+            entries.len(),
+            depth
+        );
 
         let mut current_depth = 0u32;
         for entry in entries {
@@ -124,11 +175,13 @@ async fn run_chain(
                 println!("    {}:", format!("Hop {}", current_depth).dimmed());
             }
             let arrow = if *dir == "callers" { "<-" } else { "->" };
-            println!("      {} {} {} ({}:{})",
+            println!(
+                "      {} {} {} ({}:{})",
                 arrow.cyan(),
                 entry.from_name,
                 format!("→ {}", entry.to_name).dimmed(),
-                entry.file_path, entry.line
+                entry.file_path,
+                entry.line
             );
         }
     }

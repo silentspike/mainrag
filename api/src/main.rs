@@ -10,16 +10,16 @@ mod config;
 mod db;
 mod error;
 mod metrics;
+mod plugins;
 mod ratelimit;
 mod services;
-mod plugins;
 mod utils;
 
 use config::Config;
 use db::postgres;
-use services::{SearchService, TeiClient, QdrantClient, RerankerService, OutboxWorker};
-use services::intelligence::IntelligenceService;
 use services::domain_profile::DomainProfileRegistry;
+use services::intelligence::IntelligenceService;
+use services::{OutboxWorker, QdrantClient, RerankerService, SearchService, TeiClient};
 
 pub struct AppState {
     /// Raw pool — ONLY for service construction (IndexService, OutboxWorker, AuthLayer).
@@ -69,8 +69,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize tracing
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "mainrag_api=debug,tower_http=debug".into()))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "mainrag_api=debug,tower_http=debug".into()),
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
@@ -111,7 +113,10 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
     // K4-FIX4: Auto-create user_id payload index for tenant isolation (idempotent)
     match qdrant.create_payload_index("user_id", "keyword").await {
         Ok(()) => tracing::info!("Qdrant user_id payload index ensured"),
-        Err(e) => tracing::warn!("Could not create Qdrant user_id index (may already exist): {}", e),
+        Err(e) => tracing::warn!(
+            "Could not create Qdrant user_id index (may already exist): {}",
+            e
+        ),
     }
 
     // Create TEI client
@@ -123,7 +128,10 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
     let reranker = Arc::new(RerankerService::new(config.tei.reranker_url.clone()));
     match reranker.health_check().await {
         Ok(_) => tracing::info!("Reranker connection established"),
-        Err(e) => tracing::warn!("Reranker health check failed (will degrade search quality): {}", e),
+        Err(e) => tracing::warn!(
+            "Reranker health check failed (will degrade search quality): {}",
+            e
+        ),
     }
 
     // Create QueryExpander for synonym-based query expansion
@@ -153,7 +161,11 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
             Some(registry)
         }
         Err(e) => {
-            tracing::warn!("Failed to load domain profiles from {:?}: {}", profiles_dir, e);
+            tracing::warn!(
+                "Failed to load domain profiles from {:?}: {}",
+                profiles_dir,
+                e
+            );
             None
         }
     };
@@ -162,7 +174,8 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
     let domain_source_names: std::collections::HashSet<String> = domain_registry
         .as_ref()
         .map(|reg| {
-            reg.profiles().iter()
+            reg.profiles()
+                .iter()
                 .flat_map(|p| p.code_sources.iter().chain(p.support_sources.iter()))
                 .cloned()
                 .collect()
@@ -184,18 +197,24 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
     // Sprint 2.8: Create revoked-tokens cache (max 10k entries, TTL = JWT expiry)
     let revoked_tokens = moka::sync::Cache::builder()
         .max_capacity(10_000)
-        .time_to_live(std::time::Duration::from_secs(config.jwt.expiry_hours * 3600))
+        .time_to_live(std::time::Duration::from_secs(
+            config.jwt.expiry_hours * 3600,
+        ))
         .build();
 
     // Sprint 2.8 Startup-Gate: Load all revoked JTIs from DB into cache
     // HTTP listener MUST NOT start until this is complete
     {
-        let client = db_pool.get().await
+        let client = db_pool
+            .get()
+            .await
             .expect("FATAL: Cannot connect to DB for revoked-token warmup");
-        let rows = client.query(
-            "SELECT jti FROM revoked_tokens WHERE expires_at > NOW()",
-            &[],
-        ).await;
+        let rows = client
+            .query(
+                "SELECT jti FROM revoked_tokens WHERE expires_at > NOW()",
+                &[],
+            )
+            .await;
         match rows {
             Ok(rows) => {
                 let count = rows.len();
@@ -214,7 +233,9 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
 
     // K4-FIX3: Log and meter backfill status
     if config.server.qdrant_backfill_active {
-        tracing::warn!("QDRANT_BACKFILL_ACTIVE=true — PG-RLS post-filter + oversampling enabled for search");
+        tracing::warn!(
+            "QDRANT_BACKFILL_ACTIVE=true — PG-RLS post-filter + oversampling enabled for search"
+        );
         ::metrics::gauge!("mainrag_qdrant_backfill_active").set(1.0);
     } else {
         tracing::info!("Qdrant backfill inactive (tenant isolation via Qdrant filter only)");
@@ -228,8 +249,8 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
     let health_pool = db::HealthPool::new(db_pool.clone());
 
     // Intelligence Layer
-    let intelligence = IntelligenceService::new(db_pool.clone())
-        .expect("Failed to create IntelligenceService");
+    let intelligence =
+        IntelligenceService::new(db_pool.clone()).expect("Failed to create IntelligenceService");
 
     // Create app state
     let state = Arc::new(AppState {
@@ -280,7 +301,10 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
                 Ok(true) => {
                     ::metrics::gauge!("qdrant_health_status").set(1.0);
                     if consecutive_failures > 0 {
-                        tracing::info!("Qdrant health recovered after {} failures", consecutive_failures);
+                        tracing::info!(
+                            "Qdrant health recovered after {} failures",
+                            consecutive_failures
+                        );
                         consecutive_failures = 0;
                     }
                 }
@@ -289,7 +313,10 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
                     ::metrics::gauge!("qdrant_health_status").set(0.0);
                     consecutive_failures += 1;
                     if consecutive_failures == 1 || consecutive_failures.is_multiple_of(10) {
-                        tracing::warn!("Qdrant unhealthy (HTTP non-success, {} consecutive)", consecutive_failures);
+                        tracing::warn!(
+                            "Qdrant unhealthy (HTTP non-success, {} consecutive)",
+                            consecutive_failures
+                        );
                     }
                 }
                 Err(e) => {
@@ -297,7 +324,11 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
                     consecutive_failures += 1;
                     // Log every Nth failure to avoid spam
                     if consecutive_failures == 1 || consecutive_failures.is_multiple_of(10) {
-                        tracing::warn!("Qdrant health check failed ({} consecutive): {}", consecutive_failures, e);
+                        tracing::warn!(
+                            "Qdrant health check failed ({} consecutive): {}",
+                            consecutive_failures,
+                            e
+                        );
                     }
                 }
             }
@@ -328,7 +359,9 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
     });
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(async { shutdown_rx.await.ok(); })
+        .with_graceful_shutdown(async {
+            shutdown_rx.await.ok();
+        })
         .await?;
 
     tracing::info!("Server shutdown complete (all requests drained)");

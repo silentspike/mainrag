@@ -1,10 +1,10 @@
+use crate::error::Result;
+use deadpool_postgres::Client;
 /// RLS (Row Level Security) helpers for enforcing user-level access control
 ///
 /// All database queries that touch RLS-enabled tables must call set_config('app.user_id', ...)
 /// to properly enforce Row Level Security policies defined in schema_security.sql
 use uuid::Uuid;
-use crate::error::Result;
-use deadpool_postgres::Client;
 
 /// Apply RLS context to a database client.
 ///
@@ -41,7 +41,9 @@ pub async fn apply_rls_context_scoped(
 
 /// Clear RLS context (for cleanup or testing)
 pub async fn clear_rls_context(client: &Client) -> Result<()> {
-    client.execute("SELECT set_config('app.user_id', '', true)", &[]).await?;
+    client
+        .execute("SELECT set_config('app.user_id', '', true)", &[])
+        .await?;
     Ok(())
 }
 

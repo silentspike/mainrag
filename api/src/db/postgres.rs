@@ -1,4 +1,4 @@
-use deadpool_postgres::{Config, Pool, Runtime, Client};
+use deadpool_postgres::{Client, Config, Pool, Runtime};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio_postgres::NoTls;
@@ -21,7 +21,10 @@ pub static DEFAULT_USER_ID: LazyLock<Uuid> = LazyLock::new(|| {
         Ok(raw) => {
             // Validate UUID format in Rust (prevents DB cast errors)
             Uuid::parse_str(&raw).unwrap_or_else(|e| {
-                error!("MAINRAG_DEFAULT_USER_ID '{}' is not a valid UUID: {}. Using fallback.", raw, e);
+                error!(
+                    "MAINRAG_DEFAULT_USER_ID '{}' is not a valid UUID: {}. Using fallback.",
+                    raw, e
+                );
                 Uuid::parse_str(fallback).expect("Fallback UUID is invalid")
             })
         }
@@ -46,10 +49,13 @@ pub async fn validate_default_user(pool: &Pool) -> anyhow::Result<()> {
     let client = pool.get().await?;
     let user_id = *DEFAULT_USER_ID;
 
-    let exists: bool = client.query_one(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND is_admin = true)",
-        &[&user_id]
-    ).await?.get(0);
+    let exists: bool = client
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND is_admin = true)",
+            &[&user_id],
+        )
+        .await?
+        .get(0);
 
     if !exists {
         // HARD-FAIL: Without a valid default user, system tasks cannot work!

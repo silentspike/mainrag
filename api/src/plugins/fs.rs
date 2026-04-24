@@ -10,7 +10,7 @@ use tokio::fs;
 use tokio::task::spawn_blocking;
 use tracing::warn;
 
-use super::{SourcePlugin, SyncResult, RawFile};
+use super::{RawFile, SourcePlugin, SyncResult};
 
 /// Maximum file size to index — configurable via MAX_FILE_SIZE_MB env var.
 /// Files larger than this are skipped entirely. Default: 50 MB.
@@ -26,16 +26,16 @@ fn max_file_size() -> u64 {
 
 // Binary file signatures to skip
 const BINARY_SIGNATURES: &[&[u8]] = &[
-    b"\xFF\xFE", // UTF-16 LE BOM
-    b"\xFE\xFF", // UTF-16 BE BOM
-    b"\x7FELF",  // ELF binary
-    b"MZ",       // Windows PE
+    b"\xFF\xFE",         // UTF-16 LE BOM
+    b"\xFE\xFF",         // UTF-16 BE BOM
+    b"\x7FELF",          // ELF binary
+    b"MZ",               // Windows PE
     b"\xCA\xFE\xBA\xBE", // Java class
-    b"\x89PNG",  // PNG
-    b"\xFF\xD8\xFF", // JPEG
-    b"GIF87a",   // GIF87
-    b"GIF89a",   // GIF89
-    b"%PDF",     // PDF
+    b"\x89PNG",          // PNG
+    b"\xFF\xD8\xFF",     // JPEG
+    b"GIF87a",           // GIF87
+    b"GIF89a",           // GIF89
+    b"%PDF",             // PDF
 ];
 
 pub struct FilesystemPlugin;
@@ -79,9 +79,10 @@ async fn check_if_binary(path: &Path) -> anyhow::Result<bool> {
     }
 
     // Check for mostly non-printable characters
-    let non_printable_count = header.iter().filter(|&&b| {
-        b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t'
-    }).count();
+    let non_printable_count = header
+        .iter()
+        .filter(|&&b| b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t')
+        .count();
 
     if non_printable_count as f32 / bytes_read as f32 > 0.3 {
         return Ok(true);
@@ -132,9 +133,9 @@ impl FilesystemPlugin {
         errors: &mut Vec<String>,
     ) -> anyhow::Result<()> {
         const INDEXABLE_EXTENSIONS: &[&str] = &[
-            "rs", "py", "js", "ts", "tsx", "go", "java", "c", "cpp", "h", "hpp",
-            "md", "txt", "json", "jsonl", "yaml", "yml", "toml", "sql", "sh", "bash",
-            "html", "css", "scss", "vue", "svelte",
+            "rs", "py", "js", "ts", "tsx", "go", "java", "c", "cpp", "h", "hpp", "md", "txt",
+            "json", "jsonl", "yaml", "yml", "toml", "sql", "sh", "bash", "html", "css", "scss",
+            "vue", "svelte",
         ];
 
         let root = root_path.to_path_buf();
@@ -142,28 +143,34 @@ impl FilesystemPlugin {
         // WalkBuilder is sync but very fast - run in blocking thread
         let paths: Vec<PathBuf> = spawn_blocking(move || {
             WalkBuilder::new(&root)
-                .hidden(false)          // Include hidden files/dirs (needed for .claude source)
-                .git_ignore(true)       // Respect .gitignore (NESTED!)
-                .git_global(false)      // Don't use ~/.gitignore (may have broad patterns)
-                .git_exclude(true)      // Respect .git/info/exclude
-                .parents(false)         // Don't check parent directories for ignore
-                .ignore(true)           // Respect .ignore files
+                .hidden(false) // Include hidden files/dirs (needed for .claude source)
+                .git_ignore(true) // Respect .gitignore (NESTED!)
+                .git_global(false) // Don't use ~/.gitignore (may have broad patterns)
+                .git_exclude(true) // Respect .git/info/exclude
+                .parents(false) // Don't check parent directories for ignore
+                .ignore(true) // Respect .ignore files
                 .build()
                 .filter_map(|entry| entry.ok())
                 .filter(|entry| entry.file_type().is_some_and(|ft| ft.is_file()))
                 .map(|entry| entry.path().to_path_buf())
                 .collect()
-        }).await?;
+        })
+        .await?;
 
         // Process collected paths (extension/size/binary checks)
         // DEBUG: Count extensions found
-        let mut ext_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut ext_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         for path in &paths {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                 *ext_counts.entry(ext.to_lowercase()).or_insert(0) += 1;
             }
         }
-        tracing::warn!("FsPlugin discovered {} files: {:?}", paths.len(), ext_counts);
+        tracing::warn!(
+            "FsPlugin discovered {} files: {:?}",
+            paths.len(),
+            ext_counts
+        );
 
         for path in paths {
             // Extension check
@@ -172,7 +179,10 @@ impl FilesystemPlugin {
                 None => continue,
             };
             if !INDEXABLE_EXTENSIONS.contains(&ext.as_str()) {
-                tracing::debug!("Skipping file with unsupported extension: {}", path.display());
+                tracing::debug!(
+                    "Skipping file with unsupported extension: {}",
+                    path.display()
+                );
                 continue;
             }
 
@@ -249,7 +259,11 @@ impl FilesystemPlugin {
                 Ok(content) => {
                     // DEBUG: Log JSONL files being added
                     if ext == "jsonl" {
-                        tracing::warn!("JSONL file added to sync: {} ({} bytes)", relative_path, content.len());
+                        tracing::warn!(
+                            "JSONL file added to sync: {} ({} bytes)",
+                            relative_path,
+                            content.len()
+                        );
                     }
 
                     files.push(RawFile {

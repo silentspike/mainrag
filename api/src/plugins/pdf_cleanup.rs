@@ -109,7 +109,10 @@ mod tests {
 
     #[test]
     fn test_whitespace_spaces() {
-        assert_eq!(normalize_whitespace("too   many    spaces"), "too many spaces");
+        assert_eq!(
+            normalize_whitespace("too   many    spaces"),
+            "too many spaces"
+        );
         assert_eq!(normalize_whitespace("\t\ttabs"), "tabs");
         assert_eq!(normalize_whitespace("mixed   \t  ws"), "mixed ws");
     }

@@ -16,11 +16,10 @@ use crate::services::TeiClient;
 /// Stopwords to filter out during expansion (DE + EN)
 const STOPWORDS: &[&str] = &[
     // German
-    "und", "oder", "der", "die", "das", "ein", "eine", "ist", "sind", "war", "waren",
-    "für", "mit", "von", "zu", "bei", "nach", "über", "unter", "durch", "aus",
-    // English
-    "the", "a", "an", "and", "or", "is", "are", "was", "were", "be", "been",
-    "for", "with", "of", "to", "at", "by", "from", "in", "on", "as", "it",
+    "und", "oder", "der", "die", "das", "ein", "eine", "ist", "sind", "war", "waren", "für", "mit",
+    "von", "zu", "bei", "nach", "über", "unter", "durch", "aus", // English
+    "the", "a", "an", "and", "or", "is", "are", "was", "were", "be", "been", "for", "with", "of",
+    "to", "at", "by", "from", "in", "on", "as", "it",
     // Code-related but too generic
     "function", "class", "method", "variable", "file", "code", "data",
 ];
@@ -206,7 +205,9 @@ impl QueryExpander {
         let fts_query = self.build_fts_query(query, &synonyms);
 
         // Build weighted average embedding
-        let expanded_embedding = self.build_weighted_embedding(&query_embedding, &synonyms).await?;
+        let expanded_embedding = self
+            .build_weighted_embedding(&query_embedding, &synonyms)
+            .await?;
 
         Ok(ExpandedQuery {
             original: query.to_string(),
@@ -320,7 +321,8 @@ impl QueryExpander {
 
         // Build OR query using PostgreSQL tsquery syntax (| for OR)
         // Sort for stable, deterministic ordering (HashSet iteration is random)
-        let mut terms: Vec<String> = expansion_terms.into_iter()
+        let mut terms: Vec<String> = expansion_terms
+            .into_iter()
             .filter(|t| !t.is_empty())
             .collect();
         terms.sort();
@@ -375,7 +377,8 @@ impl QueryExpander {
                 Ok(embeddings) => {
                     for (i, embedding) in embeddings.into_iter().enumerate() {
                         let (idx, text) = &uncached_texts[i];
-                        self.synonym_embedding_cache.insert(text.to_string(), embedding.clone());
+                        self.synonym_embedding_cache
+                            .insert(text.to_string(), embedding.clone());
                         all_embeddings.push((*idx, embedding));
                     }
                 }
@@ -522,13 +525,25 @@ mod tests {
 
     #[test]
     fn test_split_camel_case() {
-        assert_eq!(split_camel_case("createEmptyClip"), vec!["create", "Empty", "Clip"]);
-        assert_eq!(split_camel_case("ClipLauncherSlot"), vec!["Clip", "Launcher", "Slot"]);
-        assert_eq!(split_camel_case("isControlSurfaceThread"), vec!["is", "Control", "Surface", "Thread"]);
-        assert_eq!(split_camel_case("r3B"), vec!["r", "3", "B"]);  // letter→digit, digit→letter
+        assert_eq!(
+            split_camel_case("createEmptyClip"),
+            vec!["create", "Empty", "Clip"]
+        );
+        assert_eq!(
+            split_camel_case("ClipLauncherSlot"),
+            vec!["Clip", "Launcher", "Slot"]
+        );
+        assert_eq!(
+            split_camel_case("isControlSurfaceThread"),
+            vec!["is", "Control", "Surface", "Thread"]
+        );
+        assert_eq!(split_camel_case("r3B"), vec!["r", "3", "B"]); // letter→digit, digit→letter
         assert!(split_camel_case("simple").is_empty()); // no split
         assert!(split_camel_case("x").is_empty()); // too short
-        assert_eq!(split_camel_case("getTrack2Bank"), vec!["get", "Track", "2", "Bank"]);
+        assert_eq!(
+            split_camel_case("getTrack2Bank"),
+            vec!["get", "Track", "2", "Bank"]
+        );
     }
 
     #[test]

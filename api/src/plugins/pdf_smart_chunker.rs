@@ -231,9 +231,7 @@ mod tests {
     #[test]
     fn test_cleanup_applied_before_chunking() {
         // v2.3: Cleanup happens BEFORE adding to chunk
-        let blocks = vec![
-            make_paragraph("Text with lig-\natures and ﬁle.", 1),
-        ];
+        let blocks = vec![make_paragraph("Text with lig-\natures and ﬁle.", 1)];
 
         let config = ChunkerConfig::default();
         let chunks = chunk_pdf_blocks(blocks, &config);
@@ -279,7 +277,11 @@ mod tests {
         let chunks = chunk_pdf_blocks(blocks, &config);
 
         // Should have multiple chunks due to size limit
-        assert!(chunks.len() >= 2, "Expected at least 2 chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() >= 2,
+            "Expected at least 2 chunks, got {}",
+            chunks.len()
+        );
     }
 
     #[test]

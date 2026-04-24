@@ -39,8 +39,13 @@ async fn show_config(json_output: bool) -> anyhow::Result<()> {
     println!("{}", "=== Configuration ===".bold());
     println!();
     println!("  {} {}", "Config Dir:".cyan(), config_dir.display());
-    println!("  {} {}", "API URL:".cyan(), "http://localhost:3001 (default)".dimmed());
-    println!("  {} {}",
+    println!(
+        "  {} {}",
+        "API URL:".cyan(),
+        "http://localhost:3001 (default)".dimmed()
+    );
+    println!(
+        "  {} {}",
         "Token File:".cyan(),
         config_dir.join("token").display()
     );
@@ -49,7 +54,11 @@ async fn show_config(json_output: bool) -> anyhow::Result<()> {
     if token_file.exists() {
         println!("  {} {}", "Authentication:".cyan(), "Logged in ✓".green());
     } else {
-        println!("  {} {}", "Authentication:".cyan(), "Not logged in".yellow());
+        println!(
+            "  {} {}",
+            "Authentication:".cyan(),
+            "Not logged in".yellow()
+        );
     }
 
     println!();
@@ -59,11 +68,7 @@ async fn show_config(json_output: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn set_config(
-    _key: &str,
-    _value: &str,
-    _json_output: bool,
-) -> anyhow::Result<()> {
+async fn set_config(_key: &str, _value: &str, _json_output: bool) -> anyhow::Result<()> {
     // Config setting would be expanded in Phase 11
     println!("{}", "Config setting coming in Phase 11".yellow());
     Ok(())

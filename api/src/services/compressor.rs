@@ -8,9 +8,9 @@
 //!
 //! This is a regex-based approach (not LLM-based) for low latency.
 
-use std::collections::HashMap;
-use regex::Regex;
 use once_cell::sync::Lazy;
+use regex::Regex;
+use std::collections::HashMap;
 
 /// Compression rules for a specific language
 #[derive(Debug, Clone)]
@@ -26,64 +26,73 @@ static COMPRESSION_RULES: Lazy<HashMap<&'static str, LanguageRules>> = Lazy::new
     let mut rules = HashMap::new();
 
     // Rust rules
-    rules.insert("rust", LanguageRules {
-        remove_patterns: vec![
-            // Import statements (use ...)
-            Regex::new(r"(?m)^use\s+[^;]+;\s*\n").unwrap(),
-            // Extern crate
-            Regex::new(r"(?m)^extern\s+crate\s+[^;]+;\s*\n").unwrap(),
-            // Module declarations (mod foo;)
-            Regex::new(r"(?m)^mod\s+\w+;\s*\n").unwrap(),
-            // License headers (// Copyright, // SPDX, etc.)
-            Regex::new(r"(?m)^//[!/]?\s*(Copyright|SPDX|License|Author).*\n").unwrap(),
-            // Empty doc comments
-            Regex::new(r"(?m)^\s*///\s*\n").unwrap(),
-        ],
-        replace_patterns: vec![
-            // Multiple blank lines -> single blank line
-            (Regex::new(r"\n{3,}").unwrap(), "\n\n".to_string()),
-            // Trailing whitespace
-            (Regex::new(r"[ \t]+$").unwrap(), "".to_string()),
-        ],
-    });
+    rules.insert(
+        "rust",
+        LanguageRules {
+            remove_patterns: vec![
+                // Import statements (use ...)
+                Regex::new(r"(?m)^use\s+[^;]+;\s*\n").unwrap(),
+                // Extern crate
+                Regex::new(r"(?m)^extern\s+crate\s+[^;]+;\s*\n").unwrap(),
+                // Module declarations (mod foo;)
+                Regex::new(r"(?m)^mod\s+\w+;\s*\n").unwrap(),
+                // License headers (// Copyright, // SPDX, etc.)
+                Regex::new(r"(?m)^//[!/]?\s*(Copyright|SPDX|License|Author).*\n").unwrap(),
+                // Empty doc comments
+                Regex::new(r"(?m)^\s*///\s*\n").unwrap(),
+            ],
+            replace_patterns: vec![
+                // Multiple blank lines -> single blank line
+                (Regex::new(r"\n{3,}").unwrap(), "\n\n".to_string()),
+                // Trailing whitespace
+                (Regex::new(r"[ \t]+$").unwrap(), "".to_string()),
+            ],
+        },
+    );
 
     // Python rules
-    rules.insert("python", LanguageRules {
-        remove_patterns: vec![
-            // Import statements
-            Regex::new(r"(?m)^import\s+[^\n]+\n").unwrap(),
-            Regex::new(r"(?m)^from\s+\S+\s+import\s+[^\n]+\n").unwrap(),
-            // License headers
-            Regex::new(r#"(?m)^#\s*(Copyright|License|Author|SPDX).*\n"#).unwrap(),
-            // Shebang
-            Regex::new(r"(?m)^#!.*\n").unwrap(),
-            // Encoding declaration
-            Regex::new(r"(?m)^#.*coding[:=].*\n").unwrap(),
-        ],
-        replace_patterns: vec![
-            // Multiple blank lines -> single blank line
-            (Regex::new(r"\n{3,}").unwrap(), "\n\n".to_string()),
-        ],
-    });
+    rules.insert(
+        "python",
+        LanguageRules {
+            remove_patterns: vec![
+                // Import statements
+                Regex::new(r"(?m)^import\s+[^\n]+\n").unwrap(),
+                Regex::new(r"(?m)^from\s+\S+\s+import\s+[^\n]+\n").unwrap(),
+                // License headers
+                Regex::new(r#"(?m)^#\s*(Copyright|License|Author|SPDX).*\n"#).unwrap(),
+                // Shebang
+                Regex::new(r"(?m)^#!.*\n").unwrap(),
+                // Encoding declaration
+                Regex::new(r"(?m)^#.*coding[:=].*\n").unwrap(),
+            ],
+            replace_patterns: vec![
+                // Multiple blank lines -> single blank line
+                (Regex::new(r"\n{3,}").unwrap(), "\n\n".to_string()),
+            ],
+        },
+    );
 
     // JavaScript/TypeScript rules
-    rules.insert("javascript", LanguageRules {
-        remove_patterns: vec![
-            // ES6 imports (matches 'module' or "module")
-            Regex::new(r#"(?m)^import\s+.*from\s+["'][^"']+["'];\s*\n"#).unwrap(),
-            Regex::new(r#"(?m)^import\s+["'][^"']+["'];\s*\n"#).unwrap(),
-            // CommonJS require
-            Regex::new(r"(?m)^(const|let|var)\s+\w+\s*=\s*require\([^)]+\);\s*\n").unwrap(),
-            // License headers
-            Regex::new(r"(?m)^//\s*(Copyright|License|Author|SPDX).*\n").unwrap(),
-            // Block license header
-            Regex::new(r"(?s)/\*\*?\s*(Copyright|License|MIT|Apache).*?\*/\s*\n?").unwrap(),
-        ],
-        replace_patterns: vec![
-            // Multiple blank lines -> single blank line
-            (Regex::new(r"\n{3,}").unwrap(), "\n\n".to_string()),
-        ],
-    });
+    rules.insert(
+        "javascript",
+        LanguageRules {
+            remove_patterns: vec![
+                // ES6 imports (matches 'module' or "module")
+                Regex::new(r#"(?m)^import\s+.*from\s+["'][^"']+["'];\s*\n"#).unwrap(),
+                Regex::new(r#"(?m)^import\s+["'][^"']+["'];\s*\n"#).unwrap(),
+                // CommonJS require
+                Regex::new(r"(?m)^(const|let|var)\s+\w+\s*=\s*require\([^)]+\);\s*\n").unwrap(),
+                // License headers
+                Regex::new(r"(?m)^//\s*(Copyright|License|Author|SPDX).*\n").unwrap(),
+                // Block license header
+                Regex::new(r"(?s)/\*\*?\s*(Copyright|License|MIT|Apache).*?\*/\s*\n?").unwrap(),
+            ],
+            replace_patterns: vec![
+                // Multiple blank lines -> single blank line
+                (Regex::new(r"\n{3,}").unwrap(), "\n\n".to_string()),
+            ],
+        },
+    );
 
     // TypeScript uses same rules as JavaScript
     rules.insert("typescript", rules.get("javascript").unwrap().clone());
@@ -92,51 +101,60 @@ static COMPRESSION_RULES: Lazy<HashMap<&'static str, LanguageRules>> = Lazy::new
     rules.insert("jsx", rules.get("javascript").unwrap().clone());
 
     // Go rules
-    rules.insert("go", LanguageRules {
-        remove_patterns: vec![
-            // Import block
-            Regex::new(r"(?s)import\s*\([^)]*\)\s*\n").unwrap(),
-            // Single import
-            Regex::new(r#"(?m)^import\s+"[^"]+"\s*\n"#).unwrap(),
-            // License headers
-            Regex::new(r"(?m)^//\s*(Copyright|License|Author|SPDX).*\n").unwrap(),
-        ],
-        replace_patterns: vec![
-            // Multiple blank lines -> single blank line
-            (Regex::new(r"\n{3,}").unwrap(), "\n\n".to_string()),
-        ],
-    });
+    rules.insert(
+        "go",
+        LanguageRules {
+            remove_patterns: vec![
+                // Import block
+                Regex::new(r"(?s)import\s*\([^)]*\)\s*\n").unwrap(),
+                // Single import
+                Regex::new(r#"(?m)^import\s+"[^"]+"\s*\n"#).unwrap(),
+                // License headers
+                Regex::new(r"(?m)^//\s*(Copyright|License|Author|SPDX).*\n").unwrap(),
+            ],
+            replace_patterns: vec![
+                // Multiple blank lines -> single blank line
+                (Regex::new(r"\n{3,}").unwrap(), "\n\n".to_string()),
+            ],
+        },
+    );
 
     // Java rules
-    rules.insert("java", LanguageRules {
-        remove_patterns: vec![
-            // Import statements
-            Regex::new(r"(?m)^import\s+[^;]+;\s*\n").unwrap(),
-            // Package declaration
-            Regex::new(r"(?m)^package\s+[^;]+;\s*\n").unwrap(),
-            // License headers (block comment)
-            Regex::new(r"(?s)/\*\*?\s*(Copyright|License|Author).*?\*/\s*\n?").unwrap(),
-        ],
-        replace_patterns: vec![
-            // Multiple blank lines -> single blank line
-            (Regex::new(r"\n{3,}").unwrap(), "\n\n".to_string()),
-        ],
-    });
+    rules.insert(
+        "java",
+        LanguageRules {
+            remove_patterns: vec![
+                // Import statements
+                Regex::new(r"(?m)^import\s+[^;]+;\s*\n").unwrap(),
+                // Package declaration
+                Regex::new(r"(?m)^package\s+[^;]+;\s*\n").unwrap(),
+                // License headers (block comment)
+                Regex::new(r"(?s)/\*\*?\s*(Copyright|License|Author).*?\*/\s*\n?").unwrap(),
+            ],
+            replace_patterns: vec![
+                // Multiple blank lines -> single blank line
+                (Regex::new(r"\n{3,}").unwrap(), "\n\n".to_string()),
+            ],
+        },
+    );
 
     // C/C++ rules
-    rules.insert("c", LanguageRules {
-        remove_patterns: vec![
-            // Include statements
-            Regex::new(r#"(?m)^#include\s*[<"][^>"]+[>"]\s*\n"#).unwrap(),
-            // License headers
-            Regex::new(r"(?m)^//\s*(Copyright|License|Author|SPDX).*\n").unwrap(),
-            Regex::new(r"(?s)/\*\*?\s*(Copyright|License|Author).*?\*/\s*\n?").unwrap(),
-        ],
-        replace_patterns: vec![
-            // Multiple blank lines -> single blank line
-            (Regex::new(r"\n{3,}").unwrap(), "\n\n".to_string()),
-        ],
-    });
+    rules.insert(
+        "c",
+        LanguageRules {
+            remove_patterns: vec![
+                // Include statements
+                Regex::new(r#"(?m)^#include\s*[<"][^>"]+[>"]\s*\n"#).unwrap(),
+                // License headers
+                Regex::new(r"(?m)^//\s*(Copyright|License|Author|SPDX).*\n").unwrap(),
+                Regex::new(r"(?s)/\*\*?\s*(Copyright|License|Author).*?\*/\s*\n?").unwrap(),
+            ],
+            replace_patterns: vec![
+                // Multiple blank lines -> single blank line
+                (Regex::new(r"\n{3,}").unwrap(), "\n\n".to_string()),
+            ],
+        },
+    );
     rules.insert("cpp", rules.get("c").unwrap().clone());
     rules.insert("h", rules.get("c").unwrap().clone());
     rules.insert("hpp", rules.get("c").unwrap().clone());
@@ -228,7 +246,9 @@ impl ContextualCompressor {
         // Apply replace patterns
         if self.config.normalize_whitespace {
             for (pattern, replacement) in &rules.replace_patterns {
-                result = pattern.replace_all(&result, replacement.as_str()).to_string();
+                result = pattern
+                    .replace_all(&result, replacement.as_str())
+                    .to_string();
             }
         }
 
@@ -262,7 +282,8 @@ impl ContextualCompressor {
         let compressed: Vec<_> = results
             .into_iter()
             .map(|mut result| {
-                let (compressed, ratio) = self.compress(&result.content, result.language.as_deref());
+                let (compressed, ratio) =
+                    self.compress(&result.content, result.language.as_deref());
                 total_ratio += ratio;
                 result.content = compressed;
                 result
@@ -406,8 +427,16 @@ func main() {
         let (compressed, ratio) = compressor.compress(content, Some("go"));
 
         // Should remove import block
-        assert!(!compressed.contains(r#""fmt""#), "Expected import fmt to be removed, got: {}", compressed);
-        assert!(!compressed.contains(r#""os""#), "Expected import os to be removed, got: {}", compressed);
+        assert!(
+            !compressed.contains(r#""fmt""#),
+            "Expected import fmt to be removed, got: {}",
+            compressed
+        );
+        assert!(
+            !compressed.contains(r#""os""#),
+            "Expected import os to be removed, got: {}",
+            compressed
+        );
 
         // Should keep the actual code
         assert!(compressed.contains("func main()"));
@@ -442,7 +471,11 @@ func main() {
         let (compressed, _) = compressor.compress(content, Some("rust"));
 
         // Multiple blank lines should become single blank line
-        assert!(!compressed.contains("\n\n\n"), "Expected multiple newlines to be normalized, got: {:?}", compressed);
+        assert!(
+            !compressed.contains("\n\n\n"),
+            "Expected multiple newlines to be normalized, got: {:?}",
+            compressed
+        );
     }
 
     #[test]
@@ -472,7 +505,11 @@ func main() {
         let (compressed, ratio) = compressor.compress(content, Some("unknown_lang"));
 
         // Default rules should remove license headers
-        assert!(!compressed.contains("Copyright"), "Expected license to be removed: {}", compressed);
+        assert!(
+            !compressed.contains("Copyright"),
+            "Expected license to be removed: {}",
+            compressed
+        );
         assert!(compressed.contains("def main()"));
         assert!(ratio < 1.0);
     }
@@ -527,8 +564,14 @@ public class Main {
         let (compressed, ratio) = compressor.compress(content, Some("java"));
 
         // Should remove package and imports
-        assert!(!compressed.contains("import java.util"), "Expected import to be removed");
-        assert!(!compressed.contains("package com.example"), "Expected package to be removed");
+        assert!(
+            !compressed.contains("import java.util"),
+            "Expected import to be removed"
+        );
+        assert!(
+            !compressed.contains("package com.example"),
+            "Expected package to be removed"
+        );
 
         // Should keep the actual code
         assert!(compressed.contains("public class Main"));
@@ -557,8 +600,14 @@ int main() {
         let (compressed, ratio) = compressor.compress(content, Some("c"));
 
         // Should remove includes and copyright
-        assert!(!compressed.contains("#include"), "Expected includes to be removed");
-        assert!(!compressed.contains("Copyright"), "Expected copyright to be removed");
+        assert!(
+            !compressed.contains("#include"),
+            "Expected includes to be removed"
+        );
+        assert!(
+            !compressed.contains("Copyright"),
+            "Expected copyright to be removed"
+        );
 
         // Should keep the actual code
         assert!(compressed.contains("int main()"));
