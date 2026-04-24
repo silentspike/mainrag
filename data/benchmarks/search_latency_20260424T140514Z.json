@@ -1,12 +1,12 @@
 {
   "timestamp_utc": "20260424T140514Z",
   "environment": {
-    "hostname": "localhost",
+    "hostname": "<REDACTED_HOST>",
     "cpu": "AMD Ryzen 9 5900HS (16 cores @ 4.68 GHz boost)",
     "gpu": "NVIDIA RTX 3050 Ti (4 GB VRAM, CUDA 12.8)",
     "ram_gb": 16,
     "embedding_model": "Alibaba-NLP/gte-modernbert-base",
-    "reranker_model": "Alibaba-NLP/gte-reranker-modernbert-base",
+    "reranker_model": "BAAI/bge-reranker-base",
     "vector_store": "Qdrant 1.16.3 (HNSW + Scalar Quantization INT8)",
     "fts": "PostgreSQL 18.1 GIN (UNION ALL simple+english)"
   },
