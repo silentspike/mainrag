@@ -1,13 +1,64 @@
+# ─── Secrets ─────────────────────────────────────────────────────────
 credentials.json
-cli/target/
 *.env
 .env.*
 *.key
 *.pem
-*.db
-api/target/
-data/
+.cargo-remote.toml
 
-# Data dumps / exports (too large for indexing)
-ops/migration/export/
+# ─── Build artefacts ─────────────────────────────────────────────────
+target/
+/cli/target/
+/api/target/
+Cargo.lock.bak
+
+# ─── Local state ─────────────────────────────────────────────────────
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.claude/
 e2e_debug_test/
+
+# ─── Data (too large for the repo, tracked selectively below) ────────
+data/
+ops/migration/export/
+/data/models/
+
+# ─── Internal planning / audit artefacts ─────────────────────────────
+PROGRESS.md
+AUDIT_REPORT*.md
+IMPLEMENTATION_*.md
+IMPL-PLAN.md
+MODEL_UPGRADES.md
+FINAL_IMPLEMENTATION.md
+MAINRAG_ARCHITECTURE.md
+IST_ANALYSE_*.md
+PHASE_*_PLAN.md
+scripts/migrate-gte.log
+
+# ─── Docs: only the curated public set is tracked ────────────────────
+docs/*.html
+docs/EVAL_*.md
+docs/PERFORMANCE_*.md
+docs/SLO_*.md
+docs/POLYGLOT_*.md
+docs/RAG_*.md
+docs/FTS_*.md
+docs/INTELLIGENCE_LAYER_REPORT.md
+docs/implementation/
+
+# Exceptions — the public doc set stays tracked:
+!docs/architecture.md
+!docs/api.md
+!docs/operations.md
+!docs/intelligence.md
+!docs/search-baseline-bge-base.md
+!docs/search-baseline-gte-modernbert.md
+
+# Re-include the single committed benchmark result as Evidence:
+!data/
+data/*
+!data/benchmarks/
+data/benchmarks/*
+!data/benchmarks/search_latency_20260424T140514Z.json
