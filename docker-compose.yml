@@ -1,38 +1,45 @@
-# MAINRAG TEI Docker Compose
-# Only TEI runs in Docker (GPU passthrough via nvidia-container-toolkit)
-# PostgreSQL and Qdrant run native via systemd
-# TEI Version: 1.8.3 (pinned for reproducibility)
+# MainRag Docker Compose — SSOT for GPU + vector services
+#
+# Services:
+#   - mainrag-tei-gte       (embedder, GTE-ModernBERT, port 8091)
+#   - mainrag-tei-reranker  (cross-encoder, BGE reranker, port 8082)
+#   - qdrant-mainrag        (vector DB, ports 6333 REST / 6334 gRPC)
+#
+# PostgreSQL is NOT containerized — it runs natively (systemd) because
+# MainRag uses RLS + pg_upgrade-managed major version upgrades that are
+# awkward inside Docker.
+#
+# Host requirements:
+#   - nvidia-container-toolkit installed
+#   - /data/models pre-populated with the model trees (see docs/operations.md)
+#   - /data/qdrant/storage exists and is writable by the qdrant user
+#   - /etc/mainrag/mainrag.env provides QDRANT_API_KEY (shared secret)
 
 services:
-  # Embedding Service
-  # Model configuration via environment variable TEI_MODEL
-  # Examples:
-  #   - BAAI/bge-base-en-v1.5 (default, 768d, 512 tokens)
-  #   - nomic-ai/nomic-embed-text-v1.5 (drop-in, 768d, 8K tokens)
-  #   - BAAI/bge-m3 (multilingual, 1024d, 8K tokens)
-  tei-embeddings:
+  # ── Embedder ──────────────────────────────────────────────────────────
+  tei-embed:
     image: ghcr.io/huggingface/text-embeddings-inference:1.8.3
-    container_name: mainrag-tei-embeddings
+    container_name: mainrag-tei-gte
     runtime: nvidia
     restart: unless-stopped
     ports:
-      - "8080:80"      # REST API
+      - "8091:80"
     volumes:
-      - /data/models:/data
+      - /data/models:/data:ro
       - type: tmpfs
         target: /tmp
         tmpfs:
-          size: 1073741824  # 1GB tmpfs for cache
+          size: 1073741824  # 1 GB scratch for TEI
     environment:
       - LOG_LEVEL=info
       - HF_HUB_ENABLE_HF_TRANSFER=1
       - CUDA_VISIBLE_DEVICES=0
-      - CUDA_MEMORY_FRACTION=0.55  # 55% of 4GB = 2.2GB for embeddings (Sprint 7.3c: 80% total VRAM)
+      - CUDA_MEMORY_FRACTION=0.55
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     command:
       - "--model-id"
-      - "${TEI_MODEL:-BAAI/bge-base-en-v1.5}"  # Read from environment or use default
+      - "${TEI_MODEL:-Alibaba-NLP/gte-modernbert-base}"
       - "--port"
       - "80"
       - "--max-batch-tokens"
@@ -58,30 +65,30 @@ services:
       retries: 5
       start_period: 180s
 
-  # Reranker Service (BGE-reranker-base)
+  # ── Reranker ──────────────────────────────────────────────────────────
   tei-reranker:
     image: ghcr.io/huggingface/text-embeddings-inference:1.8.3
     container_name: mainrag-tei-reranker
     runtime: nvidia
     restart: unless-stopped
     ports:
-      - "8082:80"      # REST API (separate port)
+      - "8082:80"
     volumes:
-      - /data/models:/data
+      - /data/models:/data:ro
       - type: tmpfs
         target: /tmp
         tmpfs:
-          size: 536870912  # 512MB tmpfs
+          size: 536870912  # 512 MB
     environment:
       - LOG_LEVEL=info
       - HF_HUB_ENABLE_HF_TRANSFER=1
       - CUDA_VISIBLE_DEVICES=0
-      - CUDA_MEMORY_FRACTION=0.25  # 25% of 4GB = 1.0GB for reranker (Sprint 7.3c: 80% total VRAM)
+      - CUDA_MEMORY_FRACTION=0.25
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     command:
       - "--model-id"
-      - "BAAI/bge-reranker-base"
+      - "${TEI_RERANKER_MODEL:-BAAI/bge-reranker-base}"
       - "--port"
       - "80"
       - "--max-batch-tokens"
@@ -104,3 +111,33 @@ services:
       timeout: 10s
       retries: 5
       start_period: 120s
+
+  # ── Qdrant ────────────────────────────────────────────────────────────
+  # Server-side API-key auth is enabled via env. The same key must be
+  # present in /etc/mainrag/mainrag.env as QDRANT_API_KEY so the MainRag
+  # API can authenticate.
+  qdrant:
+    image: qdrant/qdrant:v1.16.3
+    container_name: qdrant-mainrag
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # REST
+      - "6334:6334"   # gRPC
+    volumes:
+      - /data/qdrant/storage:/qdrant/storage
+      - /data/qdrant/snapshots:/qdrant/snapshots
+    environment:
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:?QDRANT_API_KEY must be set (see /etc/mainrag/mainrag.env)}
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__LOG_LEVEL=INFO
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6333' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s

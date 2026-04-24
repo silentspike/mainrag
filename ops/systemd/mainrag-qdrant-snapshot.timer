@@ -1,5 +1,6 @@
 [Unit]
-Description=MAINRAG Daily Qdrant Snapshot Timer
+Description=MainRag Daily Qdrant Snapshot Timer
+Documentation=https://github.com/silentspike/mainrag
 
 [Timer]
 OnCalendar=*-*-* 03:30:00

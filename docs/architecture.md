@@ -34,7 +34,7 @@ Services in the current deployment:
 
 - **`mainrag-api`** (systemd) — axum server, Rust binary (`api/` crate).
 - **`mainrag-tei-gte`** (Docker, port 8091) — Hugging Face TEI runtime serving `Alibaba-NLP/gte-modernbert-base` embeddings.
-- **`mainrag-tei-reranker`** (Docker, port 8082) — TEI runtime serving `Alibaba-NLP/gte-reranker-modernbert-base` cross-encoder.
+- **`mainrag-tei-reranker`** (Docker, port 8082) — TEI runtime serving `BAAI/bge-reranker-base` cross-encoder.
 - **`qdrant-mainrag`** (Docker, port 6333/6334) — vector store, single collection `mainrag_chunks_gte` with HNSW + INT8 scalar quantization.
 - **PostgreSQL 18** (native) — primary store for chunks, metadata, symbols, call-graph edges, users, rate-limit buckets.
 
@@ -130,7 +130,7 @@ Phase 4 Filter  │  RLS + source scoping + dedup (by chunk_id)  │
                 └──────────────┬───────────────────────────────┘
                                │
                 ┌──────────────▼───────────────────────────────┐
-Phase 5 Rerank  │  TEI GTE cross-encoder on top-N              │
+Phase 5 Rerank  │  TEI cross-encoder on top-N                  │
                 │  (default N=64, configurable)                │
                 └──────────────┬───────────────────────────────┘
                                │
@@ -160,7 +160,7 @@ to 70 % GOOD on the reference set, ahead of the embedder upgrade.
 | Vector similarity  | Qdrant cosine                   | RRF k=60         |
 | Call-graph popularity | In-edges on caller's symbol  | log-damped bonus |
 | Symbol-name match  | Exact/prefix match on extracted symbol | additive      |
-| Cross-encoder score | GTE-reranker-modernbert-base    | final sort       |
+| Cross-encoder score | BGE-reranker-base               | final sort       |
 
 Weights are configurable via `api/config/search.toml`.
 

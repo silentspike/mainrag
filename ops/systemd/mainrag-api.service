@@ -1,6 +1,6 @@
 [Unit]
 Description=MainRAG API Server
-Documentation=https://github.com/obtFusi/mainrag
+Documentation=https://github.com/silentspike/mainrag
 After=network.target postgresql.service qdrant.service
 Requires=postgresql.service
 Wants=qdrant.service

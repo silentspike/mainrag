@@ -1,5 +1,6 @@
 [Unit]
-Description=MAINRAG PostgreSQL Backup
+Description=MainRag PostgreSQL Backup
+Documentation=https://github.com/silentspike/mainrag
 After=postgresql.service
 Requires=postgresql.service
 

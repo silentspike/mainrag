@@ -1,5 +1,6 @@
 [Unit]
-Description=MAINRAG Qdrant Snapshot
+Description=MainRag Qdrant Snapshot
+Documentation=https://github.com/silentspike/mainrag
 After=qdrant.service
 Requires=qdrant.service
 
