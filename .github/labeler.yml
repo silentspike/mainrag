@@ -1,0 +1,54 @@
+# Path-based auto-labeling rules used by .github/workflows/auto-label.yml.
+# See https://github.com/actions/labeler for the matcher syntax.
+
+"area/api":
+  - changed-files:
+      - any-glob-to-any-file:
+          - api/**
+
+"area/cli":
+  - changed-files:
+      - any-glob-to-any-file:
+          - cli/**
+
+"area/intelligence":
+  - changed-files:
+      - any-glob-to-any-file:
+          - api/src/services/intelligence.rs
+          - api/src/api/handlers/intelligence.rs
+          - cli/src/commands/{card,call_graph,dead_end,explain,explore,layers,ownership}.rs
+
+"area/search":
+  - changed-files:
+      - any-glob-to-any-file:
+          - api/src/services/search.rs
+          - api/src/services/query_expander.rs
+          - api/src/services/rerank.rs
+          - api/src/api/handlers/search.rs
+
+"area/chunker":
+  - changed-files:
+      - any-glob-to-any-file:
+          - api/src/services/chunker/**
+          - api/src/services/parser.rs
+
+"area/infra":
+  - changed-files:
+      - any-glob-to-any-file:
+          - docker-compose.yml
+          - ops/**
+          - .github/**
+
+"documentation":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.md"
+          - docs/**
+          - README.md
+          - ARCHITECTURE.md
+
+"ci":
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/workflows/**
+          - .github/dependabot.yml

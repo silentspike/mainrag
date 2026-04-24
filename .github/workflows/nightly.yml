@@ -1,0 +1,35 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '17 4 * * *'   # 04:17 UTC, once per day
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  test:
+    name: cargo test (unit, no service deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Full test run, skipping any test gated on the `integration` feature —
+      # those need live PostgreSQL + Qdrant + TEI which the runner cannot host.
+      - run: cargo test --workspace --no-default-features --lib -- --nocapture
+      - name: Build docs
+        run: cargo doc --workspace --no-deps
+
+  audit:
+    name: cargo audit (RUSTSEC advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - run: cargo audit --deny warnings
