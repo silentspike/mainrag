@@ -38,7 +38,11 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> Result<Json<Hea
     let all_ok = postgres_ok && qdrant_ok && tei_ok;
 
     Ok(Json(HealthResponse {
-        status: if all_ok { "healthy".to_string() } else { "degraded".to_string() },
+        status: if all_ok {
+            "healthy".to_string()
+        } else {
+            "degraded".to_string()
+        },
         services: ServiceStatus {
             postgres: postgres_ok,
             qdrant: qdrant_ok,

@@ -1,11 +1,11 @@
 //! Legacy character-based chunker (1000 chars, 100 overlap)
 //! Kept for backward compatibility - prefer Token or Semantic chunking!
 
-use super::{Chunk, ChunkType, ChunkerConfig, Chunker};
+use super::{Chunk, ChunkType, Chunker, ChunkerConfig};
 
 pub struct CharacterChunker {
-    max_chars: usize,       // Default: 1000
-    overlap_chars: usize,   // Default: 100
+    max_chars: usize,     // Default: 1000
+    overlap_chars: usize, // Default: 100
 }
 
 impl CharacterChunker {
@@ -45,9 +45,13 @@ impl Chunker for CharacterChunker {
 
             // Line calculation
             let start_line = content[..chars[..start].iter().collect::<String>().len()]
-                .matches('\n').count() + 1;
+                .matches('\n')
+                .count()
+                + 1;
             let end_line = content[..chars[..end].iter().collect::<String>().len()]
-                .matches('\n').count() + 1;
+                .matches('\n')
+                .count()
+                + 1;
 
             chunks.push(Chunk {
                 text,
@@ -57,8 +61,8 @@ impl Chunker for CharacterChunker {
                 end_byte: end,
                 chunk_type: ChunkType::Text,
                 metadata: None,
-                parent_idx: None,  // Character chunker: flat structure
-                level: 2,          // Default to leaf level
+                parent_idx: None, // Character chunker: flat structure
+                level: 2,         // Default to leaf level
                 context_prefix: None,
             });
 

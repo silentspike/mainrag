@@ -77,7 +77,10 @@ impl DomainProfileRegistry {
 
         if !dir.exists() {
             tracing::info!("Domain profiles directory does not exist: {:?}", dir);
-            return Ok(Self { profiles, source_map });
+            return Ok(Self {
+                profiles,
+                source_map,
+            });
         }
 
         for entry in std::fs::read_dir(dir).context("read domain_profiles dir")? {
@@ -99,14 +102,16 @@ impl DomainProfileRegistry {
                                 src, existing.0.name, profile.name
                             );
                         } else {
-                            source_map.insert(src.clone(), (profile.clone(), SourceRole::CodeSource));
+                            source_map
+                                .insert(src.clone(), (profile.clone(), SourceRole::CodeSource));
                         }
                     }
 
                     // Register support sources
                     for src in &profile.support_sources {
                         if !source_map.contains_key(src) {
-                            source_map.insert(src.clone(), (profile.clone(), SourceRole::SupportSource));
+                            source_map
+                                .insert(src.clone(), (profile.clone(), SourceRole::SupportSource));
                         }
                     }
 
@@ -123,14 +128,16 @@ impl DomainProfileRegistry {
             }
         }
 
-        Ok(Self { profiles, source_map })
+        Ok(Self {
+            profiles,
+            source_map,
+        })
     }
 
     fn load_profile(path: &Path) -> Result<DomainProfile> {
-        let content = std::fs::read_to_string(path)
-            .context(format!("read profile {:?}", path))?;
-        let parsed: ProfileToml = toml::from_str(&content)
-            .context(format!("parse profile {:?}", path))?;
+        let content = std::fs::read_to_string(path).context(format!("read profile {:?}", path))?;
+        let parsed: ProfileToml =
+            toml::from_str(&content).context(format!("parse profile {:?}", path))?;
         let raw: toml::Value = toml::from_str(&content)?;
 
         Ok(DomainProfile {
@@ -177,7 +184,10 @@ impl DomainProfileRegistry {
         let mut operation_symbols = Vec::new();
 
         for mapping in &profile.query_mappings {
-            let matched = mapping.nl_terms.iter().any(|term| query_lower.contains(term));
+            let matched = mapping
+                .nl_terms
+                .iter()
+                .any(|term| query_lower.contains(term));
             if matched {
                 symbol_expansions.extend(mapping.symbols.clone());
                 if let Some(intent_str) = &intent {
@@ -218,16 +228,24 @@ fn detect_intent(query: &str) -> Option<String> {
     let modify_keywords = ["set", "update", "change", "modify", "edit", "toggle"];
 
     for kw in &delete_keywords {
-        if query.contains(kw) { return Some("delete".to_string()); }
+        if query.contains(kw) {
+            return Some("delete".to_string());
+        }
     }
     for kw in &create_keywords {
-        if query.contains(kw) { return Some("create".to_string()); }
+        if query.contains(kw) {
+            return Some("create".to_string());
+        }
     }
     for kw in &read_keywords {
-        if query.contains(kw) { return Some("read".to_string()); }
+        if query.contains(kw) {
+            return Some("read".to_string());
+        }
     }
     for kw in &modify_keywords {
-        if query.contains(kw) { return Some("modify".to_string()); }
+        if query.contains(kw) {
+            return Some("modify".to_string());
+        }
     }
     None
 }
@@ -254,8 +272,14 @@ mod tests {
 
     #[test]
     fn test_detect_intent() {
-        assert_eq!(detect_intent("how do i delete a clip"), Some("delete".to_string()));
-        assert_eq!(detect_intent("create empty clip"), Some("create".to_string()));
+        assert_eq!(
+            detect_intent("how do i delete a clip"),
+            Some("delete".to_string())
+        );
+        assert_eq!(
+            detect_intent("create empty clip"),
+            Some("create".to_string())
+        );
         assert_eq!(detect_intent("get track bank"), Some("read".to_string()));
         assert_eq!(detect_intent("toggle mute"), Some("modify".to_string()));
         assert_eq!(detect_intent("what is this"), None);

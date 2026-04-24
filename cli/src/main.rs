@@ -14,7 +14,12 @@ use client::ApiClient;
 #[command(author = "obtFusi")]
 struct Cli {
     /// API server URL (default: http://localhost:3001)
-    #[arg(long, global = true, env = "MAINRAG_API_URL", default_value = "http://localhost:3001")]
+    #[arg(
+        long,
+        global = true,
+        env = "MAINRAG_API_URL",
+        default_value = "http://localhost:3001"
+    )]
     api_url: String,
 
     /// Output as JSON (machine-readable)
@@ -256,10 +261,7 @@ enum ConfigAction {
     Show,
 
     /// Set configuration value
-    Set {
-        key: String,
-        value: String,
-    },
+    Set { key: String, value: String },
 }
 
 #[derive(Subcommand)]
@@ -337,25 +339,30 @@ async fn main() -> anyhow::Result<()> {
             limit,
             offset,
             source,
-        } => commands::search::run(&client, &query, &mode, limit, offset, source.as_deref(), cli.json).await,
+        } => {
+            commands::search::run(
+                &client,
+                &query,
+                &mode,
+                limit,
+                offset,
+                source.as_deref(),
+                cli.json,
+            )
+            .await
+        }
 
         Commands::Add { path, name } => {
             commands::add::run(&client, &path, name.as_deref(), cli.json).await
         }
 
-        Commands::Source { action } => {
-            commands::source::run(&client, action, cli.json).await
-        }
+        Commands::Source { action } => commands::source::run(&client, action, cli.json).await,
 
-        Commands::Auth { action } => {
-            commands::auth::run(&mut client, action, cli.json).await
-        }
+        Commands::Auth { action } => commands::auth::run(&mut client, action, cli.json).await,
 
         Commands::Stats => commands::stats::run(&client, cli.json).await,
 
-        Commands::Config { action } => {
-            commands::config::run(action, cli.json).await
-        }
+        Commands::Config { action } => commands::config::run(action, cli.json).await,
 
         Commands::Health => commands::health::run(&client, cli.json).await,
 
@@ -368,24 +375,56 @@ async fn main() -> anyhow::Result<()> {
             server.run_stdio().await
         }
 
-        Commands::Symbols { query, symbol_type, limit } => {
-            commands::symbols::run(&client, &query, symbol_type.as_deref(), limit, cli.json).await
-        }
+        Commands::Symbols {
+            query,
+            symbol_type,
+            limit,
+        } => commands::symbols::run(&client, &query, symbol_type.as_deref(), limit, cli.json).await,
 
-        Commands::CallGraph { function, direction, source, depth } => {
-            commands::call_graph::run(&client, &function, &direction, source.as_deref(), depth, cli.json).await
+        Commands::CallGraph {
+            function,
+            direction,
+            source,
+            depth,
+        } => {
+            commands::call_graph::run(
+                &client,
+                &function,
+                &direction,
+                source.as_deref(),
+                depth,
+                cli.json,
+            )
+            .await
         }
 
         Commands::Card { symbol, source } => {
             commands::card::run(&client, &symbol, source.as_deref(), cli.json).await
         }
 
-        Commands::Explain { symbol, source, depth } => {
+        Commands::Explain {
+            symbol,
+            source,
+            depth,
+        } => {
             commands::explain::run(&client, &symbol, source.as_deref(), Some(depth), cli.json).await
         }
 
-        Commands::Layers { layer, resource, side_effect, limit } => {
-            commands::layers::run(&client, layer.as_deref(), resource.as_deref(), side_effect.as_deref(), limit, cli.json).await
+        Commands::Layers {
+            layer,
+            resource,
+            side_effect,
+            limit,
+        } => {
+            commands::layers::run(
+                &client,
+                layer.as_deref(),
+                resource.as_deref(),
+                side_effect.as_deref(),
+                limit,
+                cli.json,
+            )
+            .await
         }
 
         Commands::Ownership { symbol } => {
@@ -397,8 +436,22 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Commands::DeadEnd { action } => match action {
-            DeadEndAction::Add { concept, path, reason, symbols, source } => {
-                commands::dead_end::run_add(&client, &concept, &path, &reason, &symbols, source.as_deref()).await
+            DeadEndAction::Add {
+                concept,
+                path,
+                reason,
+                symbols,
+                source,
+            } => {
+                commands::dead_end::run_add(
+                    &client,
+                    &concept,
+                    &path,
+                    &reason,
+                    &symbols,
+                    source.as_deref(),
+                )
+                .await
             }
             DeadEndAction::List { concept } => {
                 commands::dead_end::run_list(&client, &concept, cli.json).await
@@ -406,7 +459,9 @@ async fn main() -> anyhow::Result<()> {
         },
 
         Commands::Admin { action } => match action {
-            AdminAction::Backfill { action: backfill_action } => match backfill_action {
+            AdminAction::Backfill {
+                action: backfill_action,
+            } => match backfill_action {
                 BackfillAction::Orphaned => {
                     commands::backfill::run_orphaned(&client, cli.json).await
                 }

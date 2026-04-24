@@ -27,13 +27,21 @@ pub async fn run(
         return Ok(());
     }
 
-    println!("{}", format!("\r{} Found {} symbols", "OK".green(), results.len()).bold());
+    println!(
+        "{}",
+        format!("\r{} Found {} symbols", "OK".green(), results.len()).bold()
+    );
 
     for sym in results {
         println!();
         // symbol_type is String, not Option
-        println!("  {} {}", sym.name.bold(), format!("({})", sym.symbol_type).dimmed());
-        println!("    {} {}:{}-{}",
+        println!(
+            "  {} {}",
+            sym.name.bold(),
+            format!("({})", sym.symbol_type).dimmed()
+        );
+        println!(
+            "    {} {}:{}-{}",
             "Location:".dimmed(),
             sym.file_path,
             sym.line_start,

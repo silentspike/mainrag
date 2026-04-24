@@ -8,9 +8,10 @@ use std::time::Instant;
 #[tokio::test]
 #[ignore]
 async fn benchmark_mupdf_throughput() {
-    use mainrag_api::plugins::{SourcePlugin, pdf::PdfPlugin};
+    use mainrag_api::plugins::{pdf::PdfPlugin, SourcePlugin};
 
-    let pdf_path = "/work/bitwigs/bitwig-api-docs/DrivenByMoss-Documentation/DrivenByMoss-Manual.pdf";
+    let pdf_path =
+        "/work/bitwigs/bitwig-api-docs/DrivenByMoss-Documentation/DrivenByMoss-Manual.pdf";
 
     if !std::path::Path::new(pdf_path).exists() {
         println!("⚠️  Benchmark PDF not found");
@@ -19,7 +20,7 @@ async fn benchmark_mupdf_throughput() {
 
     let file_size = std::fs::metadata(pdf_path).unwrap().len();
     let file_size_mb = file_size as f64 / 1024.0 / 1024.0;
-    
+
     println!("\n═══════════════════════════════════════════════════════════════");
     println!("  MuPDF PDF Processing Benchmark");
     println!("═══════════════════════════════════════════════════════════════");
@@ -38,8 +39,11 @@ async fn benchmark_mupdf_throughput() {
 
     let total_chars: usize = warmup.files.iter().map(|f| f.content.len()).sum();
     let chunk_count = warmup.files.len();
-    
-    println!("  Output: {} chunks, {} chars total\n", chunk_count, total_chars);
+
+    println!(
+        "  Output: {} chunks, {} chars total\n",
+        chunk_count, total_chars
+    );
 
     // Benchmark runs
     let iterations = 10;

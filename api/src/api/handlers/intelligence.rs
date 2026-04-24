@@ -1,5 +1,9 @@
 //! Code Intelligence Handlers - Symbol search and call graph queries
 
+use crate::db::models::{
+    DelegationChain, ExploreResponse, NegativeEvidence, OwnershipInfo, SymbolCard,
+};
+use crate::AppState;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -8,8 +12,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
-use crate::AppState;
-use crate::db::models::{SymbolCard, DelegationChain, NegativeEvidence, OwnershipInfo, ExploreResponse};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SymbolSearchRequest {
@@ -54,46 +56,56 @@ pub async fn search_symbols(
     let limit = req.limit.unwrap_or(50).min(200);
     let search_pattern = format!("%{}%", req.query);
 
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        let mut query = String::from(
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let mut query = String::from(
             "SELECT s.id, s.name, s.type, f.path as file_path, s.line_start, s.line_end, s.context
              FROM symbols s
              JOIN files f ON s.file_id = f.id
              WHERE s.name ILIKE $1"
         );
 
-        // Sprint 4.4: Parametrized LIMIT instead of format!()
-        let limit_i64 = limit;
-        let rows = if let Some(lang) = &req.language {
-            if let Some(sym_type) = &req.symbol_type {
-                query.push_str(" AND f.language = $2 AND s.type = $3 LIMIT $4");
-                txn.query(&query, &[&search_pattern, lang, sym_type, &limit_i64]).await
-            } else {
-                query.push_str(" AND f.language = $2 LIMIT $3");
-                txn.query(&query, &[&search_pattern, lang, &limit_i64]).await
-            }
-        } else if let Some(sym_type) = &req.symbol_type {
-            query.push_str(" AND s.type = $2 LIMIT $3");
-            txn.query(&query, &[&search_pattern, sym_type, &limit_i64]).await
-        } else {
-            query.push_str(" LIMIT $2");
-            txn.query(&query, &[&search_pattern, &limit_i64]).await
-        }?;
+                // Sprint 4.4: Parametrized LIMIT instead of format!()
+                let limit_i64 = limit;
+                let rows = if let Some(lang) = &req.language {
+                    if let Some(sym_type) = &req.symbol_type {
+                        query.push_str(" AND f.language = $2 AND s.type = $3 LIMIT $4");
+                        txn.query(&query, &[&search_pattern, lang, sym_type, &limit_i64])
+                            .await
+                    } else {
+                        query.push_str(" AND f.language = $2 LIMIT $3");
+                        txn.query(&query, &[&search_pattern, lang, &limit_i64])
+                            .await
+                    }
+                } else if let Some(sym_type) = &req.symbol_type {
+                    query.push_str(" AND s.type = $2 LIMIT $3");
+                    txn.query(&query, &[&search_pattern, sym_type, &limit_i64])
+                        .await
+                } else {
+                    query.push_str(" LIMIT $2");
+                    txn.query(&query, &[&search_pattern, &limit_i64]).await
+                }?;
 
-        let symbols = rows.iter().map(|row| {
-            SymbolInfo {
-                id: row.get(0),
-                name: row.get(1),
-                symbol_type: row.get(2),
-                file_path: row.get(3),
-                line_start: row.get(4),
-                line_end: row.get(5),
-                context: row.get(6),
-            }
-        }).collect();
+                let symbols = rows
+                    .iter()
+                    .map(|row| SymbolInfo {
+                        id: row.get(0),
+                        name: row.get(1),
+                        symbol_type: row.get(2),
+                        file_path: row.get(3),
+                        line_start: row.get(4),
+                        line_end: row.get(5),
+                        context: row.get(6),
+                    })
+                    .collect();
 
-        Ok(Json(symbols))
-    })).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                Ok(Json(symbols))
+            })
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Get symbol details with call graph (who calls this, who it calls)
@@ -101,8 +113,11 @@ pub async fn get_symbol_callgraph(
     State(state): State<Arc<AppState>>,
     Path(symbol_id): Path<i64>,
 ) -> Result<Json<CallGraphResponse>, StatusCode> {
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        let symbol_row = txn.query_one(
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let symbol_row = txn.query_one(
             "SELECT s.id, s.name, s.type, f.path as file_path, s.line_start, s.line_end, s.context
              FROM symbols s
              JOIN files f ON s.file_id = f.id
@@ -110,51 +125,57 @@ pub async fn get_symbol_callgraph(
             &[&symbol_id],
         ).await?;
 
-        let symbol = SymbolInfo {
-            id: symbol_row.get(0),
-            name: symbol_row.get(1),
-            symbol_type: symbol_row.get(2),
-            file_path: symbol_row.get(3),
-            line_start: symbol_row.get(4),
-            line_end: symbol_row.get(5),
-            context: symbol_row.get(6),
-        };
+                let symbol = SymbolInfo {
+                    id: symbol_row.get(0),
+                    name: symbol_row.get(1),
+                    symbol_type: symbol_row.get(2),
+                    file_path: symbol_row.get(3),
+                    line_start: symbol_row.get(4),
+                    line_end: symbol_row.get(5),
+                    context: symbol_row.get(6),
+                };
 
-        let callers = txn.query(
-            "SELECT DISTINCT s.id, s.name, s.type, f.path, s.line_start
+                let callers = txn
+                    .query(
+                        "SELECT DISTINCT s.id, s.name, s.type, f.path, s.line_start
              FROM call_graph cg
              JOIN symbols s ON cg.caller_symbol_id = s.id
              JOIN files f ON s.file_id = f.id
              WHERE cg.callee_symbol_id = $1",
-            &[&symbol_id],
-        ).await?;
+                        &[&symbol_id],
+                    )
+                    .await?;
 
-        let caller_nodes = callers.iter().map(|row| {
-            CallGraphNode {
-                symbol_id: row.get(0),
-                name: row.get(1),
-                symbol_type: row.get(2),
-                file_path: row.get(3),
-                line_start: row.get(4),
-            }
-        }).collect();
+                let caller_nodes = callers
+                    .iter()
+                    .map(|row| CallGraphNode {
+                        symbol_id: row.get(0),
+                        name: row.get(1),
+                        symbol_type: row.get(2),
+                        file_path: row.get(3),
+                        line_start: row.get(4),
+                    })
+                    .collect();
 
-        let callees = txn.query(
-            "SELECT DISTINCT callee_name FROM call_graph
+                let callees = txn
+                    .query(
+                        "SELECT DISTINCT callee_name FROM call_graph
              WHERE caller_symbol_id = $1",
-            &[&symbol_id],
-        ).await?;
+                        &[&symbol_id],
+                    )
+                    .await?;
 
-        let callee_names: Vec<String> = callees.iter()
-            .map(|row| row.get(0))
-            .collect();
+                let callee_names: Vec<String> = callees.iter().map(|row| row.get(0)).collect();
 
-        Ok(Json(CallGraphResponse {
-            symbol,
-            callers: caller_nodes,
-            callees: callee_names,
-        }))
-    })).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                Ok(Json(CallGraphResponse {
+                    symbol,
+                    callers: caller_nodes,
+                    callees: callee_names,
+                }))
+            })
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// List all symbols in a file
@@ -163,13 +184,17 @@ pub async fn list_file_symbols(
     Path(file_id): Path<i64>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<SymbolInfo>>, StatusCode> {
-    let limit = params.get("limit")
+    let limit = params
+        .get("limit")
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(100)
         .min(200);
 
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        let rows = txn.query(
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let rows = txn.query(
             "SELECT s.id, s.name, s.type, f.path as file_path, s.line_start, s.line_end, s.context
              FROM symbols s
              JOIN files f ON s.file_id = f.id
@@ -179,20 +204,24 @@ pub async fn list_file_symbols(
             &[&file_id, &limit],
         ).await?;
 
-        let symbols = rows.iter().map(|row| {
-            SymbolInfo {
-                id: row.get(0),
-                name: row.get(1),
-                symbol_type: row.get(2),
-                file_path: row.get(3),
-                line_start: row.get(4),
-                line_end: row.get(5),
-                context: row.get(6),
-            }
-        }).collect();
+                let symbols = rows
+                    .iter()
+                    .map(|row| SymbolInfo {
+                        id: row.get(0),
+                        name: row.get(1),
+                        symbol_type: row.get(2),
+                        file_path: row.get(3),
+                        line_start: row.get(4),
+                        line_end: row.get(5),
+                        context: row.get(6),
+                    })
+                    .collect();
 
-        Ok(Json(symbols))
-    })).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                Ok(Json(symbols))
+            })
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Find callers of a function by name (for MCP tools)
@@ -215,10 +244,13 @@ pub async fn find_callers_by_name(
     Query(req): Query<CallerQuery>,
 ) -> Result<Json<Vec<CallerInfo>>, StatusCode> {
     let source = req.source.clone();
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        let rows = if let Some(ref source_name) = source {
-            txn.query(
-                "SELECT DISTINCT s.name, f.path, cg.call_line
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let rows = if let Some(ref source_name) = source {
+                    txn.query(
+                        "SELECT DISTINCT s.name, f.path, cg.call_line
                  FROM call_graph cg
                  JOIN symbols s ON cg.caller_symbol_id = s.id
                  JOIN files f ON s.file_id = f.id
@@ -226,31 +258,37 @@ pub async fn find_callers_by_name(
                  WHERE cg.callee_name = $1 AND src.name = $2
                  ORDER BY f.path, cg.call_line
                  LIMIT 100",
-                &[&req.function, source_name],
-            ).await?
-        } else {
-            txn.query(
-                "SELECT DISTINCT s.name, f.path, cg.call_line
+                        &[&req.function, source_name],
+                    )
+                    .await?
+                } else {
+                    txn.query(
+                        "SELECT DISTINCT s.name, f.path, cg.call_line
                  FROM call_graph cg
                  JOIN symbols s ON cg.caller_symbol_id = s.id
                  JOIN files f ON s.file_id = f.id
                  WHERE cg.callee_name = $1
                  ORDER BY f.path, cg.call_line
                  LIMIT 100",
-                &[&req.function],
-            ).await?
-        };
+                        &[&req.function],
+                    )
+                    .await?
+                };
 
-        let callers = rows.iter().map(|row| {
-            CallerInfo {
-                name: row.get(0),
-                file_path: row.get(1),
-                line: row.get(2),
-            }
-        }).collect();
+                let callers = rows
+                    .iter()
+                    .map(|row| CallerInfo {
+                        name: row.get(0),
+                        file_path: row.get(1),
+                        line: row.get(2),
+                    })
+                    .collect();
 
-        Ok(Json(callers))
-    })).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                Ok(Json(callers))
+            })
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Find callees (functions called by) a function by name (for MCP tools)
@@ -259,10 +297,13 @@ pub async fn find_callees_by_name(
     Query(req): Query<CallerQuery>,
 ) -> Result<Json<Vec<String>>, StatusCode> {
     let source = req.source.clone();
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        let rows = if let Some(ref source_name) = source {
-            txn.query(
-                "SELECT DISTINCT cg.callee_name
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let rows = if let Some(ref source_name) = source {
+                    txn.query(
+                        "SELECT DISTINCT cg.callee_name
                  FROM call_graph cg
                  JOIN symbols s ON cg.caller_symbol_id = s.id
                  JOIN files f ON s.file_id = f.id
@@ -270,26 +311,29 @@ pub async fn find_callees_by_name(
                  WHERE s.name = $1 AND src.name = $2
                  ORDER BY cg.callee_name
                  LIMIT 100",
-                &[&req.function, source_name],
-            ).await?
-        } else {
-            txn.query(
-                "SELECT DISTINCT cg.callee_name
+                        &[&req.function, source_name],
+                    )
+                    .await?
+                } else {
+                    txn.query(
+                        "SELECT DISTINCT cg.callee_name
                  FROM call_graph cg
                  JOIN symbols s ON cg.caller_symbol_id = s.id
                  WHERE s.name = $1
                  ORDER BY cg.callee_name
                  LIMIT 100",
-                &[&req.function],
-            ).await?
-        };
+                        &[&req.function],
+                    )
+                    .await?
+                };
 
-        let callees: Vec<String> = rows.iter()
-            .map(|row| row.get(0))
-            .collect();
+                let callees: Vec<String> = rows.iter().map(|row| row.get(0)).collect();
 
-        Ok(Json(callees))
-    })).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                Ok(Json(callees))
+            })
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// N-hop call chain traversal
@@ -297,33 +341,45 @@ pub async fn find_callees_by_name(
 pub struct CallChainQuery {
     pub function: String,
     #[serde(default = "default_direction")]
-    pub direction: String,  // "callers" or "callees"
+    pub direction: String, // "callers" or "callees"
     #[serde(default = "default_depth")]
     pub depth: i32,
     pub source: Option<String>,
 }
-fn default_direction() -> String { "callees".to_string() }
-fn default_depth() -> i32 { 3 }
+fn default_direction() -> String {
+    "callees".to_string()
+}
+fn default_depth() -> i32 {
+    3
+}
 
 pub async fn find_call_chain(
     State(state): State<Arc<AppState>>,
     Query(req): Query<CallChainQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let source_id = if let Some(ref source_name) = req.source {
-        state.rls_client.with_system(|txn| {
-            let sn = source_name.clone();
-            Box::pin(async move {
-                let row = txn.query_opt("SELECT id FROM sources WHERE name = $1", &[&sn]).await?;
-                Ok::<_, crate::error::AppError>(row.map(|r| r.get::<_, i64>(0)))
+        state
+            .rls_client
+            .with_system(|txn| {
+                let sn = source_name.clone();
+                Box::pin(async move {
+                    let row = txn
+                        .query_opt("SELECT id FROM sources WHERE name = $1", &[&sn])
+                        .await?;
+                    Ok::<_, crate::error::AppError>(row.map(|r| r.get::<_, i64>(0)))
+                })
             })
-        }).await.unwrap_or(None)
+            .await
+            .unwrap_or(None)
     } else {
         None
     };
 
-    let chain = state.intelligence.find_call_chain(
-        &req.function, &req.direction, req.depth, source_id
-    ).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let chain = state
+        .intelligence
+        .find_call_chain(&req.function, &req.direction, req.depth, source_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({
         "function": req.function,
@@ -355,17 +411,21 @@ pub async fn browse_symbol_cards(
     let name = req.name.as_deref().unwrap_or("%");
     let limit = req.limit.unwrap_or(50).min(200);
 
-    let cards = state.intelligence.search_symbol_cards(
-        name,
-        req.source_id,
-        req.layer.as_deref(),
-        req.resource.as_deref(),
-        req.side_effect.as_deref(),
-        limit,
-    ).await.map_err(|e| {
-        tracing::error!("browse_symbol_cards error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let cards = state
+        .intelligence
+        .search_symbol_cards(
+            name,
+            req.source_id,
+            req.layer.as_deref(),
+            req.resource.as_deref(),
+            req.side_effect.as_deref(),
+            limit,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("browse_symbol_cards error: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(Json(cards))
 }
@@ -375,7 +435,9 @@ pub async fn get_symbol_card(
     State(state): State<Arc<AppState>>,
     Path(symbol_id): Path<i64>,
 ) -> Result<Json<Option<SymbolCard>>, StatusCode> {
-    let card = state.intelligence.get_symbol_card(symbol_id)
+    let card = state
+        .intelligence
+        .get_symbol_card(symbol_id)
         .await
         .map_err(|e| {
             tracing::error!("get_symbol_card error: {}", e);
@@ -399,14 +461,14 @@ pub async fn explain_path(
 ) -> Result<Json<Vec<DelegationChain>>, StatusCode> {
     let max_depth = req.max_depth.unwrap_or(6);
 
-    let chains = state.intelligence.trace_delegation_chain(
-        &req.symbol_name,
-        req.source_id,
-        max_depth,
-    ).await.map_err(|e| {
-        tracing::error!("explain_path error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let chains = state
+        .intelligence
+        .trace_delegation_chain(&req.symbol_name, req.source_id, max_depth)
+        .await
+        .map_err(|e| {
+            tracing::error!("explain_path error: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(Json(chains))
 }
@@ -438,19 +500,23 @@ pub async fn create_negative_evidence(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateNegativeEvidenceRequest>,
 ) -> Result<Json<CreateNegativeEvidenceResponse>, StatusCode> {
-    let id = state.intelligence.create_negative_evidence(
-        req.source_id,
-        None, // domain_profile resolved later from source_id
-        &req.concept,
-        &req.path_description,
-        &req.reason,
-        &req.symbols,
-        &req.severity,
-        req.created_by.as_deref(),
-    ).await.map_err(|e| {
-        tracing::error!("create_negative_evidence error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let id = state
+        .intelligence
+        .create_negative_evidence(
+            req.source_id,
+            None, // domain_profile resolved later from source_id
+            &req.concept,
+            &req.path_description,
+            &req.reason,
+            &req.symbols,
+            &req.severity,
+            req.created_by.as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("create_negative_evidence error: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(Json(CreateNegativeEvidenceResponse { id }))
 }
@@ -466,13 +532,14 @@ pub async fn search_negative_evidence(
     State(state): State<Arc<AppState>>,
     Query(req): Query<SearchNegativeEvidenceQuery>,
 ) -> Result<Json<Vec<NegativeEvidence>>, StatusCode> {
-    let results = state.intelligence.search_negative_evidence(
-        &req.concept,
-        req.source_id,
-    ).await.map_err(|e| {
-        tracing::error!("search_negative_evidence error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let results = state
+        .intelligence
+        .search_negative_evidence(&req.concept, req.source_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("search_negative_evidence error: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(Json(results))
 }
@@ -488,13 +555,14 @@ pub async fn get_ownership(
     State(state): State<Arc<AppState>>,
     Query(req): Query<OwnershipQuery>,
 ) -> Result<Json<Vec<OwnershipInfo>>, StatusCode> {
-    let results = state.intelligence.get_ownership(
-        &req.symbol,
-        req.source_id,
-    ).await.map_err(|e| {
-        tracing::error!("get_ownership error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let results = state
+        .intelligence
+        .get_ownership(&req.symbol, req.source_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("get_ownership error: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(Json(results))
 }
@@ -511,14 +579,18 @@ pub async fn explore(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExploreRequest>,
 ) -> Result<Json<ExploreResponse>, StatusCode> {
-    let result = state.intelligence.explore(
-        &req.query,
-        req.source.as_deref(),
-        state.domain_registry.as_ref(),
-    ).await.map_err(|e| {
-        tracing::error!("explore error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let result = state
+        .intelligence
+        .explore(
+            &req.query,
+            req.source.as_deref(),
+            state.domain_registry.as_ref(),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("explore error: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(Json(result))
 }

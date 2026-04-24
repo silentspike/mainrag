@@ -22,16 +22,38 @@ pub async fn run(
     }
 
     if cards.is_empty() {
-        println!("{}", format!("\rNo symbol card found for '{}'", symbol).yellow());
+        println!(
+            "{}",
+            format!("\rNo symbol card found for '{}'", symbol).yellow()
+        );
         return Ok(());
     }
 
-    println!("{}", format!("\r{} Found {} symbol card(s) for '{}'", "OK".green(), cards.len(), symbol).bold());
+    println!(
+        "{}",
+        format!(
+            "\r{} Found {} symbol card(s) for '{}'",
+            "OK".green(),
+            cards.len(),
+            symbol
+        )
+        .bold()
+    );
 
     for card in &cards {
         println!();
-        println!("  {} {}", card.name.bold(), format!("({})", card.symbol_type).dimmed());
-        println!("    {} {}:{}-{}", "Location:".dimmed(), card.file_path, card.line_start, card.line_end);
+        println!(
+            "  {} {}",
+            card.name.bold(),
+            format!("({})", card.symbol_type).dimmed()
+        );
+        println!(
+            "    {} {}:{}-{}",
+            "Location:".dimmed(),
+            card.file_path,
+            card.line_start,
+            card.line_end
+        );
         println!("    {} {}", "Source:".dimmed(), card.source_name);
 
         if let Some(ref vis) = card.visibility {
@@ -58,7 +80,13 @@ pub async fn run(
             println!("    {} {}", "Thread:".dimmed(), thread.magenta());
         }
         if let Some(conf) = card.classification_confidence {
-            let color = if conf >= 0.8 { "green" } else if conf >= 0.5 { "yellow" } else { "red" };
+            let color = if conf >= 0.8 {
+                "green"
+            } else if conf >= 0.5 {
+                "yellow"
+            } else {
+                "red"
+            };
             let conf_str = format!("{:.0}%", conf * 100.0);
             let colored = match color {
                 "green" => conf_str.green().to_string(),
@@ -68,7 +96,11 @@ pub async fn run(
             println!("    {} {}", "Confidence:".dimmed(), colored);
         }
         if let Some(ref sig) = card.signature {
-            let preview = if sig.len() > 80 { format!("{}...", &sig[..77]) } else { sig.clone() };
+            let preview = if sig.len() > 80 {
+                format!("{}...", &sig[..77])
+            } else {
+                sig.clone()
+            };
             println!("    {} {}", "Signature:".dimmed(), preview);
         }
 
@@ -87,7 +119,13 @@ pub async fn run(
                             "mutation" => role.green().to_string(),
                             _ => role.dimmed().to_string(),
                         };
-                        println!("      {} {} [{}] ({:.0}%)", "->".blue(), name, role_colored, conf * 100.0);
+                        println!(
+                            "      {} {} [{}] ({:.0}%)",
+                            "->".blue(),
+                            name,
+                            role_colored,
+                            conf * 100.0
+                        );
                     }
                 }
             }

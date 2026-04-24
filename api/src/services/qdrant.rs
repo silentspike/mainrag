@@ -92,10 +92,7 @@ pub struct Point {
 
 /// M6: Check if an HTTP status code is retryable (transient server error)
 fn is_retryable_status(status: reqwest::StatusCode) -> bool {
-    matches!(
-        status.as_u16(),
-        429 | 502 | 503 | 504
-    )
+    matches!(status.as_u16(), 429 | 502 | 503 | 504)
 }
 
 impl QdrantClient {
@@ -127,7 +124,12 @@ impl QdrantClient {
         for attempt in 0..=MAX_RETRIES {
             if attempt > 0 {
                 let delay = Duration::from_millis(BASE_DELAY_MS * 2u64.pow(attempt - 1));
-                tracing::warn!(attempt, delay_ms = delay.as_millis() as u64, operation, "Qdrant retry");
+                tracing::warn!(
+                    attempt,
+                    delay_ms = delay.as_millis() as u64,
+                    operation,
+                    "Qdrant retry"
+                );
                 tokio::time::sleep(delay).await;
             }
 
@@ -136,7 +138,12 @@ impl QdrantClient {
                 _ => self.client.post(url),
             };
 
-            match request.header("api-key", &self.api_key).json(body).send().await {
+            match request
+                .header("api-key", &self.api_key)
+                .json(body)
+                .send()
+                .await
+            {
                 Ok(resp) if resp.status().is_success() => {
                     if attempt > 0 {
                         metrics::counter!("qdrant_retries_succeeded").increment(1);
@@ -152,7 +159,8 @@ impl QdrantClient {
                     let status = resp.status();
                     let body = resp.text().await.unwrap_or_default();
                     return Err(AppError::Qdrant(format!(
-                        "Qdrant {} returned {}: {}", operation, status, body
+                        "Qdrant {} returned {}: {}",
+                        operation, status, body
                     )));
                 }
                 Err(e) if e.is_timeout() || e.is_connect() => {
@@ -161,14 +169,18 @@ impl QdrantClient {
                     continue;
                 }
                 Err(e) => {
-                    return Err(AppError::Qdrant(format!("{} request failed: {}", operation, e)));
+                    return Err(AppError::Qdrant(format!(
+                        "{} request failed: {}",
+                        operation, e
+                    )));
                 }
             }
         }
 
         metrics::counter!("qdrant_retries_exhausted").increment(1);
         Err(AppError::Qdrant(format!(
-            "{} failed after {} retries: {}", operation, MAX_RETRIES, last_err
+            "{} failed after {} retries: {}",
+            operation, MAX_RETRIES, last_err
         )))
     }
 
@@ -199,7 +211,12 @@ impl QdrantClient {
     /// Search chunks filtered by source_id (NO tenant isolation!)
     /// DEPRECATED(K4): Use search_chunks_with_tenant() instead.
     #[deprecated(note = "K4: Use search_chunks_with_tenant() for tenant-isolated search")]
-    pub async fn search_chunks_by_source(&self, vector: Vec<f32>, limit: u64, source_id: i64) -> Result<Vec<(u64, f32)>> {
+    pub async fn search_chunks_by_source(
+        &self,
+        vector: Vec<f32>,
+        limit: u64,
+        source_id: i64,
+    ) -> Result<Vec<(u64, f32)>> {
         self.search_collection(&self.chunk_collection, vector, limit, Some(source_id))
             .await
     }
@@ -268,7 +285,9 @@ impl QdrantClient {
         };
 
         // M6: Retry with exponential backoff
-        let response = self.send_with_retry("POST", &url, &request, "search_tenant").await?;
+        let response = self
+            .send_with_retry("POST", &url, &request, "search_tenant")
+            .await?;
 
         let search_response: SearchResponse = response
             .json()
@@ -290,10 +309,7 @@ impl QdrantClient {
         limit: u64,
         source_id: Option<i64>,
     ) -> Result<Vec<(u64, f32)>> {
-        let url = format!(
-            "{}/collections/{}/points/search",
-            self.base_url, collection
-        );
+        let url = format!("{}/collections/{}/points/search", self.base_url, collection);
 
         // Build source filter for Qdrant (pushdown filtering)
         let filter = source_id.map(|sid| {
@@ -319,14 +335,14 @@ impl QdrantClient {
         };
 
         // M6: Retry with exponential backoff
-        let response = self.send_with_retry("POST", &url, &request, "search").await?;
+        let response = self
+            .send_with_retry("POST", &url, &request, "search")
+            .await?;
 
         let search_response: SearchResponse = response
             .json()
             .await
-            .map_err(|e| {
-                AppError::Qdrant(format!("Failed to parse response: {}", e))
-            })?;
+            .map_err(|e| AppError::Qdrant(format!("Failed to parse response: {}", e)))?;
 
         // Extract chunk_id from each result, filtering out invalid entries
         Ok(search_response
@@ -338,14 +354,12 @@ impl QdrantClient {
 
     /// Upsert points into chunks collection
     pub async fn upsert_chunks(&self, points: Vec<Point>) -> Result<()> {
-        self.upsert_collection(&self.chunk_collection, points)
-            .await
+        self.upsert_collection(&self.chunk_collection, points).await
     }
 
     /// Upsert points into code collection
     pub async fn upsert_code(&self, points: Vec<Point>) -> Result<()> {
-        self.upsert_collection(&self.code_collection, points)
-            .await
+        self.upsert_collection(&self.code_collection, points).await
     }
 
     /// Internal upsert method
@@ -358,7 +372,8 @@ impl QdrantClient {
         let request = UpsertRequest { points };
 
         // M6: Retry with exponential backoff
-        self.send_with_retry("PUT", &url, &request, "upsert").await?;
+        self.send_with_retry("PUT", &url, &request, "upsert")
+            .await?;
 
         Ok(())
     }
@@ -475,9 +490,7 @@ impl QdrantClient {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| {
-                AppError::Qdrant(format!("Delete request failed: {}", e))
-            })?;
+            .map_err(|e| AppError::Qdrant(format!("Delete request failed: {}", e)))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -536,11 +549,7 @@ impl QdrantClient {
 
     /// Create a payload index for efficient filtering.
     /// K4: user_id keyword index for tenant isolation.
-    pub async fn create_payload_index(
-        &self,
-        field_name: &str,
-        field_schema: &str,
-    ) -> Result<()> {
+    pub async fn create_payload_index(&self, field_name: &str, field_schema: &str) -> Result<()> {
         let url = format!(
             "{}/collections/{}/index",
             self.base_url, self.chunk_collection

@@ -5,9 +5,9 @@
 //! - Open (after N failures): requests are rejected immediately
 //! - HalfOpen (after recovery timeout): one probe request allowed
 
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
-use parking_lot::Mutex;
 
 /// Circuit breaker state
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -106,7 +106,8 @@ impl CircuitBreaker {
         let failures = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
 
         if failures == self.failure_threshold {
-            self.opened_at_millis.store(epoch_millis(), Ordering::Relaxed);
+            self.opened_at_millis
+                .store(epoch_millis(), Ordering::Relaxed);
             tracing::warn!(
                 service = %self.name,
                 failures = failures,

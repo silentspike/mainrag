@@ -7,14 +7,14 @@
 //! - Adaptive debounce (flush on idle OR max wait)
 //! - Incremental sync (only changed files, not full source)
 
+use crate::client::ApiClient;
 use anyhow::Result;
-use notify_debouncer_mini::new_debouncer;
+use colored::Colorize;
 use notify::RecursiveMode;
+use notify_debouncer_mini::new_debouncer;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
-use crate::client::ApiClient;
-use colored::Colorize;
 
 /// Minimum interval between syncs for the same file (rate limiting)
 const MIN_SYNC_INTERVAL: Duration = Duration::from_secs(15);
@@ -30,21 +30,42 @@ const DEBOUNCE_MS: u64 = 300;
 
 /// Supported file extensions
 const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "rs", "py", "pyw", "pyi", "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts",
-    "c", "cpp", "cc", "cxx", "h", "hpp", "hxx", "hh", "cs", "go", "zig", "lua",
-    "java", "rb", "rake", "gemspec", "php", "phtml", "sh", "bash", "zsh",
-    "html", "htm", "css", "scss", "sass", "less", "xml", "xsl", "xsd", "svg",
-    "yaml", "yml", "json", "jsonc", "jsonl", "toml", "sql", "md", "markdown",
-    "scm", "ss", "rkt", "txt", "pdf",
+    "rs", "py", "pyw", "pyi", "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts", "c", "cpp",
+    "cc", "cxx", "h", "hpp", "hxx", "hh", "cs", "go", "zig", "lua", "java", "rb", "rake",
+    "gemspec", "php", "phtml", "sh", "bash", "zsh", "html", "htm", "css", "scss", "sass", "less",
+    "xml", "xsl", "xsd", "svg", "yaml", "yml", "json", "jsonc", "jsonl", "toml", "sql", "md",
+    "markdown", "scm", "ss", "rkt", "txt", "pdf",
 ];
 
 /// Directories to ignore
 const IGNORE_DIRS: &[&str] = &[
-    ".git", ".hg", ".svn", ".idea", ".vscode", ".vs",
-    "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".tox",
-    ".venv", "venv", ".eggs", "target", ".cargo", "vendor",
-    "build", "dist", "out", ".gradle", "bin", "obj", "Pods",
-    ".cache", ".nx", ".turbo",
+    ".git",
+    ".hg",
+    ".svn",
+    ".idea",
+    ".vscode",
+    ".vs",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".tox",
+    ".venv",
+    "venv",
+    ".eggs",
+    "target",
+    ".cargo",
+    "vendor",
+    "build",
+    "dist",
+    "out",
+    ".gradle",
+    "bin",
+    "obj",
+    "Pods",
+    ".cache",
+    ".nx",
+    ".turbo",
 ];
 
 /// File signature for cheap change detection
@@ -58,34 +79,31 @@ impl FileSignature {
     fn from_path(path: &std::path::Path) -> Option<Self> {
         let meta = std::fs::metadata(path).ok()?;
         let modified = meta.modified().ok()?;
-        Some(Self { modified, len: meta.len() })
+        Some(Self {
+            modified,
+            len: meta.len(),
+        })
     }
 }
 
 /// Watch sources for changes and trigger incremental re-sync
-pub async fn watch(
-    client: &ApiClient,
-    source_name: Option<&str>,
-    daemon: bool,
-) -> Result<()> {
+pub async fn watch(client: &ApiClient, source_name: Option<&str>, daemon: bool) -> Result<()> {
     // Get sources to watch
     let response = client.list_sources().await?;
     let sources = &response.sources;
 
     let sources_to_watch: Vec<(i64, String, PathBuf)> = if let Some(name) = source_name {
         // Watch specific source
-        let source = sources.iter()
+        let source = sources
+            .iter()
             .find(|s| s.name == name)
             .ok_or_else(|| anyhow::anyhow!("Source not found: {}", name))?;
 
-        vec![(
-            source.id,
-            source.name.clone(),
-            PathBuf::from(&source.path),
-        )]
+        vec![(source.id, source.name.clone(), PathBuf::from(&source.path))]
     } else {
         // Watch all fs sources
-        sources.iter()
+        sources
+            .iter()
             .filter(|s| s.source_type == "fs")
             .filter_map(|s| {
                 let path = PathBuf::from(&s.path);
@@ -103,7 +121,10 @@ pub async fn watch(
         return Ok(());
     }
 
-    println!("{}", format!("Watching {} sources:", sources_to_watch.len()).cyan());
+    println!(
+        "{}",
+        format!("Watching {} sources:", sources_to_watch.len()).cyan()
+    );
     for (_, name, path) in &sources_to_watch {
         println!("  {} {}", format!("[{}]", name).cyan(), path.display());
     }
@@ -144,7 +165,12 @@ pub async fn watch(
 
     println!(
         "{}",
-        format!("Successfully watching {}/{} sources", watched_count, sources_to_watch.len()).green()
+        format!(
+            "Successfully watching {}/{} sources",
+            watched_count,
+            sources_to_watch.len()
+        )
+        .green()
     );
 
     // State for enterprise features
@@ -175,7 +201,8 @@ pub async fn watch(
                     }
 
                     // Find source for this path
-                    let source = sources_to_watch.iter()
+                    let source = sources_to_watch
+                        .iter()
                         .find(|(_, _, p)| path.starts_with(p));
 
                     if let Some((_id, name, _base_path)) = source {
@@ -206,10 +233,7 @@ pub async fn watch(
                         }
 
                         // Add to pending
-                        pending
-                            .entry(name.clone())
-                            .or_default()
-                            .push(path.clone());
+                        pending.entry(name.clone()).or_default().push(path.clone());
                         last_event_time = now;
                     }
                 }
@@ -246,7 +270,8 @@ pub async fn watch(
                 }
 
                 // Find base path for relative display
-                let base_path = sources_to_watch.iter()
+                let base_path = sources_to_watch
+                    .iter()
                     .find(|(_, name, _)| name == &source_name)
                     .map(|(_, _, p)| p.clone())
                     .unwrap_or_default();
@@ -270,7 +295,7 @@ pub async fn watch(
                             "✓".green(),
                             result.stats.files_processed,
                             result.stats.files_processed, // Updated
-                            0i64, // Skipped not in response
+                            0i64,                         // Skipped not in response
                             result.stats.chunks_created,
                             result.stats.embeddings_generated
                         );

@@ -1,17 +1,17 @@
+use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
-use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::error::{AppError, Result};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
-    pub sub: String,      // User ID (UUID)
+    pub sub: String, // User ID (UUID)
     pub email: String,
     pub is_admin: bool,
-    pub exp: i64,         // Expiration time
-    pub iat: i64,         // Issued at
+    pub exp: i64, // Expiration time
+    pub iat: i64, // Issued at
     /// JWT ID for token revocation (Sprint 2.8)
     #[serde(default = "default_jti")]
     pub jti: String,
@@ -41,7 +41,11 @@ impl Claims {
             iat: now.timestamp(),
             exp: (now + Duration::hours(expiry_hours as i64)).timestamp(),
             jti: Uuid::new_v4().to_string(),
-            role: if is_admin { "admin".to_string() } else { "user".to_string() },
+            role: if is_admin {
+                "admin".to_string()
+            } else {
+                "user".to_string()
+            },
             agent_name: None,
         }
     }

@@ -1,15 +1,18 @@
+use async_stream::stream;
 use axum::{
     extract::State,
     http::StatusCode,
-    response::{sse::{Event, Sse}, IntoResponse},
+    response::{
+        sse::{Event, Sse},
+        IntoResponse,
+    },
     Json,
 };
 use serde::Serialize;
-use sysinfo::{System, Pid};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use sysinfo::{Pid, System};
 use tokio::time::{sleep, Duration};
-use async_stream::stream;
 
 use crate::{error::Result, AppState};
 
@@ -49,10 +52,10 @@ impl Drop for SseGuard {
 pub struct ProcessStats {
     pub name: String,
     pub pid: u32,
-    pub cpu_percent: f64,      // CPU percentage (0-100+)
-    pub memory_mb: u64,        // Memory in MB
-    pub uptime_sec: u64,       // Seconds since system boot
-    pub status: String,        // "Running", "Stopped", etc
+    pub cpu_percent: f64, // CPU percentage (0-100+)
+    pub memory_mb: u64,   // Memory in MB
+    pub uptime_sec: u64,  // Seconds since system boot
+    pub status: String,   // "Running", "Stopped", etc
 }
 
 #[derive(Debug, Serialize)]
@@ -207,7 +210,7 @@ pub async fn get_all_processes() -> Vec<ProcessStats> {
                     name: name.to_string(),
                     pid: *pid,
                     cpu_percent: process.cpu_usage() as f64,
-                    memory_mb: process.memory() / 1024 / 1024,  // sysinfo returns Bytes, convert to MB
+                    memory_mb: process.memory() / 1024 / 1024, // sysinfo returns Bytes, convert to MB
                     uptime_sec: uptime,
                     status: format!("{:?}", process.status()).replace("Running", "Running"),
                 });
@@ -253,14 +256,15 @@ pub async fn admin_process_stats(
     }))
 }
 
-pub async fn admin_process_stats_stream(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn admin_process_stats_stream(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Sprint 4.7: RAII concurrency guard — max 5 concurrent SSE streams
     let guard = match SseGuard::try_acquire(state.sse_active_streams.clone()) {
         Some(g) => g,
         None => {
-            tracing::warn!("SSE stream rejected: max {} concurrent streams reached", MAX_SSE_STREAMS);
+            tracing::warn!(
+                "SSE stream rejected: max {} concurrent streams reached",
+                MAX_SSE_STREAMS
+            );
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
     };

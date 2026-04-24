@@ -1,5 +1,5 @@
-use axum::{extract::State, Extension, Json};
 use axum::http::{HeaderMap, HeaderValue};
+use axum::{extract::State, Extension, Json};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
@@ -8,8 +8,8 @@ use uuid::Uuid;
 use crate::api::JsonBody;
 use crate::db::models::SearchResult;
 use crate::error::{AppError, Result};
-use crate::services::{QualityTier, ContextualCompressor, CompressorConfig};
 use crate::services::search::TenantContext;
+use crate::services::{CompressorConfig, ContextualCompressor, QualityTier};
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -100,8 +100,16 @@ pub async fn hybrid_search(
     // Execute hybrid search with optional reranking based on tier
     // K2: Pass agent/user ID for tenant-scoped cache keys
     // K4: Pass tenant context for Qdrant data isolation
-    let search_results = state.search
-        .hybrid_search(query, req.source_id, limit, should_rerank, Some(&claims.sub), &tenant)
+    let search_results = state
+        .search
+        .hybrid_search(
+            query,
+            req.source_id,
+            limit,
+            should_rerank,
+            Some(&claims.sub),
+            &tenant,
+        )
         .await?;
 
     // Apply contextual compression if requested
@@ -114,7 +122,8 @@ pub async fn hybrid_search(
     };
 
     // Optimize results for LLM consumption (with query for snippet fallback)
-    let results: Vec<_> = results.into_iter()
+    let results: Vec<_> = results
+        .into_iter()
         .map(|r| r.optimize_for_llm_with_query(query))
         .collect();
 
@@ -127,17 +136,20 @@ pub async fn hybrid_search(
         HeaderValue::from_static(search_mode.header_value()),
     );
 
-    Ok((headers, Json(SearchResponse {
-        llm_context: SearchResponse::generate_llm_context(search_results.total, results.len()),
-        results,
-        total: search_results.total,
-        took_ms,
-        quality_tier: Some(tier.as_str().to_string()),
-        reranked: Some(should_rerank),
-        compression_ratio,
-        expanded_query: search_results.expanded_query,
-        expansion_terms: search_results.expansion_terms,
-    })))
+    Ok((
+        headers,
+        Json(SearchResponse {
+            llm_context: SearchResponse::generate_llm_context(search_results.total, results.len()),
+            results,
+            total: search_results.total,
+            took_ms,
+            quality_tier: Some(tier.as_str().to_string()),
+            reranked: Some(should_rerank),
+            compression_ratio,
+            expanded_query: search_results.expanded_query,
+            expansion_terms: search_results.expansion_terms,
+        }),
+    ))
 }
 
 pub async fn keyword_search(
@@ -170,7 +182,8 @@ pub async fn keyword_search(
 
     // Keyword search always uses fast tier (no reranking)
     // FIX-1/FIX-2: Pass tenant context and use trimmed query
-    let search_results = state.search
+    let search_results = state
+        .search
         .keyword_search(query, req.source_id, limit, &tenant)
         .await?;
 
@@ -184,7 +197,8 @@ pub async fn keyword_search(
     };
 
     // Optimize results for LLM consumption (with query for snippet fallback)
-    let results: Vec<_> = results.into_iter()
+    let results: Vec<_> = results
+        .into_iter()
         .map(|r| r.optimize_for_llm_with_query(query))
         .collect();
 
@@ -197,15 +211,18 @@ pub async fn keyword_search(
         HeaderValue::from_static(search_mode.header_value()),
     );
 
-    Ok((headers, Json(SearchResponse {
-        llm_context: SearchResponse::generate_llm_context(search_results.total, results.len()),
-        results,
-        total: search_results.total,
-        took_ms,
-        quality_tier: Some("fast".to_string()),
-        reranked: None, // Keyword search doesn't use reranking
-        compression_ratio,
-        expanded_query: None,
-        expansion_terms: vec![],
-    })))
+    Ok((
+        headers,
+        Json(SearchResponse {
+            llm_context: SearchResponse::generate_llm_context(search_results.total, results.len()),
+            results,
+            total: search_results.total,
+            took_ms,
+            quality_tier: Some("fast".to_string()),
+            reranked: None, // Keyword search doesn't use reranking
+            compression_ratio,
+            expanded_query: None,
+            expansion_terms: vec![],
+        }),
+    ))
 }

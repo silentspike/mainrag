@@ -4,18 +4,18 @@
 //! Implements Hybrid architecture: PostgreSQL for metadata/FTS, Qdrant for vector search.
 //! Includes Code Intelligence integration for symbol extraction and call graph analysis.
 
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
-use sha2::{Sha256, Digest};
 use tokio::fs;
-use tracing::{debug, info, warn, error};
+use tracing::{debug, error, info, warn};
 
 use crate::db::{PostgresPool, DEFAULT_USER_ID};
 use crate::error::{AppError, Result};
-use crate::services::{TeiClient, QdrantClient};
-use crate::services::intelligence::IntelligenceService;
 use crate::plugins::{self, RawFile};
-use crate::services::chunker::{Chunker, get_default_chunker};
+use crate::services::chunker::{get_default_chunker, Chunker};
+use crate::services::intelligence::IntelligenceService;
+use crate::services::{QdrantClient, TeiClient};
 use pgvector::Vector;
 
 /// Batch size for embedding generation (Sprint 8.2: configurable via EMBEDDING_BATCH_SIZE env)
@@ -45,20 +45,17 @@ fn per_file_timeout_secs() -> u64 {
 
 /// Sprint 8.3: Chunker version for incremental indexing
 fn chunker_version() -> String {
-    std::env::var("CHUNKER_VERSION")
-        .unwrap_or_else(|_| "semantic-v1".to_string())
+    std::env::var("CHUNKER_VERSION").unwrap_or_else(|_| "semantic-v1".to_string())
 }
 
 /// Sprint 8.3: Embedding model ID for versioned chunk tracking
 fn embedding_model_id() -> String {
-    std::env::var("EMBEDDING_MODEL_ID")
-        .unwrap_or_else(|_| "BAAI/bge-base-en-v1.5".to_string())
+    std::env::var("EMBEDDING_MODEL_ID").unwrap_or_else(|_| "BAAI/bge-base-en-v1.5".to_string())
 }
 
 /// Sprint 8.3: Tokenizer version for versioned chunk tracking
 fn tokenizer_version() -> String {
-    std::env::var("TOKENIZER_VERSION")
-        .unwrap_or_else(|_| "tiktoken-cl100k".to_string())
+    std::env::var("TOKENIZER_VERSION").unwrap_or_else(|_| "tiktoken-cl100k".to_string())
 }
 
 /// Sprint 8.3: Compute hex-encoded SHA256 hash of chunk content
@@ -99,14 +96,11 @@ fn build_cch(source_name: &str, file_path: &str, parent_context: Option<&str>) -
 /// File extensions to index
 #[allow(dead_code)]
 const INDEXABLE_EXTENSIONS: &[&str] = &[
-    "rs", "py", "pyi", "pyw", "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts",
-    "go", "java", "c", "cpp", "cc", "cxx", "h", "hpp", "hh", "hxx",
-    "md", "markdown", "txt", "json", "jsonl", "jsonc", "yaml", "yml", "toml",
-    "sql", "sh", "bash", "zsh",
-    "html", "htm", "css", "scss", "sass", "vue", "svelte",
-    "cs", "zig", "lua", "rb", "rake", "gemspec",
-    "php", "phtml", "xml", "xsl", "xslt", "svg",
-    "scm", "ss", "rkt",
+    "rs", "py", "pyi", "pyw", "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts", "go", "java",
+    "c", "cpp", "cc", "cxx", "h", "hpp", "hh", "hxx", "md", "markdown", "txt", "json", "jsonl",
+    "jsonc", "yaml", "yml", "toml", "sql", "sh", "bash", "zsh", "html", "htm", "css", "scss",
+    "sass", "vue", "svelte", "cs", "zig", "lua", "rb", "rake", "gemspec", "php", "phtml", "xml",
+    "xsl", "xslt", "svg", "scm", "ss", "rkt",
 ];
 
 pub struct IndexService {
@@ -141,11 +135,16 @@ impl IndexService {
     /// M1: Returns Result instead of panicking on IntelligenceService init failure
     pub fn new(db: PostgresPool, tei: Arc<TeiClient>, qdrant: Arc<QdrantClient>) -> Result<Self> {
         let chunker = get_default_chunker();
-        let intelligence = Arc::new(
-            IntelligenceService::new(db.clone())
-                .map_err(|e| AppError::Internal(format!("Failed to create IntelligenceService: {}", e)))?
-        );
-        Ok(Self { db, tei, qdrant, chunker, intelligence })
+        let intelligence = Arc::new(IntelligenceService::new(db.clone()).map_err(|e| {
+            AppError::Internal(format!("Failed to create IntelligenceService: {}", e))
+        })?);
+        Ok(Self {
+            db,
+            tei,
+            qdrant,
+            chunker,
+            intelligence,
+        })
     }
 
     /// Index a source by ID
@@ -154,14 +153,17 @@ impl IndexService {
         // which only lasts for a single statement without an explicit transaction.
         // IndexService runs as system admin for all indexing operations.
         let mut client = self.db.get().await?;
-        client.execute(
-            "SELECT set_config('app.user_id', $1::text, false)",
-            &[&DEFAULT_USER_ID.to_string()],
-        ).await.map_err(|e| AppError::Internal(format!("Failed to set RLS context: {}", e)))?;
-        client.execute(
-            "SELECT set_config('app.is_admin', 'true', false)",
-            &[],
-        ).await.map_err(|e| AppError::Internal(format!("Failed to set RLS is_admin: {}", e)))?;
+        client
+            .execute(
+                "SELECT set_config('app.user_id', $1::text, false)",
+                &[&DEFAULT_USER_ID.to_string()],
+            )
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to set RLS context: {}", e)))?;
+        client
+            .execute("SELECT set_config('app.is_admin', 'true', false)", &[])
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to set RLS is_admin: {}", e)))?;
 
         // Get source info
         let source = client
@@ -176,7 +178,10 @@ impl IndexService {
         let source_type: String = source.get("type");
         let source_path: String = source.get("path");
 
-        info!("Starting index for source {} ({}) at {}", source_name, source_type, source_path);
+        info!(
+            "Starting index for source {} ({}) at {}",
+            source_name, source_type, source_path
+        );
 
         let mut stats = IndexStats {
             files_processed: 0,
@@ -204,10 +209,16 @@ impl IndexService {
         let plugin = plugins::get_plugin(&source_type)
             .ok_or_else(|| AppError::BadRequest(format!("Unknown source type: {}", source_type)))?;
 
-        let sync_result = plugin.sync(&source_path).await
+        let sync_result = plugin
+            .sync(&source_path)
+            .await
             .map_err(|e| AppError::Internal(format!("Plugin sync error: {}", e)))?;
 
-        info!("Plugin discovery found {} files for source {}", sync_result.files.len(), source_name);
+        info!(
+            "Plugin discovery found {} files for source {}",
+            sync_result.files.len(),
+            source_name
+        );
 
         // Add plugin errors to stats
         stats.errors.extend(sync_result.errors);
@@ -236,7 +247,12 @@ impl IndexService {
 
             // Per-file timeout: prevents a single large file from blocking the entire sync
             let file_path = raw_file.path.clone();
-            match tokio::time::timeout(file_timeout, self.process_raw_file(source_id, &source_name, raw_file)).await {
+            match tokio::time::timeout(
+                file_timeout,
+                self.process_raw_file(source_id, &source_name, raw_file),
+            )
+            .await
+            {
                 Ok(Ok(ProcessResult::Processed { chunks, embeddings })) => {
                     stats.files_processed += 1;
                     stats.chunks_created += chunks;
@@ -253,7 +269,8 @@ impl IndexService {
                 Err(_) => {
                     let err_msg = format!(
                         "File processing timed out after {}s: {} (skipping)",
-                        file_timeout.as_secs(), file_path
+                        file_timeout.as_secs(),
+                        file_path
                     );
                     warn!("{}", err_msg);
                     stats.errors.push(err_msg);
@@ -305,8 +322,12 @@ impl IndexService {
                 tx.commit().await?;
 
                 if deleted > 0 {
-                    info!("Deleted orphan file: {} (id: {}, {} chunks queued for Qdrant delete)",
-                          path, file_id, chunk_rows.len());
+                    info!(
+                        "Deleted orphan file: {} (id: {}, {} chunks queued for Qdrant delete)",
+                        path,
+                        file_id,
+                        chunk_rows.len()
+                    );
                     stats.files_deleted += 1;
                     // NOTE: Direct qdrant.delete_chunks() removed - Worker handles this via outbox
                 }
@@ -330,7 +351,11 @@ impl IndexService {
 
         info!(
             "Index complete: {} files, {} chunks, {} embeddings, {} deleted, {} errors",
-            stats.files_processed, stats.chunks_created, stats.embeddings_generated, stats.files_deleted, stats.errors.len()
+            stats.files_processed,
+            stats.chunks_created,
+            stats.embeddings_generated,
+            stats.files_deleted,
+            stats.errors.len()
         );
 
         // Sprint 8.4: Qdrant Consistency Tracking — write sync_ledger entry
@@ -353,7 +378,10 @@ impl IndexService {
             }
             Err(e) => {
                 // Non-fatal: ledger is observability, not critical path
-                warn!("Sprint 8.4: Failed to record sync ledger for source {}: {}", source_id, e);
+                warn!(
+                    "Sprint 8.4: Failed to record sync ledger for source {}: {}",
+                    source_id, e
+                );
             }
         }
 
@@ -367,17 +395,24 @@ impl IndexService {
     /// - Does NOT detect deletions (call with empty file list to skip)
     /// - Uses existing hash-based skip logic
     /// - Supports JSONL append-only optimization
-    pub async fn sync_files(&self, source_id: i64, files: &[std::path::PathBuf]) -> Result<IndexStats> {
+    pub async fn sync_files(
+        &self,
+        source_id: i64,
+        files: &[std::path::PathBuf],
+    ) -> Result<IndexStats> {
         // HOTFIX: Session-scoped RLS context for system indexing operations
         let client = self.db.get().await?;
-        client.execute(
-            "SELECT set_config('app.user_id', $1::text, false)",
-            &[&DEFAULT_USER_ID.to_string()],
-        ).await.map_err(|e| AppError::Internal(format!("Failed to set RLS context: {}", e)))?;
-        client.execute(
-            "SELECT set_config('app.is_admin', 'true', false)",
-            &[],
-        ).await.map_err(|e| AppError::Internal(format!("Failed to set RLS is_admin: {}", e)))?;
+        client
+            .execute(
+                "SELECT set_config('app.user_id', $1::text, false)",
+                &[&DEFAULT_USER_ID.to_string()],
+            )
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to set RLS context: {}", e)))?;
+        client
+            .execute("SELECT set_config('app.is_admin', 'true', false)", &[])
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to set RLS is_admin: {}", e)))?;
 
         // Get source info
         let source = client
@@ -470,7 +505,10 @@ impl IndexService {
                 source_path: None,
             };
 
-            match self.process_raw_file(source_id, &source_name, raw_file).await {
+            match self
+                .process_raw_file(source_id, &source_name, raw_file)
+                .await
+            {
                 Ok(ProcessResult::Processed { chunks, embeddings }) => {
                     stats.files_processed += 1;
                     stats.chunks_created += chunks;
@@ -525,7 +563,8 @@ impl IndexService {
             let file_type = entry.file_type().await?;
 
             // Skip hidden files/dirs
-            if path.file_name()
+            if path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .map(|n| n.starts_with('.'))
                 .unwrap_or(false)
@@ -534,11 +573,17 @@ impl IndexService {
             }
 
             // Skip common non-source directories
-            let skip_dirs = ["node_modules", "target", "dist", "build", ".git", "__pycache__", "venv"];
+            let skip_dirs = [
+                "node_modules",
+                "target",
+                "dist",
+                "build",
+                ".git",
+                "__pycache__",
+                "venv",
+            ];
             if file_type.is_dir() {
-                let dir_name = path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
+                let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if skip_dirs.contains(&dir_name) {
                     continue;
                 }
@@ -557,11 +602,18 @@ impl IndexService {
     }
 
     /// Process a RawFile from a plugin: chunk, embed, store
-    async fn process_raw_file(&self, source_id: i64, source_name: &str, raw_file: RawFile) -> Result<ProcessResult> {
+    async fn process_raw_file(
+        &self,
+        source_id: i64,
+        source_name: &str,
+        raw_file: RawFile,
+    ) -> Result<ProcessResult> {
         // STREAMING PATH: Large conversation files have empty content + source_path set.
         // Read them in a memory-bounded streaming fashion instead of loading entirely.
         if raw_file.content.is_empty() && raw_file.source_path.is_some() {
-            return self.process_large_conversation_file(source_id, source_name, raw_file).await;
+            return self
+                .process_large_conversation_file(source_id, source_name, raw_file)
+                .await;
         }
 
         let content = &raw_file.content;
@@ -572,8 +624,10 @@ impl IndexService {
 
         // Safe string truncation for preview (respects UTF-8 char boundaries)
         let preview: String = content.chars().take(50).collect();
-        info!("Processing file: path={}, size={}, language={:?}, content_preview={:?}",
-              raw_file.path, raw_file.size, raw_file.language, preview);
+        info!(
+            "Processing file: path={}, size={}, language={:?}, content_preview={:?}",
+            raw_file.path, raw_file.size, raw_file.language, preview
+        );
 
         // Compute hash
         let mut hasher = Sha256::new();
@@ -590,14 +644,17 @@ impl IndexService {
         info!("Getting DB client...");
         // HOTFIX: Session-scoped RLS context for system indexing operations
         let mut client = self.db.get().await?;
-        client.execute(
-            "SELECT set_config('app.user_id', $1::text, false)",
-            &[&DEFAULT_USER_ID.to_string()],
-        ).await.map_err(|e| AppError::Internal(format!("Failed to set RLS context: {}", e)))?;
-        client.execute(
-            "SELECT set_config('app.is_admin', 'true', false)",
-            &[],
-        ).await.map_err(|e| AppError::Internal(format!("Failed to set RLS is_admin: {}", e)))?;
+        client
+            .execute(
+                "SELECT set_config('app.user_id', $1::text, false)",
+                &[&DEFAULT_USER_ID.to_string()],
+            )
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to set RLS context: {}", e)))?;
+        client
+            .execute("SELECT set_config('app.is_admin', 'true', false)", &[])
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to set RLS is_admin: {}", e)))?;
         info!("DB client obtained");
 
         // INCREMENTAL INDEXING: Check hash BEFORE any modifications!
@@ -611,16 +668,22 @@ impl IndexService {
         let mut old_size: i64 = 0;
         let mut existing_file_id: Option<i64> = None;
 
-        if let Some(existing_row) = client.query_opt(
-            "SELECT id, hash, size_original FROM files WHERE source_id = $1 AND path = $2",
-            &[&source_id, &rel_path]
-        ).await? {
+        if let Some(existing_row) = client
+            .query_opt(
+                "SELECT id, hash, size_original FROM files WHERE source_id = $1 AND path = $2",
+                &[&source_id, &rel_path],
+            )
+            .await?
+        {
             let existing_hash: Vec<u8> = existing_row.get("hash");
             let file_id: i64 = existing_row.get("id");
             existing_file_id = Some(file_id);
 
             if existing_hash == hash {
-                debug!("File {} unchanged (hash match), skipping re-index", rel_path);
+                debug!(
+                    "File {} unchanged (hash match), skipping re-index",
+                    rel_path
+                );
                 return Ok(ProcessResult::Skipped);
             }
 
@@ -631,10 +694,9 @@ impl IndexService {
 
                 if new_size > existing_size as i64 {
                     // M1: Use file_id directly (already extracted above)
-                    let old_content_row = client.query_opt(
-                        "SELECT content FROM files WHERE id = $1",
-                        &[&file_id]
-                    ).await?;
+                    let old_content_row = client
+                        .query_opt("SELECT content FROM files WHERE id = $1", &[&file_id])
+                        .await?;
 
                     if let Some(old_row) = old_content_row {
                         let old_compressed: Vec<u8> = old_row.get("content");
@@ -643,13 +705,17 @@ impl IndexService {
                                 // Verify old content is prefix of new content
                                 if content.starts_with(&old_str) {
                                     // Validate existing chunks (not incomplete sync)
-                                    let chunk_count: i64 = client.query_one(
-                                        "SELECT COUNT(*) FROM chunks WHERE file_id = $1",
-                                        &[&file_id]
-                                    ).await?.get(0);
+                                    let chunk_count: i64 = client
+                                        .query_one(
+                                            "SELECT COUNT(*) FROM chunks WHERE file_id = $1",
+                                            &[&file_id],
+                                        )
+                                        .await?
+                                        .get(0);
 
                                     // Expect at least 1 chunk per 10KB of old content
-                                    let expected_min_chunks = ((existing_size as i64) / 10_000).max(1);
+                                    let expected_min_chunks =
+                                        ((existing_size as i64) / 10_000).max(1);
 
                                     if chunk_count >= expected_min_chunks {
                                         is_append_only = true;
@@ -672,7 +738,10 @@ impl IndexService {
             }
 
             if !is_append_only {
-                debug!("File {} hash changed, proceeding with full re-index", rel_path);
+                debug!(
+                    "File {} hash changed, proceeding with full re-index",
+                    rel_path
+                );
             }
         }
 
@@ -683,8 +752,10 @@ impl IndexService {
         let is_large_file = content.len() > LARGE_FILE_THRESHOLD;
 
         let file_row = if is_large_file {
-            info!("Large file ({}MB > 5MB threshold): storing metadata only, skipping content in DB",
-                  content.len() / (1024 * 1024));
+            info!(
+                "Large file ({}MB > 5MB threshold): storing metadata only, skipping content in DB",
+                content.len() / (1024 * 1024)
+            );
             let empty_compressed: Vec<u8> = zstd::encode_all(&b""[..], 3)?;
             client
                 .query_one(
@@ -717,7 +788,11 @@ impl IndexService {
             // Normal files: compress and store content
             info!("Compressing content...");
             let compressed = zstd::encode_all(content.as_bytes(), 3)?;
-            info!("Compression done: {} -> {} bytes", content.len(), compressed.len());
+            info!(
+                "Compression done: {} -> {} bytes",
+                content.len(),
+                compressed.len()
+            );
 
             client
                 .query_one(
@@ -773,21 +848,22 @@ impl IndexService {
                 if !existing_version_rows.is_empty()
                     && existing_version_rows.len() == probe_chunks.len()
                 {
-                    let all_unchanged = probe_chunks
-                        .iter()
-                        .zip(existing_version_rows.iter())
-                        .all(|(nc, er)| {
-                            let new_hash = chunk_content_sha256(&nc.text);
-                            let eh: Option<String> = er.get("chunk_content_hash");
-                            let ecv: Option<String> = er.get("chunker_version");
-                            let emid: Option<String> = er.get("embedding_model_id");
-                            let etv: Option<String> = er.get("tokenizer_version");
+                    let all_unchanged =
+                        probe_chunks
+                            .iter()
+                            .zip(existing_version_rows.iter())
+                            .all(|(nc, er)| {
+                                let new_hash = chunk_content_sha256(&nc.text);
+                                let eh: Option<String> = er.get("chunk_content_hash");
+                                let ecv: Option<String> = er.get("chunker_version");
+                                let emid: Option<String> = er.get("embedding_model_id");
+                                let etv: Option<String> = er.get("tokenizer_version");
 
-                            eh.as_deref() == Some(new_hash.as_str())
-                                && ecv.as_deref() == Some(cv.as_str())
-                                && emid.as_deref() == Some(mid.as_str())
-                                && etv.as_deref() == Some(tv.as_str())
-                        });
+                                eh.as_deref() == Some(new_hash.as_str())
+                                    && ecv.as_deref() == Some(cv.as_str())
+                                    && emid.as_deref() == Some(mid.as_str())
+                                    && etv.as_deref() == Some(tv.as_str())
+                            });
 
                     if all_unchanged {
                         info!(
@@ -803,8 +879,7 @@ impl IndexService {
                 if let Some(first) = existing_version_rows.first() {
                     let ecv: Option<String> = first.get("chunker_version");
                     let emid: Option<String> = first.get("embedding_model_id");
-                    if ecv.as_deref() != Some(cv.as_str())
-                        || emid.as_deref() != Some(mid.as_str())
+                    if ecv.as_deref() != Some(cv.as_str()) || emid.as_deref() != Some(mid.as_str())
                     {
                         warn!(
                             "Sprint 8.3: Version mismatch for {}: chunker {:?}->{}, model {:?}->{}, forcing full re-embed",
@@ -812,10 +887,12 @@ impl IndexService {
                         );
                         // Sprint 8.3: Track stale chunks by reason
                         if ecv.as_deref() != Some(cv.as_str()) {
-                            metrics::counter!("mainrag_chunks_stale", "reason" => "chunker").increment(1);
+                            metrics::counter!("mainrag_chunks_stale", "reason" => "chunker")
+                                .increment(1);
                         }
                         if emid.as_deref() != Some(mid.as_str()) {
-                            metrics::counter!("mainrag_chunks_stale", "reason" => "model").increment(1);
+                            metrics::counter!("mainrag_chunks_stale", "reason" => "model")
+                                .increment(1);
                         }
                     } else {
                         let unchanged_count = probe_chunks
@@ -846,43 +923,60 @@ impl IndexService {
         // JSONL APPEND-ONLY OPTIMIZATION: Skip chunk deletion for append-only files!
         // Existing chunks are valid; we only add new chunks for the delta.
         if !is_append_only {
-            info!("Deleting existing chunks for file_id={} with Qdrant cleanup...", file_id);
+            info!(
+                "Deleting existing chunks for file_id={} with Qdrant cleanup...",
+                file_id
+            );
 
             let tx = client.transaction().await.map_err(|e| {
-                AppError::Internal(format!("Failed to start transaction for chunk cleanup: {}", e))
+                AppError::Internal(format!(
+                    "Failed to start transaction for chunk cleanup: {}",
+                    e
+                ))
             })?;
 
             // 1. Set-based outbox delete entries (one statement, not loop!)
-            let outbox_count = tx.execute(
-                "INSERT INTO indexing_outbox (action, chunk_id, file_id, source_id, payload)
+            let outbox_count = tx
+                .execute(
+                    "INSERT INTO indexing_outbox (action, chunk_id, file_id, source_id, payload)
                  SELECT 'delete', c.id, c.file_id, f.source_id, '{}'::jsonb
                  FROM chunks c
                  JOIN files f ON f.id = c.file_id
                  WHERE c.file_id = $1",
-                &[&file_id]
-            ).await.map_err(|e| {
-                AppError::Internal(format!("Failed to create outbox delete entries: {}", e))
-            })?;
+                    &[&file_id],
+                )
+                .await
+                .map_err(|e| {
+                    AppError::Internal(format!("Failed to create outbox delete entries: {}", e))
+                })?;
 
             // 2. Now delete the chunks (outbox entries preserve chunk IDs for Qdrant)
-            let deleted_count = tx.execute(
-                "DELETE FROM chunks WHERE file_id = $1",
-                &[&file_id]
-            ).await.map_err(|e| {
-                AppError::Internal(format!("Failed to delete chunks: {}", e))
-            })?;
+            let deleted_count = tx
+                .execute("DELETE FROM chunks WHERE file_id = $1", &[&file_id])
+                .await
+                .map_err(|e| AppError::Internal(format!("Failed to delete chunks: {}", e)))?;
 
             tx.commit().await.map_err(|e| {
                 AppError::Internal(format!("Failed to commit chunk cleanup transaction: {}", e))
             })?;
 
-            info!("Deleted {} existing chunks for file_id={}, queued {} outbox delete entries",
-                  deleted_count, file_id, outbox_count);
+            info!(
+                "Deleted {} existing chunks for file_id={}, queued {} outbox delete entries",
+                deleted_count, file_id, outbox_count
+            );
         } else {
-            info!("JSONL append-only: Keeping {} existing chunks for file_id={}",
-                  client.query_one("SELECT COUNT(*) FROM chunks WHERE file_id = $1", &[&file_id])
-                        .await.map(|r| r.get::<_, i64>(0)).unwrap_or(0),
-                  file_id);
+            info!(
+                "JSONL append-only: Keeping {} existing chunks for file_id={}",
+                client
+                    .query_one(
+                        "SELECT COUNT(*) FROM chunks WHERE file_id = $1",
+                        &[&file_id]
+                    )
+                    .await
+                    .map(|r| r.get::<_, i64>(0))
+                    .unwrap_or(0),
+                file_id
+            );
         }
 
         // Create chunks using semantic chunker
@@ -912,11 +1006,15 @@ impl IndexService {
             let delta = &content[start..];
             if delta.is_empty() {
                 info!("JSONL append-only but no new content (delta=0), skipping chunk generation");
-                return Ok(ProcessResult::Processed { chunks: 0, embeddings: 0 });
+                return Ok(ProcessResult::Processed {
+                    chunks: 0,
+                    embeddings: 0,
+                });
             }
             info!(
                 "JSONL incremental: Chunking only delta ({} bytes of {} total)",
-                delta.len(), content.len()
+                delta.len(),
+                content.len()
             );
             delta
         } else {
@@ -928,7 +1026,11 @@ impl IndexService {
         // happens later in intelligence.analyze_file() for symbol/call-graph extraction.
         // Both are fast (~2-5ms each) thanks to per-language Mutex locking (B5 fix).
         // Future optimization: share the AST between chunking and intelligence extraction.
-        info!("Calling semantic chunker for file {} with {} bytes...", rel_path, content_to_chunk.len());
+        info!(
+            "Calling semantic chunker for file {} with {} bytes...",
+            rel_path,
+            content_to_chunk.len()
+        );
         let mut semantic_chunks = self.chunker.chunk(&content_to_chunk, language.as_deref());
 
         // Enterprise guard: MAX_CHUNKS_PER_FILE prevents any single file from
@@ -956,14 +1058,26 @@ impl IndexService {
             let avg = sum / token_counts.len();
             info!(
                 "Sprint 8.1: {} chunks for {}: avg={} min={} max={} tokens (language={:?})",
-                semantic_chunks.len(), rel_path, avg, min, max, language
+                semantic_chunks.len(),
+                rel_path,
+                avg,
+                min,
+                max,
+                language
             );
         }
 
         if semantic_chunks.is_empty() {
-            warn!("No chunks created for file: {} (content_size={})", rel_path, content.len());
+            warn!(
+                "No chunks created for file: {} (content_size={})",
+                rel_path,
+                content.len()
+            );
             // No chunks created - counts as processed but with 0 output
-            return Ok(ProcessResult::Processed { chunks: 0, embeddings: 0 });
+            return Ok(ProcessResult::Processed {
+                chunks: 0,
+                embeddings: 0,
+            });
         }
 
         let mut chunk_texts: Vec<String> = Vec::with_capacity(semantic_chunks.len());
@@ -981,7 +1095,9 @@ impl IndexService {
             let raw_end = (old_size as usize).min(content.len());
             let safe_end = if raw_end < content.len() && !content.is_char_boundary(raw_end) {
                 let mut e = raw_end;
-                while e > 0 && !content.is_char_boundary(e) { e -= 1; }
+                while e > 0 && !content.is_char_boundary(e) {
+                    e -= 1;
+                }
                 e
             } else {
                 raw_end
@@ -993,7 +1109,11 @@ impl IndexService {
 
         // Sprint 3.1: Batch-INSERT via UNNEST — ~290 DB-Roundtrips → 1
         // Pre-compute all column arrays (NO DB calls in this loop)
-        info!("Creating {} chunks for file (line_offset={})", semantic_chunks.len(), line_offset);
+        info!(
+            "Creating {} chunks for file (line_offset={})",
+            semantic_chunks.len(),
+            line_offset
+        );
         let mut b_chunk_types: Vec<String> = Vec::with_capacity(semantic_chunks.len());
         let mut b_content_hashes: Vec<Vec<u8>> = Vec::with_capacity(semantic_chunks.len());
         let mut b_content_compressed: Vec<Vec<u8>> = Vec::with_capacity(semantic_chunks.len());
@@ -1036,7 +1156,9 @@ impl IndexService {
             // CCH (Contextual Chunk Header)
             let parent_context: Option<String> = chunk.parent_idx.and_then(|pidx| {
                 semantic_chunks.get(pidx).map(|parent| {
-                    parent.text.lines()
+                    parent
+                        .text
+                        .lines()
                         .find(|l| !l.trim().is_empty())
                         .map(|l| l.chars().take(50).collect::<String>())
                         .unwrap_or_default()
@@ -1050,8 +1172,10 @@ impl IndexService {
             let current_model_id = embedding_model_id();
             let current_tokenizer_version = tokenizer_version();
 
-            debug!("Preparing chunk {}: file_id={}, type={}, start={}, end={}",
-                  idx, file_id, chunk_type, start_line, end_line);
+            debug!(
+                "Preparing chunk {}: file_id={}, type={}, start={}, end={}",
+                idx, file_id, chunk_type, start_line, end_line
+            );
 
             b_chunk_types.push(chunk_type.to_string());
             b_content_hashes.push(chunk_hash.clone());
@@ -1064,11 +1188,12 @@ impl IndexService {
             // Prepend context_prefix to chunk text so the embedding encodes file path,
             // source name, and parent scope. Query embeddings do NOT get CCH — the
             // asymmetry is intentional: documents get context, queries stay natural.
-            let embedding_text = if std::env::var("EMBEDDING_WITH_CCH").unwrap_or_default() != "false" {
-                format!("{}\n\n{}", &context_prefix, chunk_text)
-            } else {
-                chunk_text.clone()
-            };
+            let embedding_text =
+                if std::env::var("EMBEDDING_WITH_CCH").unwrap_or_default() != "false" {
+                    format!("{}\n\n{}", &context_prefix, chunk_text)
+                } else {
+                    chunk_text.clone()
+                };
 
             b_context_prefixes.push(context_prefix);
             b_content_hash_hexes.push(chunk_content_hash_hex);
@@ -1082,8 +1207,9 @@ impl IndexService {
         }
 
         // Single batch INSERT with UNNEST: all chunks in 1 DB roundtrip
-        let rows = client.query(
-            "INSERT INTO chunks (
+        let rows = client
+            .query(
+                "INSERT INTO chunks (
                 file_id, chunk_type, content_hash, content_compressed, content_text,
                 start_line, end_line, level, context_prefix,
                 chunk_content_hash, chunker_version, embedding_model_id, tokenizer_version
@@ -1102,29 +1228,39 @@ impl IndexService {
                 unnest($12::text[]),
                 unnest($13::text[])
             RETURNING id",
-            &[
-                &file_id,
-                &b_chunk_types,
-                &b_content_hashes,
-                &b_content_compressed,
-                &b_content_texts,
-                &b_start_lines,
-                &b_end_lines,
-                &b_levels,
-                &b_context_prefixes,
-                &b_content_hash_hexes,
-                &b_chunker_versions,
-                &b_model_ids,
-                &b_tokenizer_versions,
-            ],
-        ).await.map_err(|e| {
-            error!("Failed to batch-insert {} chunks: {}", semantic_chunks.len(), e);
-            AppError::Internal(format!("Chunk batch insert failed: {}", e))
-        })?;
+                &[
+                    &file_id,
+                    &b_chunk_types,
+                    &b_content_hashes,
+                    &b_content_compressed,
+                    &b_content_texts,
+                    &b_start_lines,
+                    &b_end_lines,
+                    &b_levels,
+                    &b_context_prefixes,
+                    &b_content_hash_hexes,
+                    &b_chunker_versions,
+                    &b_model_ids,
+                    &b_tokenizer_versions,
+                ],
+            )
+            .await
+            .map_err(|e| {
+                error!(
+                    "Failed to batch-insert {} chunks: {}",
+                    semantic_chunks.len(),
+                    e
+                );
+                AppError::Internal(format!("Chunk batch insert failed: {}", e))
+            })?;
 
         let chunk_ids: Vec<i64> = rows.iter().map(|row| row.get::<_, i64>("id")).collect();
-        info!("Batch-inserted {} chunks for file_id={} (1 DB roundtrip instead of {})",
-              chunk_ids.len(), file_id, semantic_chunks.len());
+        info!(
+            "Batch-inserted {} chunks for file_id={} (1 DB roundtrip instead of {})",
+            chunk_ids.len(),
+            file_id,
+            semantic_chunks.len()
+        );
 
         // Sprint 3.5: Batch UPDATE for parent_chunk_id via UNNEST instead of per-chunk loop
         {
@@ -1146,7 +1282,10 @@ impl IndexService {
                     error!("Failed to batch-set parent_chunk_ids: {}", e);
                     AppError::Internal(format!("Batch parent update failed: {}", e))
                 })?;
-                debug!("Set parent_chunk_id for {} chunks in batch", update_chunk_ids.len());
+                debug!(
+                    "Set parent_chunk_id for {} chunks in batch",
+                    update_chunk_ids.len()
+                );
             }
         }
 
@@ -1170,13 +1309,15 @@ impl IndexService {
 
         // BATCH QUERY: One query for ALL content_hashes instead of N queries
         // Returns distinct content_hash -> vector mappings for this model
-        let batch_existing = client.query(
-            "SELECT DISTINCT ON (c.content_hash) c.content_hash, ce.vector
+        let batch_existing = client
+            .query(
+                "SELECT DISTINCT ON (c.content_hash) c.content_hash, ce.vector
              FROM chunk_embeddings ce
              JOIN chunks c ON c.id = ce.chunk_id
              WHERE c.content_hash = ANY($1) AND ce.model = $2",
-            &[&chunk_hashes, &model_name]
-        ).await?;
+                &[&chunk_hashes, &model_name],
+            )
+            .await?;
 
         // Build hashmap: content_hash -> embedding vector
         let existing_map: std::collections::HashMap<Vec<u8>, Vector> = batch_existing
@@ -1218,7 +1359,8 @@ impl IndexService {
                 let batch_end = (batch_start + batch_size).min(need_embedding_indices.len());
                 let batch_indices = &need_embedding_indices[batch_start..batch_end];
 
-                let batch_texts: Vec<&str> = batch_indices.iter()
+                let batch_texts: Vec<&str> = batch_indices
+                    .iter()
                     .map(|&idx| chunk_texts[idx].as_str())
                     .collect();
 
@@ -1272,7 +1414,9 @@ impl IndexService {
                      ON CONFLICT (chunk_id) DO UPDATE SET
                      vector = EXCLUDED.vector, model = EXCLUDED.model, created_at = NOW()",
                     &[&b_chunk_ids, &b_models, &b_vectors],
-                ).await.map_err(|e| {
+                )
+                .await
+                .map_err(|e| {
                     AppError::Internal(format!("Failed to batch-insert embeddings: {}", e))
                 })?;
 
@@ -1281,7 +1425,9 @@ impl IndexService {
                     "INSERT INTO indexing_outbox (action, chunk_id, file_id, source_id, payload)
                      SELECT 'upsert', unnest($1::bigint[]), $2, $3, '{}'::jsonb",
                     &[&b_chunk_ids, &file_id, &source_id],
-                ).await.map_err(|e| {
+                )
+                .await
+                .map_err(|e| {
                     AppError::Internal(format!("Failed to batch-insert outbox entries: {}", e))
                 })?;
 
@@ -1296,7 +1442,10 @@ impl IndexService {
         // NOTE: Direct Qdrant upsert removed - Worker processes outbox entries asynchronously
         // This provides transactional guarantees: PostgreSQL commit = Qdrant sync will happen
         if embeddings_count > 0 {
-            info!("Queued {} embeddings to outbox for Qdrant sync", embeddings_count);
+            info!(
+                "Queued {} embeddings to outbox for Qdrant sync",
+                embeddings_count
+            );
         }
 
         // Code Intelligence: Extract symbols and call graph for supported languages
@@ -1306,50 +1455,29 @@ impl IndexService {
             // Matches parser.rs Lang::from_extension() - full CodeRag parity
             let code_extensions = [
                 // Rust
-                "rs",
-                // Python (including Windows .pyw)
-                "py", "pyi", "pyw",
-                // JavaScript (including JSX for React)
-                "js", "jsx", "mjs", "cjs",
-                // TypeScript (including module variants)
-                "ts", "tsx", "mts", "cts",
-                // Go
-                "go",
-                // C
-                "c",
-                // C++ (including all common extensions and headers)
+                "rs", // Python (including Windows .pyw)
+                "py", "pyi", "pyw", // JavaScript (including JSX for React)
+                "js", "jsx", "mjs", "cjs", // TypeScript (including module variants)
+                "ts", "tsx", "mts", "cts", // Go
+                "go",  // C
+                "c",   // C++ (including all common extensions and headers)
                 "cpp", "cc", "cxx", "c++", "cp", "h", "hpp", "hh", "hxx", "h++",
                 // Java
-                "java",
-                // JSON (including JSONL and JSONC)
-                "json", "jsonl", "jsonc",
-                // TOML
-                "toml",
-                // YAML
-                "yaml", "yml",
-                // Shell (including zsh)
-                "sh", "bash", "zsh",
-                // Markdown
-                "md", "markdown",
-                // C# (Feature Parity A.6)
-                "cs",
-                // Zig
-                "zig",
-                // Lua
-                "lua",
-                // Ruby
-                "rb", "rake", "gemspec",
-                // PHP
-                "php", "phtml",
-                // HTML
-                "html", "htm",
-                // CSS (including preprocessors)
-                "css", "scss", "sass",
-                // XML (including XSLT, SVG)
-                "xml", "xsl", "xslt", "svg",
-                // Scheme/Racket
-                "scm", "ss", "rkt",
-                // SQL
+                "java", // JSON (including JSONL and JSONC)
+                "json", "jsonl", "jsonc", // TOML
+                "toml",  // YAML
+                "yaml", "yml", // Shell (including zsh)
+                "sh", "bash", "zsh", // Markdown
+                "md", "markdown", // C# (Feature Parity A.6)
+                "cs",       // Zig
+                "zig",      // Lua
+                "lua",      // Ruby
+                "rb", "rake", "gemspec", // PHP
+                "php", "phtml", // HTML
+                "html", "htm", // CSS (including preprocessors)
+                "css", "scss", "sass", // XML (including XSLT, SVG)
+                "xml", "xsl", "xslt", "svg", // Scheme/Racket
+                "scm", "ss", "rkt", // SQL
                 "sql",
             ];
             if code_extensions.contains(&ext.to_lowercase().as_str()) {
@@ -1370,7 +1498,10 @@ impl IndexService {
             }
         }
 
-        Ok(ProcessResult::Processed { chunks: chunk_ids.len(), embeddings: embeddings_count })
+        Ok(ProcessResult::Processed {
+            chunks: chunk_ids.len(),
+            embeddings: embeddings_count,
+        })
     }
 
     /// Sprint 8.4: Record sync ledger entry comparing PG chunk count vs Qdrant point count.
@@ -1393,11 +1524,7 @@ impl IndexService {
         let pg_count: i64 = pg_row.get(0);
 
         // Count points in Qdrant for this source
-        let qdrant_count = self
-            .qdrant
-            .count_by_source(source_id)
-            .await
-            .unwrap_or(0) as i64;
+        let qdrant_count = self.qdrant.count_by_source(source_id).await.unwrap_or(0) as i64;
 
         let drift = (pg_count - qdrant_count).abs();
         let status = if drift == 0 { "ok" } else { "drift" };
@@ -1405,7 +1532,9 @@ impl IndexService {
         let details = if drift > 0 {
             Some(format!(
                 "PG has {} chunks, Qdrant has {} points (delta={})",
-                pg_count, qdrant_count, pg_count - qdrant_count
+                pg_count,
+                qdrant_count,
+                pg_count - qdrant_count
             ))
         } else {
             None
@@ -1433,6 +1562,7 @@ impl IndexService {
     /// Reads the file in bounded chunks (for JSONL: line-by-line, for JSON: message-by-message),
     /// computes hash incrementally, and processes chunks in batches.
     /// Peak memory: O(batch_size * chunk_size) instead of O(file_size).
+    #[allow(unused_assignments)] // `global_line` tracked for resume/offset support
     async fn process_large_conversation_file(
         &self,
         source_id: i64,
@@ -1440,24 +1570,32 @@ impl IndexService {
         raw_file: RawFile,
     ) -> Result<ProcessResult> {
         use std::io::{BufRead, BufReader};
-        use crate::services::chunker::ChunkType;
 
-        let disk_path = raw_file.source_path.as_ref()
+        let disk_path = raw_file
+            .source_path
+            .as_ref()
             .ok_or_else(|| AppError::Internal("Large file without source_path".into()))?;
 
-        info!("STREAMING large conversation file: {} ({}MB)",
-              raw_file.path, raw_file.size / (1024 * 1024));
+        info!(
+            "STREAMING large conversation file: {} ({}MB)",
+            raw_file.path,
+            raw_file.size / (1024 * 1024)
+        );
 
         // 1. Compute hash by streaming (never hold full file in memory)
         let hash = {
-            let file = std::fs::File::open(disk_path)
-                .map_err(|e| AppError::Internal(format!("Failed to open {}: {}", disk_path.display(), e)))?;
+            let file = std::fs::File::open(disk_path).map_err(|e| {
+                AppError::Internal(format!("Failed to open {}: {}", disk_path.display(), e))
+            })?;
             let mut reader = BufReader::with_capacity(64 * 1024, file);
             let mut hasher = Sha256::new();
             loop {
-                let buf = reader.fill_buf()
+                let buf = reader
+                    .fill_buf()
                     .map_err(|e| AppError::Internal(format!("Read error: {}", e)))?;
-                if buf.is_empty() { break; }
+                if buf.is_empty() {
+                    break;
+                }
                 hasher.update(buf);
                 let len = buf.len();
                 reader.consume(len);
@@ -1471,14 +1609,23 @@ impl IndexService {
 
         // 2. Get DB client + RLS
         let mut client = self.db.get().await?;
-        client.execute("SELECT set_config('app.user_id', $1::text, false)", &[&DEFAULT_USER_ID.to_string()]).await?;
-        client.execute("SELECT set_config('app.is_admin', 'true', false)", &[]).await?;
+        client
+            .execute(
+                "SELECT set_config('app.user_id', $1::text, false)",
+                &[&DEFAULT_USER_ID.to_string()],
+            )
+            .await?;
+        client
+            .execute("SELECT set_config('app.is_admin', 'true', false)", &[])
+            .await?;
 
         // 3. Check if file is unchanged
-        let existing = client.query_opt(
-            "SELECT id, hash FROM files WHERE source_id = $1 AND path = $2",
-            &[&source_id, rel_path],
-        ).await?;
+        let existing = client
+            .query_opt(
+                "SELECT id, hash FROM files WHERE source_id = $1 AND path = $2",
+                &[&source_id, rel_path],
+            )
+            .await?;
 
         if let Some(row) = &existing {
             let existing_hash: Vec<u8> = row.get("hash");
@@ -1510,8 +1657,10 @@ impl IndexService {
                  SELECT 'delete', c.id, c.file_id, f.source_id, '{}'::jsonb
                  FROM chunks c JOIN files f ON f.id = c.file_id WHERE c.file_id = $1",
                 &[&file_id],
-            ).await?;
-            tx.execute("DELETE FROM chunks WHERE file_id = $1", &[&file_id]).await?;
+            )
+            .await?;
+            tx.execute("DELETE FROM chunks WHERE file_id = $1", &[&file_id])
+                .await?;
             tx.commit().await?;
         }
 
@@ -1521,6 +1670,11 @@ impl IndexService {
         let batch_size = embedding_batch_size();
         let mut total_chunks = 0usize;
         let mut total_embeddings = 0usize;
+        // `global_line` is incremented per JSONL line below; the final value
+        // is not read again but tracking it keeps the invariant for future
+        // resume/offset support without a larger refactor. `#[allow]` on the
+        // declaration does not cover the later `+= 1`, so an attribute on the
+        // function scope is the cleaner fix (applied above the outer `async fn`).
         let mut global_line = 0u32;
 
         const READ_BUFFER: usize = 1024 * 1024; // 1MB read buffer
@@ -1533,8 +1687,9 @@ impl IndexService {
             // and assemble only the messages array portion.
 
             // Read file content in bounded fashion: only keep current + next message in memory
-            let content = tokio::fs::read_to_string(disk_path).await
-                .map_err(|e| AppError::Internal(format!("Failed to read {}: {}", disk_path.display(), e)))?;
+            let content = tokio::fs::read_to_string(disk_path).await.map_err(|e| {
+                AppError::Internal(format!("Failed to read {}: {}", disk_path.display(), e))
+            })?;
 
             // Use the streaming chunker (parses messages one-by-one, no full DOM)
             let chunks = self.chunker.chunk(&content, language.as_deref());
@@ -1548,7 +1703,9 @@ impl IndexService {
                 let batch_end = (batch_start + batch_size).min(chunk_count);
                 let batch = &chunks[batch_start..batch_end];
 
-                let (c, e) = self.flush_chunk_batch(&client, file_id, source_id, batch, &language, global_line).await?;
+                let (c, e) = self
+                    .flush_chunk_batch(&client, file_id, source_id, batch, &language, global_line)
+                    .await?;
                 total_chunks += c;
                 total_embeddings += e;
             }
@@ -1563,10 +1720,13 @@ impl IndexService {
             let mut accumulated_chunks = Vec::new();
 
             for line_result in reader.lines() {
-                let line = line_result.map_err(|e| AppError::Internal(format!("Read error: {}", e)))?;
+                let line =
+                    line_result.map_err(|e| AppError::Internal(format!("Read error: {}", e)))?;
                 global_line += 1;
 
-                if line.trim().is_empty() { continue; }
+                if line.trim().is_empty() {
+                    continue;
+                }
                 line_buffer.push_str(&line);
                 line_buffer.push('\n');
 
@@ -1578,7 +1738,16 @@ impl IndexService {
 
                     // Flush when we have enough chunks
                     if accumulated_chunks.len() >= batch_size {
-                        let (c, e) = self.flush_chunk_batch(&client, file_id, source_id, &accumulated_chunks, &language, 0).await?;
+                        let (c, e) = self
+                            .flush_chunk_batch(
+                                &client,
+                                file_id,
+                                source_id,
+                                &accumulated_chunks,
+                                &language,
+                                0,
+                            )
+                            .await?;
                         total_chunks += c;
                         total_embeddings += e;
                         accumulated_chunks.clear();
@@ -1592,14 +1761,29 @@ impl IndexService {
                 accumulated_chunks.extend(batch_chunks);
             }
             if !accumulated_chunks.is_empty() {
-                let (c, e) = self.flush_chunk_batch(&client, file_id, source_id, &accumulated_chunks, &language, 0).await?;
+                let (c, e) = self
+                    .flush_chunk_batch(
+                        &client,
+                        file_id,
+                        source_id,
+                        &accumulated_chunks,
+                        &language,
+                        0,
+                    )
+                    .await?;
                 total_chunks += c;
                 total_embeddings += e;
             }
         }
 
-        info!("STREAMING complete for {}: {} chunks, {} embeddings", rel_path, total_chunks, total_embeddings);
-        Ok(ProcessResult::Processed { chunks: total_chunks, embeddings: total_embeddings })
+        info!(
+            "STREAMING complete for {}: {} chunks, {} embeddings",
+            rel_path, total_chunks, total_embeddings
+        );
+        Ok(ProcessResult::Processed {
+            chunks: total_chunks,
+            embeddings: total_embeddings,
+        })
     }
 
     /// Flush a batch of chunks to DB + embedding pipeline. Returns (chunks_inserted, embeddings_created).
@@ -1609,11 +1793,9 @@ impl IndexService {
         file_id: i64,
         source_id: i64,
         chunks: &[crate::services::chunker::Chunk],
-        language: &Option<String>,
+        _language: &Option<String>,
         _line_offset: u32,
     ) -> Result<(usize, usize)> {
-        use crate::services::chunker::ChunkType;
-
         if chunks.is_empty() {
             return Ok((0, 0));
         }
@@ -1677,7 +1859,11 @@ impl IndexService {
         ).await?;
 
         let chunk_ids: Vec<i64> = inserted.iter().map(|r| r.get(0)).collect();
-        info!("Batch-inserted {} chunks for file_id={}", chunk_ids.len(), file_id);
+        info!(
+            "Batch-inserted {} chunks for file_id={}",
+            chunk_ids.len(),
+            file_id
+        );
 
         // Generate embeddings in batches — batch-insert to DB (2 roundtrips per TEI batch, not 2*N)
         let batch_sz = embedding_batch_size();
@@ -1685,7 +1871,10 @@ impl IndexService {
 
         for batch_start in (0..chunk_texts.len()).step_by(batch_sz) {
             let batch_end = (batch_start + batch_sz).min(chunk_texts.len());
-            let text_batch: Vec<&str> = chunk_texts[batch_start..batch_end].iter().map(|s| s.as_str()).collect();
+            let text_batch: Vec<&str> = chunk_texts[batch_start..batch_end]
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
 
             match self.tei.embed_batch(&text_batch).await {
                 Ok(embeddings) => {
@@ -1701,13 +1890,15 @@ impl IndexService {
                     }
 
                     // Batch upsert embeddings (1 roundtrip)
-                    client.execute(
-                        "INSERT INTO chunk_embeddings (chunk_id, model, vector)
+                    client
+                        .execute(
+                            "INSERT INTO chunk_embeddings (chunk_id, model, vector)
                          SELECT unnest($1::bigint[]), unnest($2::text[]), unnest($3::vector[])
                          ON CONFLICT (chunk_id) DO UPDATE SET
                          vector = EXCLUDED.vector, model = EXCLUDED.model, created_at = NOW()",
-                        &[&b_ids, &b_models, &b_vecs],
-                    ).await?;
+                            &[&b_ids, &b_models, &b_vecs],
+                        )
+                        .await?;
 
                     // Batch outbox entries (1 roundtrip)
                     client.execute(

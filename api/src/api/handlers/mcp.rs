@@ -1,18 +1,13 @@
 //! MCP-compatible Handlers - Claude and LLM integration endpoints
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    Extension,
-    Json,
-};
+use crate::api::JsonBody;
+use crate::services::qdrant::TenantContext;
+use crate::AppState;
+use axum::{extract::State, http::StatusCode, Extension, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
-use crate::api::JsonBody;
-use crate::services::qdrant::TenantContext;
-use crate::AppState;
 
 #[derive(Debug, Serialize)]
 pub struct ToolDefinition {
@@ -245,51 +240,56 @@ pub async fn execute_mcp_tool(
     let tenant = if claims.is_admin {
         TenantContext::Admin
     } else {
-        let user_id = Uuid::parse_str(&claims.sub)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let user_id =
+            Uuid::parse_str(&claims.sub).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         TenantContext::Agent { user_id }
     };
-    let user_id_for_sql = Uuid::parse_str(&claims.sub)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let user_id_for_sql =
+        Uuid::parse_str(&claims.sub).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     match req.tool_name.as_str() {
         "search_code" => {
-            let search_req: SearchQuery = serde_json::from_value(req.params)
-                .map_err(|_| StatusCode::BAD_REQUEST)?;
+            let search_req: SearchQuery =
+                serde_json::from_value(req.params).map_err(|_| StatusCode::BAD_REQUEST)?;
 
             let search_type = search_req.search_type.as_deref().unwrap_or("hybrid");
             let limit = search_req.limit.unwrap_or(50);
 
             let search_results = match search_type {
                 "semantic" => {
-                    state.search.semantic_search(
-                        &search_req.query,
-                        search_req.source_id,
-                        limit,
-                        &tenant,
-                    ).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.results
-                },
+                    state
+                        .search
+                        .semantic_search(&search_req.query, search_req.source_id, limit, &tenant)
+                        .await
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                        .results
+                }
                 "keyword" => {
                     // FIX-1: Pass tenant context for RLS isolation
-                    state.search.keyword_search(
-                        &search_req.query,
-                        search_req.source_id,
-                        limit,
-                        &tenant,
-                    ).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.results
-                },
+                    state
+                        .search
+                        .keyword_search(&search_req.query, search_req.source_id, limit, &tenant)
+                        .await
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                        .results
+                }
                 _ => {
                     // K2: No agent_id available in MCP context
                     // K4: Use admin tenant context for MCP
-                    state.search.hybrid_search(
-                        &search_req.query,
-                        search_req.source_id,
-                        limit,
-                        true,
-                        None,
-                        &tenant,
-                    ).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.results
-                },
+                    state
+                        .search
+                        .hybrid_search(
+                            &search_req.query,
+                            search_req.source_id,
+                            limit,
+                            true,
+                            None,
+                            &tenant,
+                        )
+                        .await
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                        .results
+                }
             };
 
             Ok(Json(ExecuteToolResponse {
@@ -298,120 +298,144 @@ pub async fn execute_mcp_tool(
                 success: true,
                 error: None,
             }))
-        },
+        }
         "search_symbols" => {
-            let sym_req: SymbolQuery = serde_json::from_value(req.params)
-                .map_err(|_| StatusCode::BAD_REQUEST)?;
+            let sym_req: SymbolQuery =
+                serde_json::from_value(req.params).map_err(|_| StatusCode::BAD_REQUEST)?;
             let limit = sym_req.limit.unwrap_or(50).min(200);
             let search_pattern = format!("%{}%", sym_req.query);
             let is_admin = claims.is_admin;
             let uid = user_id_for_sql;
 
-            state.rls_client.with_system(|txn| Box::pin(async move {
-                let rows = if is_admin {
-                    if let Some(lang) = sym_req.language {
-                        txn.query(
-                            "SELECT s.id, s.name, s.type, f.path, s.line_start
+            state
+                .rls_client
+                .with_system(|txn| {
+                    Box::pin(async move {
+                        let rows = if is_admin {
+                            if let Some(lang) = sym_req.language {
+                                txn.query(
+                                    "SELECT s.id, s.name, s.type, f.path, s.line_start
                              FROM symbols s
                              JOIN files f ON s.file_id = f.id
                              WHERE s.name ILIKE $1 AND f.language = $2
                              LIMIT $3",
-                            &[&search_pattern, &lang, &limit],
-                        ).await
-                    } else {
-                        txn.query(
-                            "SELECT s.id, s.name, s.type, f.path, s.line_start
+                                    &[&search_pattern, &lang, &limit],
+                                )
+                                .await
+                            } else {
+                                txn.query(
+                                    "SELECT s.id, s.name, s.type, f.path, s.line_start
                              FROM symbols s
                              JOIN files f ON s.file_id = f.id
                              WHERE s.name ILIKE $1
                              LIMIT $2",
-                            &[&search_pattern, &limit],
-                        ).await
-                    }
-                } else if let Some(lang) = sym_req.language {
-                    txn.query(
-                        "SELECT s.id, s.name, s.type, f.path, s.line_start
+                                    &[&search_pattern, &limit],
+                                )
+                                .await
+                            }
+                        } else if let Some(lang) = sym_req.language {
+                            txn.query(
+                                "SELECT s.id, s.name, s.type, f.path, s.line_start
                          FROM symbols s
                          JOIN files f ON s.file_id = f.id
                          JOIN sources src ON f.source_id = src.id
                          WHERE s.name ILIKE $1 AND f.language = $2 AND src.user_id = $3
                          LIMIT $4",
-                        &[&search_pattern, &lang, &uid, &limit],
-                    ).await
-                } else {
-                    txn.query(
-                        "SELECT s.id, s.name, s.type, f.path, s.line_start
+                                &[&search_pattern, &lang, &uid, &limit],
+                            )
+                            .await
+                        } else {
+                            txn.query(
+                                "SELECT s.id, s.name, s.type, f.path, s.line_start
                          FROM symbols s
                          JOIN files f ON s.file_id = f.id
                          JOIN sources src ON f.source_id = src.id
                          WHERE s.name ILIKE $1 AND src.user_id = $2
                          LIMIT $3",
-                        &[&search_pattern, &uid, &limit],
-                    ).await
-                }?;
+                                &[&search_pattern, &uid, &limit],
+                            )
+                            .await
+                        }?;
 
-                let symbols: Vec<Value> = rows.iter().map(|row| {
-                    json!({
-                        "id": row.get::<_, i64>(0),
-                        "name": row.get::<_, String>(1),
-                        "type": row.get::<_, String>(2),
-                        "file": row.get::<_, String>(3),
-                        "line": row.get::<_, i32>(4),
+                        let symbols: Vec<Value> = rows
+                            .iter()
+                            .map(|row| {
+                                json!({
+                                    "id": row.get::<_, i64>(0),
+                                    "name": row.get::<_, String>(1),
+                                    "type": row.get::<_, String>(2),
+                                    "file": row.get::<_, String>(3),
+                                    "line": row.get::<_, i32>(4),
+                                })
+                            })
+                            .collect();
+
+                        Ok(Json(ExecuteToolResponse {
+                            tool_name: "search_symbols".to_string(),
+                            result: json!(symbols),
+                            success: true,
+                            error: None,
+                        }))
                     })
-                }).collect();
-
-                Ok(Json(ExecuteToolResponse {
-                    tool_name: "search_symbols".to_string(),
-                    result: json!(symbols),
-                    success: true,
-                    error: None,
-                }))
-            })).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-        },
+                })
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        }
         "list_sources" => {
             let is_admin = claims.is_admin;
             let uid = user_id_for_sql;
-            state.rls_client.with_system(|txn| Box::pin(async move {
-                let rows = if is_admin {
-                    txn.query(
-                        "SELECT id, name, type, path, file_count, total_size
+            state
+                .rls_client
+                .with_system(|txn| {
+                    Box::pin(async move {
+                        let rows = if is_admin {
+                            txn.query(
+                                "SELECT id, name, type, path, file_count, total_size
                          FROM sources ORDER BY name ASC",
-                        &[],
-                    ).await?
-                } else {
-                    txn.query(
-                        "SELECT id, name, type, path, file_count, total_size
+                                &[],
+                            )
+                            .await?
+                        } else {
+                            txn.query(
+                                "SELECT id, name, type, path, file_count, total_size
                          FROM sources WHERE user_id = $1 ORDER BY name ASC",
-                        &[&uid],
-                    ).await?
-                };
+                                &[&uid],
+                            )
+                            .await?
+                        };
 
-                let sources: Vec<Value> = rows.iter().map(|row| {
-                    json!({
-                        "id": row.get::<_, i64>(0),
-                        "name": row.get::<_, String>(1),
-                        "type": row.get::<_, String>(2),
-                        "path": row.get::<_, String>(3),
-                        "file_count": row.get::<_, i32>(4),
-                        "total_size": row.get::<_, i64>(5),
+                        let sources: Vec<Value> = rows
+                            .iter()
+                            .map(|row| {
+                                json!({
+                                    "id": row.get::<_, i64>(0),
+                                    "name": row.get::<_, String>(1),
+                                    "type": row.get::<_, String>(2),
+                                    "path": row.get::<_, String>(3),
+                                    "file_count": row.get::<_, i32>(4),
+                                    "total_size": row.get::<_, i64>(5),
+                                })
+                            })
+                            .collect();
+
+                        Ok(Json(ExecuteToolResponse {
+                            tool_name: "list_sources".to_string(),
+                            result: json!(sources),
+                            success: true,
+                            error: None,
+                        }))
                     })
-                }).collect();
-
-                Ok(Json(ExecuteToolResponse {
-                    tool_name: "list_sources".to_string(),
-                    result: json!(sources),
-                    success: true,
-                    error: None,
-                }))
-            })).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-        },
+                })
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        }
         "get_source_stats" => {
             #[derive(Debug, Deserialize)]
             struct SourceStatsParams {
                 source_id: i64,
             }
-            let params: SourceStatsParams = serde_json::from_value(req.params)
-                .map_err(|_| StatusCode::BAD_REQUEST)?;
+            let params: SourceStatsParams =
+                serde_json::from_value(req.params).map_err(|_| StatusCode::BAD_REQUEST)?;
             let is_admin = claims.is_admin;
             let uid = user_id_for_sql;
 
@@ -458,28 +482,31 @@ pub async fn execute_mcp_tool(
                     }
                 }
             })).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-        },
+        }
         "get_symbol_callgraph" => {
             #[derive(Debug, Deserialize)]
             struct CallgraphParams {
                 symbol_id: i64,
             }
-            let params: CallgraphParams = serde_json::from_value(req.params)
-                .map_err(|_| StatusCode::BAD_REQUEST)?;
+            let params: CallgraphParams =
+                serde_json::from_value(req.params).map_err(|_| StatusCode::BAD_REQUEST)?;
             let is_admin = claims.is_admin;
             let uid = user_id_for_sql;
 
-            state.rls_client.with_system(|txn| Box::pin(async move {
-                let symbol_row = if is_admin {
-                    txn.query_opt(
+            state
+                .rls_client
+                .with_system(|txn| {
+                    Box::pin(async move {
+                        let symbol_row = if is_admin {
+                            txn.query_opt(
                         "SELECT s.id, s.name, s.type, f.path, s.line_start, s.line_end, s.context
                          FROM symbols s
                          JOIN files f ON s.file_id = f.id
                          WHERE s.id = $1",
                         &[&params.symbol_id],
                     ).await?
-                } else {
-                    txn.query_opt(
+                        } else {
+                            txn.query_opt(
                         "SELECT s.id, s.name, s.type, f.path, s.line_start, s.line_end, s.context
                          FROM symbols s
                          JOIN files f ON s.file_id = f.id
@@ -487,87 +514,97 @@ pub async fn execute_mcp_tool(
                          WHERE s.id = $1 AND src.user_id = $2",
                         &[&params.symbol_id, &uid],
                     ).await?
-                };
+                        };
 
-                match symbol_row {
-                    Some(sym) => {
-                        let callers = txn.query(
-                            "SELECT DISTINCT s.id, s.name, s.type, f.path, s.line_start
+                        match symbol_row {
+                            Some(sym) => {
+                                let callers = txn
+                                    .query(
+                                        "SELECT DISTINCT s.id, s.name, s.type, f.path, s.line_start
                              FROM call_graph cg
                              JOIN symbols s ON cg.caller_symbol_id = s.id
                              JOIN files f ON s.file_id = f.id
                              WHERE cg.callee_symbol_id = $1",
-                            &[&params.symbol_id],
-                        ).await?;
+                                        &[&params.symbol_id],
+                                    )
+                                    .await?;
 
-                        let caller_list: Vec<Value> = callers.iter().map(|r| {
-                            json!({
-                                "id": r.get::<_, i64>(0),
-                                "name": r.get::<_, String>(1),
-                                "type": r.get::<_, String>(2),
-                                "file": r.get::<_, String>(3),
-                                "line": r.get::<_, i32>(4),
-                            })
-                        }).collect();
+                                let caller_list: Vec<Value> = callers
+                                    .iter()
+                                    .map(|r| {
+                                        json!({
+                                            "id": r.get::<_, i64>(0),
+                                            "name": r.get::<_, String>(1),
+                                            "type": r.get::<_, String>(2),
+                                            "file": r.get::<_, String>(3),
+                                            "line": r.get::<_, i32>(4),
+                                        })
+                                    })
+                                    .collect();
 
-                        let callees = txn.query(
-                            "SELECT DISTINCT callee_name FROM call_graph
+                                let callees = txn
+                                    .query(
+                                        "SELECT DISTINCT callee_name FROM call_graph
                              WHERE caller_symbol_id = $1",
-                            &[&params.symbol_id],
-                        ).await?;
+                                        &[&params.symbol_id],
+                                    )
+                                    .await?;
 
-                        let callee_list: Vec<String> = callees.iter()
-                            .map(|r| r.get(0))
-                            .collect();
+                                let callee_list: Vec<String> =
+                                    callees.iter().map(|r| r.get(0)).collect();
 
-                        let result = json!({
-                            "symbol": {
-                                "id": sym.get::<_, i64>(0),
-                                "name": sym.get::<_, String>(1),
-                                "type": sym.get::<_, String>(2),
-                                "file": sym.get::<_, String>(3),
-                                "line_start": sym.get::<_, i32>(4),
-                                "line_end": sym.get::<_, i32>(5),
-                                "context": sym.get::<_, Option<String>>(6),
-                            },
-                            "callers": caller_list,
-                            "callees": callee_list,
-                        });
+                                let result = json!({
+                                    "symbol": {
+                                        "id": sym.get::<_, i64>(0),
+                                        "name": sym.get::<_, String>(1),
+                                        "type": sym.get::<_, String>(2),
+                                        "file": sym.get::<_, String>(3),
+                                        "line_start": sym.get::<_, i32>(4),
+                                        "line_end": sym.get::<_, i32>(5),
+                                        "context": sym.get::<_, Option<String>>(6),
+                                    },
+                                    "callers": caller_list,
+                                    "callees": callee_list,
+                                });
 
-                        Ok(Json(ExecuteToolResponse {
-                            tool_name: "get_symbol_callgraph".to_string(),
-                            result,
-                            success: true,
-                            error: None,
-                        }))
-                    },
-                    None => {
-                        Ok(Json(ExecuteToolResponse {
-                            tool_name: "get_symbol_callgraph".to_string(),
-                            result: json!(null),
-                            success: false,
-                            error: Some("Symbol not found".to_string()),
-                        }))
-                    }
-                }
-            })).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-        },
+                                Ok(Json(ExecuteToolResponse {
+                                    tool_name: "get_symbol_callgraph".to_string(),
+                                    result,
+                                    success: true,
+                                    error: None,
+                                }))
+                            }
+                            None => Ok(Json(ExecuteToolResponse {
+                                tool_name: "get_symbol_callgraph".to_string(),
+                                result: json!(null),
+                                success: false,
+                                error: Some("Symbol not found".to_string()),
+                            })),
+                        }
+                    })
+                })
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        }
         "find_callers" => {
             #[derive(Debug, Deserialize)]
             struct FindCallersParams {
                 function_name: String,
                 limit: Option<i64>,
             }
-            let params: FindCallersParams = serde_json::from_value(req.params)
-                .map_err(|_| StatusCode::BAD_REQUEST)?;
+            let params: FindCallersParams =
+                serde_json::from_value(req.params).map_err(|_| StatusCode::BAD_REQUEST)?;
             let limit = params.limit.unwrap_or(50).min(200);
             let search_pattern = format!("%{}%", params.function_name);
             let is_admin = claims.is_admin;
             let uid = user_id_for_sql;
 
-            let callers = state.rls_client.with_system(|txn| Box::pin(async move {
-                let rows = if is_admin {
-                    txn.query(
+            let callers = state
+                .rls_client
+                .with_system(|txn| {
+                    Box::pin(async move {
+                        let rows = if is_admin {
+                            txn.query(
                         "SELECT DISTINCT s.id, s.name, s.type, f.path, s.line_start, cg.callee_name
                          FROM call_graph cg
                          JOIN symbols s ON cg.caller_symbol_id = s.id
@@ -577,8 +614,8 @@ pub async fn execute_mcp_tool(
                          LIMIT $2",
                         &[&search_pattern, &limit],
                     ).await?
-                } else {
-                    txn.query(
+                        } else {
+                            txn.query(
                         "SELECT DISTINCT s.id, s.name, s.type, f.path, s.line_start, cg.callee_name
                          FROM call_graph cg
                          JOIN symbols s ON cg.caller_symbol_id = s.id
@@ -589,21 +626,27 @@ pub async fn execute_mcp_tool(
                          LIMIT $3",
                         &[&search_pattern, &uid, &limit],
                     ).await?
-                };
+                        };
 
-                let callers: Vec<Value> = rows.iter().map(|row| {
-                    json!({
-                        "caller_id": row.get::<_, i64>(0),
-                        "caller_name": row.get::<_, String>(1),
-                        "caller_type": row.get::<_, String>(2),
-                        "file_path": row.get::<_, String>(3),
-                        "line": row.get::<_, i32>(4),
-                        "calls_function": row.get::<_, String>(5),
+                        let callers: Vec<Value> = rows
+                            .iter()
+                            .map(|row| {
+                                json!({
+                                    "caller_id": row.get::<_, i64>(0),
+                                    "caller_name": row.get::<_, String>(1),
+                                    "caller_type": row.get::<_, String>(2),
+                                    "file_path": row.get::<_, String>(3),
+                                    "line": row.get::<_, i32>(4),
+                                    "calls_function": row.get::<_, String>(5),
+                                })
+                            })
+                            .collect();
+
+                        Ok(callers)
                     })
-                }).collect();
-
-                Ok(callers)
-            })).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                })
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
             Ok(Json(ExecuteToolResponse {
                 tool_name: "find_callers".to_string(),
@@ -615,23 +658,26 @@ pub async fn execute_mcp_tool(
                 success: true,
                 error: None,
             }))
-        },
+        }
         "find_callees" => {
             #[derive(Debug, Deserialize)]
             struct FindCalleesParams {
                 function_name: String,
                 limit: Option<i64>,
             }
-            let params: FindCalleesParams = serde_json::from_value(req.params)
-                .map_err(|_| StatusCode::BAD_REQUEST)?;
+            let params: FindCalleesParams =
+                serde_json::from_value(req.params).map_err(|_| StatusCode::BAD_REQUEST)?;
             let limit = params.limit.unwrap_or(50).min(200);
             let search_pattern = format!("%{}%", params.function_name);
             let is_admin = claims.is_admin;
             let uid = user_id_for_sql;
 
-            let callees = state.rls_client.with_system(|txn| Box::pin(async move {
-                let rows = if is_admin {
-                    txn.query(
+            let callees = state
+                .rls_client
+                .with_system(|txn| {
+                    Box::pin(async move {
+                        let rows = if is_admin {
+                            txn.query(
                         "SELECT DISTINCT cg.callee_name, s.name as caller_name, f.path, cg.call_line
                          FROM call_graph cg
                          JOIN symbols s ON cg.caller_symbol_id = s.id
@@ -641,8 +687,8 @@ pub async fn execute_mcp_tool(
                          LIMIT $2",
                         &[&search_pattern, &limit],
                     ).await?
-                } else {
-                    txn.query(
+                        } else {
+                            txn.query(
                         "SELECT DISTINCT cg.callee_name, s.name as caller_name, f.path, cg.call_line
                          FROM call_graph cg
                          JOIN symbols s ON cg.caller_symbol_id = s.id
@@ -653,19 +699,25 @@ pub async fn execute_mcp_tool(
                          LIMIT $3",
                         &[&search_pattern, &uid, &limit],
                     ).await?
-                };
+                        };
 
-                let callees: Vec<Value> = rows.iter().map(|row| {
-                    json!({
-                        "callee_name": row.get::<_, String>(0),
-                        "called_by": row.get::<_, String>(1),
-                        "file_path": row.get::<_, String>(2),
-                        "call_line": row.get::<_, Option<i32>>(3),
+                        let callees: Vec<Value> = rows
+                            .iter()
+                            .map(|row| {
+                                json!({
+                                    "callee_name": row.get::<_, String>(0),
+                                    "called_by": row.get::<_, String>(1),
+                                    "file_path": row.get::<_, String>(2),
+                                    "call_line": row.get::<_, Option<i32>>(3),
+                                })
+                            })
+                            .collect();
+
+                        Ok(callees)
                     })
-                }).collect();
-
-                Ok(callees)
-            })).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                })
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
             Ok(Json(ExecuteToolResponse {
                 tool_name: "find_callees".to_string(),
@@ -677,7 +729,7 @@ pub async fn execute_mcp_tool(
                 success: true,
                 error: None,
             }))
-        },
+        }
         "get_symbol_card" => {
             let name = req.params["name"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
             let source_name = req.params.get("source").and_then(|v| v.as_str());
@@ -685,16 +737,27 @@ pub async fn execute_mcp_tool(
             // Resolve source name to source_id
             let source_id = if let Some(sn) = source_name {
                 let sn_owned = sn.to_string();
-                state.rls_client.with_system(|txn| Box::pin(async move {
-                    let row = txn.query_opt("SELECT id FROM sources WHERE name = $1", &[&sn_owned]).await?;
-                    Ok(row.map(|r| r.get::<_, i64>(0)))
-                })).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                state
+                    .rls_client
+                    .with_system(|txn| {
+                        Box::pin(async move {
+                            let row = txn
+                                .query_opt("SELECT id FROM sources WHERE name = $1", &[&sn_owned])
+                                .await?;
+                            Ok(row.map(|r| r.get::<_, i64>(0)))
+                        })
+                    })
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             } else {
                 None
             };
 
-            let cards = state.intelligence.search_symbol_cards(name, source_id, None, None, None, 10)
-                .await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let cards = state
+                .intelligence
+                .search_symbol_cards(name, source_id, None, None, None, 10)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
             Ok(Json(ExecuteToolResponse {
                 tool_name: "get_symbol_card".to_string(),
@@ -702,24 +765,41 @@ pub async fn execute_mcp_tool(
                 success: true,
                 error: None,
             }))
-        },
+        }
         "explain_path" => {
-            let symbol_name = req.params["symbol_name"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
-            let max_depth = req.params.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(6) as u32;
+            let symbol_name = req.params["symbol_name"]
+                .as_str()
+                .ok_or(StatusCode::BAD_REQUEST)?;
+            let max_depth = req
+                .params
+                .get("max_depth")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(6) as u32;
             let source_name = req.params.get("source").and_then(|v| v.as_str());
 
             let source_id = if let Some(sn) = source_name {
                 let sn_owned = sn.to_string();
-                state.rls_client.with_system(|txn| Box::pin(async move {
-                    let row = txn.query_opt("SELECT id FROM sources WHERE name = $1", &[&sn_owned]).await?;
-                    Ok(row.map(|r| r.get::<_, i64>(0)))
-                })).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                state
+                    .rls_client
+                    .with_system(|txn| {
+                        Box::pin(async move {
+                            let row = txn
+                                .query_opt("SELECT id FROM sources WHERE name = $1", &[&sn_owned])
+                                .await?;
+                            Ok(row.map(|r| r.get::<_, i64>(0)))
+                        })
+                    })
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             } else {
                 None
             };
 
-            let chains = state.intelligence.trace_delegation_chain(symbol_name, source_id, max_depth)
-                .await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let chains = state
+                .intelligence
+                .trace_delegation_chain(symbol_name, source_id, max_depth)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
             Ok(Json(ExecuteToolResponse {
                 tool_name: "explain_path".to_string(),
@@ -727,16 +807,22 @@ pub async fn execute_mcp_tool(
                 success: true,
                 error: None,
             }))
-        },
+        }
         "browse_layers" => {
             let layer = req.params.get("layer").and_then(|v| v.as_str());
             let resource = req.params.get("resource").and_then(|v| v.as_str());
             let side_effect = req.params.get("side_effect").and_then(|v| v.as_str());
-            let limit = req.params.get("limit").and_then(|v| v.as_i64()).unwrap_or(20) as i32;
+            let limit = req
+                .params
+                .get("limit")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(20) as i32;
 
-            let cards = state.intelligence.search_symbol_cards(
-                "%", None, layer, resource, side_effect, limit,
-            ).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let cards = state
+                .intelligence
+                .search_symbol_cards("%", None, layer, resource, side_effect, limit)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
             Ok(Json(ExecuteToolResponse {
                 tool_name: "browse_layers".to_string(),
@@ -744,12 +830,17 @@ pub async fn execute_mcp_tool(
                 success: true,
                 error: None,
             }))
-        },
+        }
         "get_ownership" => {
-            let symbol = req.params["symbol"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
+            let symbol = req.params["symbol"]
+                .as_str()
+                .ok_or(StatusCode::BAD_REQUEST)?;
 
-            let results = state.intelligence.get_ownership(symbol, None)
-                .await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let results = state
+                .intelligence
+                .get_ownership(symbol, None)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
             Ok(Json(ExecuteToolResponse {
                 tool_name: "get_ownership".to_string(),
@@ -757,14 +848,18 @@ pub async fn execute_mcp_tool(
                 success: true,
                 error: None,
             }))
-        },
+        }
         "explore" => {
-            let query = req.params["query"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
+            let query = req.params["query"]
+                .as_str()
+                .ok_or(StatusCode::BAD_REQUEST)?;
             let source = req.params.get("source").and_then(|v| v.as_str());
 
-            let result = state.intelligence.explore(
-                query, source, state.domain_registry.as_ref(),
-            ).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let result = state
+                .intelligence
+                .explore(query, source, state.domain_registry.as_ref())
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
             // Return formatted text for LLM, not raw JSON
             Ok(Json(ExecuteToolResponse {
@@ -773,16 +868,33 @@ pub async fn execute_mcp_tool(
                 success: true,
                 error: None,
             }))
-        },
+        }
         "report_dead_end" => {
-            let concept = req.params["concept"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
-            let path_description = req.params["path_description"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
-            let reason = req.params["reason"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
+            let concept = req.params["concept"]
+                .as_str()
+                .ok_or(StatusCode::BAD_REQUEST)?;
+            let path_description = req.params["path_description"]
+                .as_str()
+                .ok_or(StatusCode::BAD_REQUEST)?;
+            let reason = req.params["reason"]
+                .as_str()
+                .ok_or(StatusCode::BAD_REQUEST)?;
             let symbols = req.params.get("symbols").cloned().unwrap_or(json!([]));
 
-            let id = state.intelligence.create_negative_evidence(
-                None, None, concept, path_description, reason, &symbols, "warning", Some("mcp"),
-            ).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let id = state
+                .intelligence
+                .create_negative_evidence(
+                    None,
+                    None,
+                    concept,
+                    path_description,
+                    reason,
+                    &symbols,
+                    "warning",
+                    Some("mcp"),
+                )
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
             Ok(Json(ExecuteToolResponse {
                 tool_name: "report_dead_end".to_string(),
@@ -790,15 +902,13 @@ pub async fn execute_mcp_tool(
                 success: true,
                 error: None,
             }))
-        },
-        _ => {
-            Ok(Json(ExecuteToolResponse {
-                tool_name: req.tool_name,
-                result: json!(null),
-                success: false,
-                error: Some("Unknown tool".to_string()),
-            }))
-        },
+        }
+        _ => Ok(Json(ExecuteToolResponse {
+            tool_name: req.tool_name,
+            result: json!(null),
+            success: false,
+            error: Some("Unknown tool".to_string()),
+        })),
     }
 }
 

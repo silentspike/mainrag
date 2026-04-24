@@ -16,7 +16,14 @@ const API_BASE: &str = "http://localhost:3001";
 /// Check if API is available
 fn api_available() -> bool {
     std::process::Command::new("curl")
-        .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", &format!("{}/health", API_BASE)])
+        .args([
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            &format!("{}/health", API_BASE),
+        ])
         .output()
         .map(|o| o.stdout.starts_with(b"200"))
         .unwrap_or(false)
@@ -76,8 +83,14 @@ async fn test_e2e_german_query_finds_english_content() {
 
     let search_result: SearchResponse = response.json().await.expect("parse failed");
 
-    println!("E2E: 'fehler' search returned {} results in {}ms", search_result.total, search_result.took_ms);
-    println!("Quality tier: {}, Reranked: {}", search_result.quality_tier, search_result.reranked);
+    println!(
+        "E2E: 'fehler' search returned {} results in {}ms",
+        search_result.total, search_result.took_ms
+    );
+    println!(
+        "Quality tier: {}, Reranked: {}",
+        search_result.quality_tier, search_result.reranked
+    );
 
     // Should have results
     assert!(search_result.total > 0, "Expected results for 'fehler'");
@@ -125,7 +138,10 @@ async fn test_e2e_english_query_finds_german_content() {
         search_result.total, search_result.took_ms
     );
 
-    assert!(search_result.total > 0, "Expected results for 'error handling'");
+    assert!(
+        search_result.total > 0,
+        "Expected results for 'error handling'"
+    );
 }
 
 #[tokio::test]
@@ -255,9 +271,6 @@ async fn test_e2e_quality_tiers() {
             tier, search_result.quality_tier, search_result.reranked, search_result.took_ms
         );
 
-        assert_eq!(
-            search_result.quality_tier, *tier,
-            "Quality tier mismatch"
-        );
+        assert_eq!(search_result.quality_tier, *tier, "Quality tier mismatch");
     }
 }

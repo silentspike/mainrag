@@ -14,7 +14,9 @@ pub async fn run(
     match action {
         SourceAction::List => list_sources(client, json_output).await,
         SourceAction::Sync { name } => sync_source(client, &name, json_output).await,
-        SourceAction::Delete { name, force } => delete_source(client, &name, force, json_output).await,
+        SourceAction::Delete { name, force } => {
+            delete_source(client, &name, force, json_output).await
+        }
     }
 }
 
@@ -52,10 +54,18 @@ async fn list_sources(client: &ApiClient, json_output: bool) -> anyhow::Result<(
             .map(|s| s.split('T').next().unwrap_or("never"))
             .unwrap_or("never");
 
-        println!("  {} {}", format!("[{}]", source.id).dimmed(), source.name.bold());
+        println!(
+            "  {} {}",
+            format!("[{}]", source.id).dimmed(),
+            source.name.bold()
+        );
         println!("    {} {}", "Type:".dimmed(), source.source_type.cyan());
         println!("    {} {}", "Files:".dimmed(), source.file_count);
-        println!("    {} {}", "Size:".dimmed(), format_size(source.total_size as u64, BINARY));
+        println!(
+            "    {} {}",
+            "Size:".dimmed(),
+            format_size(source.total_size as u64, BINARY)
+        );
         println!("    {} {}", "Last synced:".dimmed(), last_synced);
         println!();
     }
@@ -63,11 +73,7 @@ async fn list_sources(client: &ApiClient, json_output: bool) -> anyhow::Result<(
     Ok(())
 }
 
-async fn sync_source(
-    client: &ApiClient,
-    name: &str,
-    json_output: bool,
-) -> anyhow::Result<()> {
+async fn sync_source(client: &ApiClient, name: &str, json_output: bool) -> anyhow::Result<()> {
     if !json_output {
         eprint!("{}", format!("Syncing source '{}'...", name).cyan());
         eprint!(" ");
@@ -130,7 +136,11 @@ async fn delete_source(
         println!("{}", "━━━ Source Deletion Preview ━━━".yellow().bold());
         println!("  {} {}", "Source:".dimmed(), name.bold());
         println!("  {} {}", "Files:".dimmed(), file_count);
-        println!("  {} {}", "Size:".dimmed(), format_size(total_size as u64, BINARY));
+        println!(
+            "  {} {}",
+            "Size:".dimmed(),
+            format_size(total_size as u64, BINARY)
+        );
 
         if let Some(ref s) = stats {
             println!("  {} {}", "Chunks:".dimmed(), s.chunks);
@@ -167,12 +177,15 @@ async fn delete_source(
     client.delete_source(name).await?;
 
     if json_output {
-        println!("{}", json!({
-            "status": "deleted",
-            "source_name": name,
-            "files_deleted": file_count,
-            "bytes_freed": total_size
-        }));
+        println!(
+            "{}",
+            json!({
+                "status": "deleted",
+                "source_name": name,
+                "files_deleted": file_count,
+                "bytes_freed": total_size
+            })
+        );
         return Ok(());
     }
 
@@ -181,7 +194,9 @@ async fn delete_source(
     println!();
     println!(
         "{}",
-        format!("✓ Source '{}' completely deleted", name).green().bold()
+        format!("✓ Source '{}' completely deleted", name)
+            .green()
+            .bold()
     );
 
     Ok(())

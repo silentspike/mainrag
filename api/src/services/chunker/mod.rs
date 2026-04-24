@@ -7,9 +7,9 @@
 //! - JSONL: Conversation-aware chunking for Claude Code exports
 
 pub mod character;
-pub mod token;
-pub mod semantic;
 pub mod jsonl;
+pub mod semantic;
+pub mod token;
 
 use serde_json::Value;
 
@@ -17,13 +17,13 @@ use serde_json::Value;
 #[derive(Debug, Clone, Default)]
 pub struct ChunkerConfig {
     /// Max tokens (for token and semantic chunkers)
-    pub max_tokens: Option<usize>,      // Default: 256
+    pub max_tokens: Option<usize>, // Default: 256
     /// Token overlap (for token and semantic chunkers)
-    pub overlap_tokens: Option<usize>,  // Default: 32
+    pub overlap_tokens: Option<usize>, // Default: 32
     /// Max characters (for character chunker)
-    pub max_chars: Option<usize>,       // Default: 1000
+    pub max_chars: Option<usize>, // Default: 1000
     /// Character overlap (for character chunker)
-    pub overlap_chars: Option<usize>,   // Default: 100
+    pub overlap_chars: Option<usize>, // Default: 100
 }
 
 /// Individual chunk of text
@@ -36,7 +36,7 @@ pub struct Chunk {
     pub start_byte: usize,
     pub end_byte: usize,
     pub chunk_type: ChunkType,
-    pub metadata: Option<Value>,  // e.g., function_name, semantic_unit
+    pub metadata: Option<Value>, // e.g., function_name, semantic_unit
     /// Index of parent chunk in the same chunk list (for hierarchical chunking)
     pub parent_idx: Option<usize>,
     /// Hierarchy level: 0=file, 1=class/module, 2=function/method
@@ -50,16 +50,16 @@ pub struct Chunk {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkType {
-    File,          // Level 0: Entire file or file header
-    Code,          // Generic code block
-    Text,          // Plain text
-    Config,        // Configuration file
-    Function,      // Semantic: function/method
-    Class,         // Semantic: class/struct/interface
-    Module,        // Semantic: module/namespace/impl
-    Type,          // Structs, enums, type aliases
-    Section,       // Markdown section (H1/H2/H3)
-    Conversation,  // JSONL conversation turns
+    File,         // Level 0: Entire file or file header
+    Code,         // Generic code block
+    Text,         // Plain text
+    Config,       // Configuration file
+    Function,     // Semantic: function/method
+    Class,        // Semantic: class/struct/interface
+    Module,       // Semantic: module/namespace/impl
+    Type,         // Structs, enums, type aliases
+    Section,      // Markdown section (H1/H2/H3)
+    Conversation, // JSONL conversation turns
 }
 
 impl std::fmt::Display for ChunkType {
@@ -86,8 +86,11 @@ impl ChunkType {
         match self {
             ChunkType::File => 0,
             ChunkType::Class | ChunkType::Module | ChunkType::Type | ChunkType::Section => 1,
-            ChunkType::Function | ChunkType::Code | ChunkType::Text |
-            ChunkType::Config | ChunkType::Conversation => 2,
+            ChunkType::Function
+            | ChunkType::Code
+            | ChunkType::Text
+            | ChunkType::Config
+            | ChunkType::Conversation => 2,
         }
     }
 }
@@ -101,7 +104,11 @@ impl Chunk {
     /// Format: "[source] path > context\n\n"
     /// Max length: 100 chars for the header (before \n\n)
     #[allow(dead_code)]
-    pub fn generate_cch(source_name: &str, file_path: &str, parent_context: Option<&str>) -> String {
+    pub fn generate_cch(
+        source_name: &str,
+        file_path: &str,
+        parent_context: Option<&str>,
+    ) -> String {
         let prefix = match parent_context {
             Some(ctx) => format!("[{}] {} > {}", source_name, file_path, ctx),
             None => format!("[{}] {}", source_name, file_path),
@@ -141,10 +148,10 @@ impl Chunk {
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub enum ChunkerType {
-    Character,  // Legacy (1000 chars)
-    Token,      // 256 tokens
-    Semantic,   // Tree-sitter aware
-    Jsonl,      // Conversation-aware for JSONL
+    Character, // Legacy (1000 chars)
+    Token,     // 256 tokens
+    Semantic,  // Tree-sitter aware
+    Jsonl,     // Conversation-aware for JSONL
 }
 
 /// Common chunker interface
@@ -220,27 +227,47 @@ mod tests {
     fn test_generate_cch_truncates_long_headers() {
         // Create a very long path that exceeds CCH_MAX_LENGTH (100 chars)
         let long_path = "src/very/deeply/nested/directory/structure/with/many/subdirs/and/a/long/filename_that_goes_on_and_on.rs";
-        let cch = Chunk::generate_cch("my-long-source-name", long_path, Some("impl VeryLongClassName"));
+        let cch = Chunk::generate_cch(
+            "my-long-source-name",
+            long_path,
+            Some("impl VeryLongClassName"),
+        );
 
         // CCH should be truncated to max 100 chars (plus "...")
-        assert!(cch.len() <= CCH_MAX_LENGTH + 3, "CCH too long: {} chars", cch.len());
+        assert!(
+            cch.len() <= CCH_MAX_LENGTH + 3,
+            "CCH too long: {} chars",
+            cch.len()
+        );
         assert!(cch.ends_with("..."), "Truncated CCH should end with ...");
     }
 
     #[test]
     fn test_generate_cch_truncates_at_word_boundary() {
         // Create a CCH that will definitely need truncation (over 100 chars)
-        let long_path = "src/services/very/deeply/nested/module/with/long/path/that/exceeds/limit.rs";
+        let long_path =
+            "src/services/very/deeply/nested/module/with/long/path/that/exceeds/limit.rs";
         let long_context = "impl MyVeryLongTraitName";
         let cch = Chunk::generate_cch("my-source", long_path, Some(long_context));
 
         // CCH should be truncated
-        assert!(cch.ends_with("..."), "Long CCH should end with ..., got: {}", cch);
-        assert!(cch.len() <= CCH_MAX_LENGTH + 3, "CCH too long: {}", cch.len());
+        assert!(
+            cch.ends_with("..."),
+            "Long CCH should end with ..., got: {}",
+            cch
+        );
+        assert!(
+            cch.len() <= CCH_MAX_LENGTH + 3,
+            "CCH too long: {}",
+            cch.len()
+        );
 
         // The content before "..." should not end mid-word if there was a space to cut at
         // Just verify it produces a reasonable result
-        assert!(cch.starts_with("[my-source]"), "CCH should start with source name");
+        assert!(
+            cch.starts_with("[my-source]"),
+            "CCH should start with source name"
+        );
     }
 
     #[test]

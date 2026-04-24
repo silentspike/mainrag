@@ -17,16 +17,46 @@ fn generate_test_pdf(path: &PathBuf) {
     layer.use_text("Chapter 1: Introduction", 24.0, Mm(20.0), Mm(270.0), &font);
 
     // Body text (12pt)
-    layer.use_text("This is the body text of the document.", 12.0, Mm(20.0), Mm(250.0), &font);
-    layer.use_text("It contains multiple paragraphs for testing.", 12.0, Mm(20.0), Mm(240.0), &font);
-    layer.use_text("Each line tests the text extraction capabilities.", 12.0, Mm(20.0), Mm(230.0), &font);
+    layer.use_text(
+        "This is the body text of the document.",
+        12.0,
+        Mm(20.0),
+        Mm(250.0),
+        &font,
+    );
+    layer.use_text(
+        "It contains multiple paragraphs for testing.",
+        12.0,
+        Mm(20.0),
+        Mm(240.0),
+        &font,
+    );
+    layer.use_text(
+        "Each line tests the text extraction capabilities.",
+        12.0,
+        Mm(20.0),
+        Mm(230.0),
+        &font,
+    );
 
     // Medium heading (18pt) - should be H2
     layer.use_text("Section 1.1: Details", 18.0, Mm(20.0), Mm(210.0), &font);
 
     // More body
-    layer.use_text("More detailed information here.", 12.0, Mm(20.0), Mm(190.0), &font);
-    layer.use_text("The PDF plugin should extract this text correctly.", 12.0, Mm(20.0), Mm(180.0), &font);
+    layer.use_text(
+        "More detailed information here.",
+        12.0,
+        Mm(20.0),
+        Mm(190.0),
+        &font,
+    );
+    layer.use_text(
+        "The PDF plugin should extract this text correctly.",
+        12.0,
+        Mm(20.0),
+        Mm(180.0),
+        &font,
+    );
 
     let file = std::fs::File::create(path).unwrap();
     doc.save(&mut BufWriter::new(file)).unwrap();
@@ -34,7 +64,7 @@ fn generate_test_pdf(path: &PathBuf) {
 
 #[tokio::test]
 async fn test_pdf_extract_fallback() {
-    use mainrag_api::plugins::{SourcePlugin, pdf::PdfPlugin};
+    use mainrag_api::plugins::{pdf::PdfPlugin, SourcePlugin};
 
     // Create temp directory
     let temp_dir = std::env::temp_dir().join("mainrag_pdf_test");
@@ -56,18 +86,32 @@ async fn test_pdf_extract_fallback() {
     // Verify
     let sync_result = result.expect("PDF extraction should succeed");
 
-    assert!(!sync_result.files.is_empty(), "Should extract at least one chunk");
+    assert!(
+        !sync_result.files.is_empty(),
+        "Should extract at least one chunk"
+    );
 
     // Check content
-    let combined_content: String = sync_result.files.iter()
+    let combined_content: String = sync_result
+        .files
+        .iter()
         .map(|f| f.content.clone())
         .collect::<Vec<_>>()
         .join(" ");
 
-    assert!(combined_content.contains("Chapter 1"), "Should contain heading");
-    assert!(combined_content.contains("body text"), "Should contain body text");
+    assert!(
+        combined_content.contains("Chapter 1"),
+        "Should contain heading"
+    );
+    assert!(
+        combined_content.contains("body text"),
+        "Should contain body text"
+    );
 
-    println!("✅ Extracted {} chunks from test PDF", sync_result.files.len());
+    println!(
+        "✅ Extracted {} chunks from test PDF",
+        sync_result.files.len()
+    );
     for file in &sync_result.files {
         println!("  - {}: {} bytes", file.path, file.size);
     }
@@ -75,7 +119,7 @@ async fn test_pdf_extract_fallback() {
 
 #[tokio::test]
 async fn test_pdf_nonexistent() {
-    use mainrag_api::plugins::{SourcePlugin, pdf::PdfPlugin};
+    use mainrag_api::plugins::{pdf::PdfPlugin, SourcePlugin};
 
     let plugin = PdfPlugin::new();
     let result = plugin.sync("/nonexistent/file.pdf").await;
@@ -86,7 +130,7 @@ async fn test_pdf_nonexistent() {
 
 #[tokio::test]
 async fn test_pdf_wrong_extension() {
-    use mainrag_api::plugins::{SourcePlugin, pdf::PdfPlugin};
+    use mainrag_api::plugins::{pdf::PdfPlugin, SourcePlugin};
 
     // Create temp file with wrong extension
     let temp_dir = std::env::temp_dir();
@@ -117,7 +161,10 @@ fn generate_fixture() {
 
     println!("Generated fixture: {}", pdf_path.display());
     assert!(pdf_path.exists());
-    println!("Size: {} bytes", std::fs::metadata(&pdf_path).unwrap().len());
+    println!(
+        "Size: {} bytes",
+        std::fs::metadata(&pdf_path).unwrap().len()
+    );
 }
 
 /// Benchmark with real-world PDF (1.9MB DrivenByMoss Manual)
@@ -125,10 +172,11 @@ fn generate_fixture() {
 #[tokio::test]
 #[ignore]
 async fn benchmark_large_pdf() {
-    use mainrag_api::plugins::{SourcePlugin, pdf::PdfPlugin};
+    use mainrag_api::plugins::{pdf::PdfPlugin, SourcePlugin};
     use std::time::Instant;
 
-    let pdf_path = "/work/bitwigs/bitwig-api-docs/DrivenByMoss-Documentation/DrivenByMoss-Manual.pdf";
+    let pdf_path =
+        "/work/bitwigs/bitwig-api-docs/DrivenByMoss-Documentation/DrivenByMoss-Manual.pdf";
 
     if !std::path::Path::new(pdf_path).exists() {
         println!("⚠️  Benchmark PDF not found: {}", pdf_path);
@@ -136,14 +184,22 @@ async fn benchmark_large_pdf() {
     }
 
     let file_size = std::fs::metadata(pdf_path).unwrap().len();
-    println!("📄 PDF: {} ({:.2} MB)", pdf_path, file_size as f64 / 1024.0 / 1024.0);
+    println!(
+        "📄 PDF: {} ({:.2} MB)",
+        pdf_path,
+        file_size as f64 / 1024.0 / 1024.0
+    );
 
     let plugin = PdfPlugin::new();
 
     // Warmup
     let warmup = plugin.sync(pdf_path).await.unwrap();
     let total_chars: usize = warmup.files.iter().map(|f| f.content.len()).sum();
-    println!("   Chunks: {}, Total chars: {}", warmup.files.len(), total_chars);
+    println!(
+        "   Chunks: {}, Total chars: {}",
+        warmup.files.len(),
+        total_chars
+    );
 
     // Benchmark
     let iterations = 5;
@@ -164,7 +220,16 @@ async fn benchmark_large_pdf() {
     let chars_per_sec = (total_chars as f64) / (avg_ms as f64 / 1000.0);
 
     println!("\n📊 Benchmark Results (MuPDF):");
-    println!("   Min: {}ms | Avg: {}ms | Max: {}ms", min_ms, avg_ms, max_ms);
-    println!("   Throughput: {:.1} MB/s | {:.0} chars/s", mb_per_sec, chars_per_sec);
-    println!("   ~{} pages/s (estimated)", (chars_per_sec / 2000.0) as u32); // ~2000 chars/page
+    println!(
+        "   Min: {}ms | Avg: {}ms | Max: {}ms",
+        min_ms, avg_ms, max_ms
+    );
+    println!(
+        "   Throughput: {:.1} MB/s | {:.0} chars/s",
+        mb_per_sec, chars_per_sec
+    );
+    println!(
+        "   ~{} pages/s (estimated)",
+        (chars_per_sec / 2000.0) as u32
+    ); // ~2000 chars/page
 }

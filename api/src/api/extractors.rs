@@ -2,7 +2,7 @@
 
 use axum::{
     async_trait,
-    extract::{FromRequest, Request, rejection::JsonRejection},
+    extract::{rejection::JsonRejection, FromRequest, Request},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -26,9 +26,10 @@ impl IntoResponse for JsonBodyRejection {
             JsonRejection::JsonSyntaxError(e) => {
                 ("JSON syntax error".to_string(), e.body_text().to_string())
             }
-            JsonRejection::MissingJsonContentType(_) => {
-                ("Content-Type must be application/json".to_string(), String::new())
-            }
+            JsonRejection::MissingJsonContentType(_) => (
+                "Content-Type must be application/json".to_string(),
+                String::new(),
+            ),
             JsonRejection::BytesRejection(_) => {
                 ("Failed to read request body".to_string(), String::new())
             }

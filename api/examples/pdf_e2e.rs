@@ -1,7 +1,7 @@
 //! E2E Test mit echter PDF
 //! Run: cargo run --example pdf_e2e -- /path/to/file.pdf
 
-use mainrag_api::plugins::{SourcePlugin, pdf::PdfPlugin};
+use mainrag_api::plugins::{pdf::PdfPlugin, SourcePlugin};
 use std::env;
 use std::time::Instant;
 
@@ -18,7 +18,11 @@ async fn main() {
 
     let file_size = std::fs::metadata(&pdf_path).map(|m| m.len()).unwrap_or(0);
     println!("Testing PDF extraction with: {}", pdf_path);
-    println!("File size: {} bytes ({:.2} MB)", file_size, file_size as f64 / 1024.0 / 1024.0);
+    println!(
+        "File size: {} bytes ({:.2} MB)",
+        file_size,
+        file_size as f64 / 1024.0 / 1024.0
+    );
 
     let plugin = PdfPlugin::new();
 
@@ -45,14 +49,24 @@ async fn main() {
     // Statistics
     let total_ms: f64 = durations.iter().map(|d| d.as_secs_f64() * 1000.0).sum();
     let avg_ms = total_ms / durations.len() as f64;
-    let min_ms = durations.iter().map(|d| d.as_secs_f64() * 1000.0).fold(f64::INFINITY, f64::min);
-    let max_ms = durations.iter().map(|d| d.as_secs_f64() * 1000.0).fold(0.0, f64::max);
+    let min_ms = durations
+        .iter()
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .fold(f64::INFINITY, f64::min);
+    let max_ms = durations
+        .iter()
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .fold(0.0, f64::max);
 
     // Throughput
     let throughput_mbs = (file_size as f64 / 1024.0 / 1024.0) / (avg_ms / 1000.0);
 
     println!("\n=== EXTRACTION BENCHMARK RESULTS ===");
-    println!("File: {} ({:.2} MB)", pdf_path.split('/').last().unwrap_or(&pdf_path), file_size as f64 / 1024.0 / 1024.0);
+    println!(
+        "File: {} ({:.2} MB)",
+        pdf_path.split('/').last().unwrap_or(&pdf_path),
+        file_size as f64 / 1024.0 / 1024.0
+    );
     println!("Min: {:.2} ms", min_ms);
     println!("Max: {:.2} ms", max_ms);
     println!("Avg: {:.2} ms", avg_ms);

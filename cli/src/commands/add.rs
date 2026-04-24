@@ -41,25 +41,21 @@ pub async fn run(
 
     println!(
         "{}",
-        format!(
-            "\r✓ Source '{}' added (ID: {})",
-            source.name, source.id
-        )
-        .green()
+        format!("\r✓ Source '{}' added (ID: {})", source.name, source.id).green()
     );
     println!("  Path: {}", source.path);
     println!("  Type: {}", source.source_type);
     println!();
     println!("{}", "Next step:".bright_black());
-    println!("  {}", format!("mainrag source sync {}", source.name).bold());
+    println!(
+        "  {}",
+        format!("mainrag source sync {}", source.name).bold()
+    );
 
     Ok(())
 }
 
-fn detect_source(
-    path: &str,
-    custom_name: Option<&str>,
-) -> anyhow::Result<(String, String)> {
+fn detect_source(path: &str, custom_name: Option<&str>) -> anyhow::Result<(String, String)> {
     let source_type = if path.ends_with(".git")
         || path.contains("github.com")
         || path.contains("gitlab.com")
@@ -79,10 +75,7 @@ fn detect_source(
         n.to_string()
     } else {
         // Extract name from path
-        if let Some(name) = Path::new(path)
-            .file_name()
-            .and_then(|n| n.to_str())
-        {
+        if let Some(name) = Path::new(path).file_name().and_then(|n| n.to_str()) {
             name.to_string()
         } else {
             // Fallback: use hash of path

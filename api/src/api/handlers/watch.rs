@@ -1,5 +1,6 @@
 //! Watch Mode Handlers - File system monitoring and auto-indexing
 
+use crate::AppState;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -7,7 +8,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::AppState;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WatchStatusResponse {
@@ -34,32 +34,41 @@ pub struct AllWatchStatusResponse {
 pub async fn get_watch_status_all(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AllWatchStatusResponse>, StatusCode> {
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        let rows = txn.query(
-            "SELECT id, name, path, COALESCE(watch_enabled, false) as watch_enabled
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let rows = txn
+                    .query(
+                        "SELECT id, name, path, COALESCE(watch_enabled, false) as watch_enabled
              FROM sources
              ORDER BY name ASC",
-            &[],
-        ).await?;
+                        &[],
+                    )
+                    .await?;
 
-        let watches: Vec<WatchStatusResponse> = rows.iter().map(|row| {
-            WatchStatusResponse {
-                source_id: row.get(0),
-                name: row.get(1),
-                path: row.get(2),
-                watching: row.get(3),
-            }
-        }).collect();
+                let watches: Vec<WatchStatusResponse> = rows
+                    .iter()
+                    .map(|row| WatchStatusResponse {
+                        source_id: row.get(0),
+                        name: row.get(1),
+                        path: row.get(2),
+                        watching: row.get(3),
+                    })
+                    .collect();
 
-        let active_count = watches.iter().filter(|w| w.watching).count() as i64;
-        let total_sources = watches.len() as i64;
+                let active_count = watches.iter().filter(|w| w.watching).count() as i64;
+                let total_sources = watches.len() as i64;
 
-        Ok(Json(AllWatchStatusResponse {
-            watches,
-            active_count,
-            total_sources,
-        }))
-    })).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                Ok(Json(AllWatchStatusResponse {
+                    watches,
+                    active_count,
+                    total_sources,
+                }))
+            })
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Get watch status for a specific source
@@ -67,21 +76,29 @@ pub async fn get_watch_status(
     State(state): State<Arc<AppState>>,
     Path(source_id): Path<i64>,
 ) -> Result<Json<WatchStatusResponse>, StatusCode> {
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        let row = txn.query_one(
-            "SELECT id, name, path, COALESCE(watch_enabled, false) as watch_enabled
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let row = txn
+                    .query_one(
+                        "SELECT id, name, path, COALESCE(watch_enabled, false) as watch_enabled
              FROM sources
              WHERE id = $1",
-            &[&source_id],
-        ).await?;
+                        &[&source_id],
+                    )
+                    .await?;
 
-        Ok(Json(WatchStatusResponse {
-            source_id: row.get(0),
-            name: row.get(1),
-            path: row.get(2),
-            watching: row.get(3),
-        }))
-    })).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                Ok(Json(WatchStatusResponse {
+                    source_id: row.get(0),
+                    name: row.get(1),
+                    path: row.get(2),
+                    watching: row.get(3),
+                }))
+            })
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Toggle watch mode for a source (flips current state)
@@ -127,37 +144,49 @@ pub struct WatchStatsResponse {
 pub async fn get_watch_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<WatchStatsResponse>, StatusCode> {
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        let watched_sources: i64 = txn.query_one(
-            "SELECT COUNT(*) FROM sources WHERE watch_enabled = true",
-            &[],
-        ).await?
-            .get(0);
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let watched_sources: i64 = txn
+                    .query_one(
+                        "SELECT COUNT(*) FROM sources WHERE watch_enabled = true",
+                        &[],
+                    )
+                    .await?
+                    .get(0);
 
-        let monitored_files: i64 = txn.query_one(
-            "SELECT COALESCE(SUM(file_count), 0)
+                let monitored_files: i64 = txn
+                    .query_one(
+                        "SELECT COALESCE(SUM(file_count), 0)
              FROM sources WHERE watch_enabled = true",
-            &[],
-        ).await?
-            .get(0);
+                        &[],
+                    )
+                    .await?
+                    .get(0);
 
-        let debounce_ms = std::env::var("MAINRAG_WATCH_DEBOUNCE_MS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(500);
+                let debounce_ms = std::env::var("MAINRAG_WATCH_DEBOUNCE_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(500);
 
-        let last_scan = txn.query_opt(
-            "SELECT MAX(last_synced) FROM sources WHERE watch_enabled = true",
-            &[],
-        ).await?
-            .and_then(|row| row.get::<_, Option<chrono::DateTime<chrono::Utc>>>(0))
-            .map(|ts| ts.to_rfc3339());
+                let last_scan = txn
+                    .query_opt(
+                        "SELECT MAX(last_synced) FROM sources WHERE watch_enabled = true",
+                        &[],
+                    )
+                    .await?
+                    .and_then(|row| row.get::<_, Option<chrono::DateTime<chrono::Utc>>>(0))
+                    .map(|ts| ts.to_rfc3339());
 
-        Ok(Json(WatchStatsResponse {
-            total_watched_sources: watched_sources,
-            files_monitored: monitored_files,
-            debounce_ms,
-            last_scan,
-        }))
-    })).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                Ok(Json(WatchStatsResponse {
+                    total_watched_sources: watched_sources,
+                    files_monitored: monitored_files,
+                    debounce_ms,
+                    last_scan,
+                }))
+            })
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }

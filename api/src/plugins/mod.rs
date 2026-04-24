@@ -33,9 +33,9 @@ pub const LARGE_FILE_THRESHOLD: usize = 5 * 1024 * 1024; // 5 MB
 /// Raw file from plugin
 #[derive(Debug, Clone)]
 pub struct RawFile {
-    pub path: String,           // Relative path from source root
-    pub content: String,        // File content (empty for large files — use source_path)
-    pub size: usize,            // File size in bytes
+    pub path: String,             // Relative path from source root
+    pub content: String,          // File content (empty for large files — use source_path)
+    pub size: usize,              // File size in bytes
     pub language: Option<String>, // Programming language if detected
     #[allow(dead_code)]
     pub last_modified: Option<String>, // ISO 8601 timestamp
@@ -57,13 +57,20 @@ pub trait SourcePlugin: Send + Sync {
 
 /// Source type detector
 pub fn detect_source_type(path: &str) -> String {
-    if path.ends_with(".git") || path.contains("github.com") || path.contains("gitlab.com") || path.starts_with("git@") {
+    if path.ends_with(".git")
+        || path.contains("github.com")
+        || path.contains("gitlab.com")
+        || path.starts_with("git@")
+    {
         "git".to_string()
     } else if path.starts_with("http://") || path.starts_with("https://") {
         "web".to_string()
     } else if path.ends_with(".pdf") {
         "pdf".to_string()
-    } else if path.ends_with("conversations.json") || path.contains("chatgpt") || path.contains("claude-export") {
+    } else if path.ends_with("conversations.json")
+        || path.contains("chatgpt")
+        || path.contains("claude-export")
+    {
         "export".to_string()
     } else {
         "fs".to_string()

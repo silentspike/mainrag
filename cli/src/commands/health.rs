@@ -49,10 +49,7 @@ pub async fn run(client: &ApiClient, json_output: bool) -> anyhow::Result<()> {
     if health.services.postgres && health.services.qdrant && health.services.tei {
         println!("{}", "Status: All services operational ✓".green());
     } else {
-        println!(
-            "{}",
-            "Status: Some services are unavailable".yellow()
-        );
+        println!("{}", "Status: Some services are unavailable".yellow());
     }
 
     Ok(())

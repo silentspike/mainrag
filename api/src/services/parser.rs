@@ -21,7 +21,7 @@ pub enum Lang {
     Cpp,
     Java,
     Json,
-    Jsonl,  // JSONL conversations (Claude Code, Codex)
+    Jsonl, // JSONL conversations (Claude Code, Codex)
     Toml,
     Yaml,
     Bash,
@@ -296,12 +296,29 @@ impl CodeParser {
         let mut parsers = HashMap::new();
 
         for lang in [
-            Lang::Rust, Lang::Python, Lang::JavaScript, Lang::TypeScript,
-            Lang::Go, Lang::C, Lang::Cpp, Lang::Java, Lang::Json,
-            Lang::Toml, Lang::Yaml, Lang::Bash, Lang::Markdown,
-            Lang::CSharp, Lang::Zig, Lang::Lua, Lang::Ruby,
-            Lang::Php, Lang::Html, Lang::Css, Lang::Xml,
-            Lang::Scheme, Lang::Sql,
+            Lang::Rust,
+            Lang::Python,
+            Lang::JavaScript,
+            Lang::TypeScript,
+            Lang::Go,
+            Lang::C,
+            Lang::Cpp,
+            Lang::Java,
+            Lang::Json,
+            Lang::Toml,
+            Lang::Yaml,
+            Lang::Bash,
+            Lang::Markdown,
+            Lang::CSharp,
+            Lang::Zig,
+            Lang::Lua,
+            Lang::Ruby,
+            Lang::Php,
+            Lang::Html,
+            Lang::Css,
+            Lang::Xml,
+            Lang::Scheme,
+            Lang::Sql,
         ] {
             if let Some(ts_lang) = lang.ts_language() {
                 let mut parser = Parser::new();
@@ -334,15 +351,18 @@ impl CodeParser {
             return Ok(self.extract_gemini_json(content, path));
         }
 
-        let parser_mutex = self.parsers.get(&lang).ok_or_else(|| {
-            anyhow!("No parser for language: {}", lang)
-        })?;
+        let parser_mutex = self
+            .parsers
+            .get(&lang)
+            .ok_or_else(|| anyhow!("No parser for language: {}", lang))?;
 
         let tree = {
-            let mut parser = parser_mutex.lock().map_err(|e| anyhow!("Parser lock poisoned for {:?}: {}", lang, e))?;
-            parser.parse(content, None).ok_or_else(|| {
-                anyhow!("Failed to parse file: {}", path.display())
-            })?
+            let mut parser = parser_mutex
+                .lock()
+                .map_err(|e| anyhow!("Parser lock poisoned for {:?}: {}", lang, e))?;
+            parser
+                .parse(content, None)
+                .ok_or_else(|| anyhow!("Failed to parse file: {}", path.display()))?
         };
 
         let mut result = ParseResult {
@@ -361,7 +381,11 @@ impl CodeParser {
 
     /// Extract symbols (functions, classes, etc.) from AST
     pub fn extract_symbols(
-        &self, tree: &Tree, source: &str, lang: Lang, result: &mut ParseResult,
+        &self,
+        tree: &Tree,
+        source: &str,
+        lang: Lang,
+        result: &mut ParseResult,
     ) -> Result<()> {
         let root = tree.root_node();
         let mut cursor = root.walk();
@@ -394,7 +418,13 @@ impl CodeParser {
                 result.symbols.push(symbol);
 
                 if cursor.goto_first_child() {
-                    self.walk_for_symbols(cursor, source, lang, result, new_parent.as_deref().or(parent_name));
+                    self.walk_for_symbols(
+                        cursor,
+                        source,
+                        lang,
+                        result,
+                        new_parent.as_deref().or(parent_name),
+                    );
                     cursor.goto_parent();
                 }
             } else if cursor.goto_first_child() {
@@ -410,7 +440,11 @@ impl CodeParser {
 
     /// Convert AST node to Symbol if it's a definition
     fn node_to_symbol(
-        &self, node: &tree_sitter::Node, source: &str, lang: Lang, parent_name: Option<&str>,
+        &self,
+        node: &tree_sitter::Node,
+        source: &str,
+        lang: Lang,
+        parent_name: Option<&str>,
     ) -> Option<ExtractedSymbol> {
         let kind = node.kind();
 
@@ -559,7 +593,11 @@ impl CodeParser {
 
     /// Extract function calls from AST
     pub fn extract_calls(
-        &self, tree: &Tree, source: &str, lang: Lang, result: &mut ParseResult,
+        &self,
+        tree: &Tree,
+        source: &str,
+        lang: Lang,
+        result: &mut ParseResult,
     ) -> Result<()> {
         let root = tree.root_node();
         let mut cursor = root.walk();
@@ -622,19 +660,31 @@ impl CodeParser {
 
     /// Convert call expression node to ExtractedCall
     fn node_to_call(
-        &self, node: &tree_sitter::Node, source: &str, lang: Lang, current_function: &Option<String>,
+        &self,
+        node: &tree_sitter::Node,
+        source: &str,
+        lang: Lang,
+        current_function: &Option<String>,
     ) -> Option<ExtractedCall> {
         let kind = node.kind();
-        let caller_name = current_function.clone().unwrap_or_else(|| "<global>".to_string());
+        let caller_name = current_function
+            .clone()
+            .unwrap_or_else(|| "<global>".to_string());
 
         match lang {
             Lang::Rust => {
                 if kind == "call_expression" {
                     let func = node.child_by_field_name("function")?;
                     let callee_name = func.utf8_text(source.as_bytes()).ok()?.to_string();
-                    let call_type = if callee_name.contains("::") { CallType::Static } else { CallType::Direct };
+                    let call_type = if callee_name.contains("::") {
+                        CallType::Static
+                    } else {
+                        CallType::Direct
+                    };
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type,
+                        caller_name,
+                        callee_name,
+                        call_type,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -643,7 +693,9 @@ impl CodeParser {
                     let method = node.child_by_field_name("name")?;
                     let callee_name = method.utf8_text(source.as_bytes()).ok()?.to_string();
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type: CallType::Method,
+                        caller_name,
+                        callee_name,
+                        call_type: CallType::Method,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -653,9 +705,15 @@ impl CodeParser {
                 if kind == "call" {
                     let func = node.child_by_field_name("function")?;
                     let callee_name = func.utf8_text(source.as_bytes()).ok()?.to_string();
-                    let call_type = if callee_name.contains(".") { CallType::Method } else { CallType::Direct };
+                    let call_type = if callee_name.contains(".") {
+                        CallType::Method
+                    } else {
+                        CallType::Direct
+                    };
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type,
+                        caller_name,
+                        callee_name,
+                        call_type,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -673,7 +731,9 @@ impl CodeParser {
                         CallType::Direct
                     };
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type,
+                        caller_name,
+                        callee_name,
+                        call_type,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -682,7 +742,9 @@ impl CodeParser {
                     let constructor = node.child_by_field_name("constructor")?;
                     let callee_name = constructor.utf8_text(source.as_bytes()).ok()?.to_string();
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type: CallType::Constructor,
+                        caller_name,
+                        callee_name,
+                        call_type: CallType::Constructor,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -692,9 +754,15 @@ impl CodeParser {
                 if kind == "call_expression" {
                     let func = node.child_by_field_name("function")?;
                     let callee_name = func.utf8_text(source.as_bytes()).ok()?.to_string();
-                    let call_type = if callee_name.contains(".") { CallType::Method } else { CallType::Direct };
+                    let call_type = if callee_name.contains(".") {
+                        CallType::Method
+                    } else {
+                        CallType::Direct
+                    };
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type,
+                        caller_name,
+                        callee_name,
+                        call_type,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -713,7 +781,9 @@ impl CodeParser {
                         CallType::Direct
                     };
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type,
+                        caller_name,
+                        callee_name,
+                        call_type,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -734,7 +804,9 @@ impl CodeParser {
                         CallType::Direct
                     };
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type,
+                        caller_name,
+                        callee_name,
+                        call_type,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -744,7 +816,9 @@ impl CodeParser {
                     let type_node = node.child_by_field_name("type")?;
                     let callee_name = type_node.utf8_text(source.as_bytes()).ok()?.to_string();
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type: CallType::Constructor,
+                        caller_name,
+                        callee_name,
+                        call_type: CallType::Constructor,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -763,7 +837,9 @@ impl CodeParser {
                         CallType::Direct
                     };
                     return Some(ExtractedCall {
-                        caller_name, callee_name: method_name, call_type,
+                        caller_name,
+                        callee_name: method_name,
+                        call_type,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -773,7 +849,9 @@ impl CodeParser {
                     let type_node = node.child_by_field_name("type")?;
                     let callee_name = type_node.utf8_text(source.as_bytes()).ok()?.to_string();
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type: CallType::Constructor,
+                        caller_name,
+                        callee_name,
+                        call_type: CallType::Constructor,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -791,7 +869,9 @@ impl CodeParser {
                         CallType::Direct
                     };
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type,
+                        caller_name,
+                        callee_name,
+                        call_type,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -800,7 +880,9 @@ impl CodeParser {
                     let type_node = node.child_by_field_name("type")?;
                     let callee_name = type_node.utf8_text(source.as_bytes()).ok()?.to_string();
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type: CallType::Constructor,
+                        caller_name,
+                        callee_name,
+                        call_type: CallType::Constructor,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -817,7 +899,9 @@ impl CodeParser {
                         CallType::Direct
                     };
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type,
+                        caller_name,
+                        callee_name,
+                        call_type,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -829,7 +913,9 @@ impl CodeParser {
                     let func = node.child_by_field_name("function")?;
                     let callee_name = func.utf8_text(source.as_bytes()).ok()?.to_string();
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type: CallType::Direct,
+                        caller_name,
+                        callee_name,
+                        call_type: CallType::Direct,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -843,7 +929,9 @@ impl CodeParser {
                         CallType::Method
                     };
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type,
+                        caller_name,
+                        callee_name,
+                        call_type,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -852,7 +940,9 @@ impl CodeParser {
                     let class = node.child_by_field_name("class")?;
                     let callee_name = class.utf8_text(source.as_bytes()).ok()?.to_string();
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type: CallType::Constructor,
+                        caller_name,
+                        callee_name,
+                        call_type: CallType::Constructor,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -869,7 +959,9 @@ impl CodeParser {
                         CallType::Direct
                     };
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type,
+                        caller_name,
+                        callee_name,
+                        call_type,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -878,7 +970,8 @@ impl CodeParser {
             Lang::Zig => {
                 // Zig: call_expression
                 if kind == "call_expression" || kind == "call" {
-                    let func = node.child_by_field_name("function")
+                    let func = node
+                        .child_by_field_name("function")
                         .or_else(|| node.child(0))?;
                     let callee_name = func.utf8_text(source.as_bytes()).ok()?.to_string();
                     let call_type = if callee_name.contains(".") {
@@ -887,7 +980,9 @@ impl CodeParser {
                         CallType::Direct
                     };
                     return Some(ExtractedCall {
-                        caller_name, callee_name, call_type,
+                        caller_name,
+                        callee_name,
+                        call_type,
                         call_line: node.start_position().row as u32 + 1,
                         call_column: node.start_position().column as u32,
                     });
@@ -933,12 +1028,17 @@ impl CodeParser {
 
             // Detect format and extract
             if let Some(symbols) = self.parse_claude_code_format(
-                &json, line_num, &mut user_count, &mut assistant_count, &mut thinking_count, path
+                &json,
+                line_num,
+                &mut user_count,
+                &mut assistant_count,
+                &mut thinking_count,
+                path,
             ) {
                 result.symbols.extend(symbols);
-            } else if let Some(symbol) = self.parse_codex_format(
-                &json, line_num, &mut codex_count, path
-            ) {
+            } else if let Some(symbol) =
+                self.parse_codex_format(&json, line_num, &mut codex_count, path)
+            {
                 result.symbols.push(symbol);
             }
         }
@@ -967,7 +1067,11 @@ impl CodeParser {
         let mut user_count = 0u32;
         let mut assistant_count = 0u32;
         let total_lines = content.lines().count();
-        let lines_per_msg = if messages.len() > 0 { total_lines / messages.len() } else { 1 };
+        let lines_per_msg = if messages.len() > 0 {
+            total_lines / messages.len()
+        } else {
+            1
+        };
 
         for (idx, msg) in messages.iter().enumerate() {
             let msg_type = match msg.get("type").and_then(|t| t.as_str()) {
@@ -984,15 +1088,22 @@ impl CodeParser {
                     msg.get("content")
                         .and_then(|c| c.as_array())
                         .and_then(|arr| {
-                            let texts: Vec<&str> = arr.iter()
+                            let texts: Vec<&str> = arr
+                                .iter()
                                 .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
                                 .collect();
-                            if texts.is_empty() { None } else { Some(texts.join("\n")) }
+                            if texts.is_empty() {
+                                None
+                            } else {
+                                Some(texts.join("\n"))
+                            }
                         })
                 }
                 "gemini" => {
                     // content: "string"
-                    msg.get("content").and_then(|c| c.as_str()).map(|s| s.to_string())
+                    msg.get("content")
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.to_string())
                 }
                 _ => continue,
             };
@@ -1007,7 +1118,10 @@ impl CodeParser {
                 (format!("user_{}", user_count), SymbolType::Message)
             } else {
                 assistant_count += 1;
-                (format!("assistant_{}", assistant_count), SymbolType::Message)
+                (
+                    format!("assistant_{}", assistant_count),
+                    SymbolType::Message,
+                )
             };
 
             result.symbols.push(ExtractedSymbol {
@@ -1064,7 +1178,10 @@ impl CodeParser {
             (format!("user_{}", user_count), SymbolType::Message)
         } else {
             *assistant_count += 1;
-            (format!("assistant_{}", assistant_count), SymbolType::Message)
+            (
+                format!("assistant_{}", assistant_count),
+                SymbolType::Message,
+            )
         };
 
         symbols.push(ExtractedSymbol {
@@ -1121,7 +1238,11 @@ impl CodeParser {
                     *codex_count += 1;
                     return Some(ExtractedSymbol {
                         name: format!("codex_msg_{}", codex_count),
-                        qualified_name: Some(format!("{}:codex_msg_{}", path.display(), codex_count)),
+                        qualified_name: Some(format!(
+                            "{}:codex_msg_{}",
+                            path.display(),
+                            codex_count
+                        )),
                         symbol_type: SymbolType::Message,
                         line_start: line_num as u32 + 1,
                         line_end: line_num as u32 + 1,
@@ -1333,12 +1454,16 @@ public class Foo {
 {"type": "tool_use", "message": {"content": "ignored"}}
 {"type": "user", "message": {"content": "Can you help me?"}}"#;
 
-        let result = parser.parse_file(Path::new("conversation.jsonl"), source).unwrap();
+        let result = parser
+            .parse_file(Path::new("conversation.jsonl"), source)
+            .unwrap();
         assert_eq!(result.language, "jsonl");
         assert_eq!(result.symbols.len(), 3); // 2 user + 1 assistant (tool_use filtered)
 
         // Check user messages
-        let user_msgs: Vec<_> = result.symbols.iter()
+        let user_msgs: Vec<_> = result
+            .symbols
+            .iter()
             .filter(|s| s.name.starts_with("user_"))
             .collect();
         assert_eq!(user_msgs.len(), 2);
@@ -1346,7 +1471,9 @@ public class Foo {
         assert_eq!(user_msgs[1].name, "user_2");
 
         // Check assistant message
-        let assistant_msgs: Vec<_> = result.symbols.iter()
+        let assistant_msgs: Vec<_> = result
+            .symbols
+            .iter()
             .filter(|s| s.name.starts_with("assistant_"))
             .collect();
         assert_eq!(assistant_msgs.len(), 1);
@@ -1384,7 +1511,9 @@ public class Foo {
         let result = parser.parse_file(Path::new("conv.jsonl"), source).unwrap();
         assert_eq!(result.symbols.len(), 2); // 1 message + 1 thinking block
 
-        let thinking: Vec<_> = result.symbols.iter()
+        let thinking: Vec<_> = result
+            .symbols
+            .iter()
             .filter(|s| s.symbol_type == SymbolType::ThinkingBlock)
             .collect();
         assert_eq!(thinking.len(), 1);
@@ -1399,7 +1528,10 @@ public class Foo {
 
         let result = parser.parse_file(Path::new("conv.jsonl"), source).unwrap();
         assert_eq!(result.symbols.len(), 1);
-        assert!(result.symbols[0].doc_comment.as_ref().unwrap().contains("Hello from array"));
+        assert!(result.symbols[0]
+            .doc_comment
+            .as_ref()
+            .unwrap()
+            .contains("Hello from array"));
     }
 }
-

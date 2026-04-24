@@ -108,28 +108,43 @@ impl ExportPlugin {
         // Try Claude format (has "conversations" array)
         if let Ok(claude) = serde_json::from_str::<ClaudeExport>(content) {
             if !claude.conversations.is_empty() {
-                info!("Parsed as Claude export format ({} conversations)", claude.conversations.len());
-                return Ok(claude.conversations.into_iter().map(|c| {
-                    let title = c.title.unwrap_or_else(|| "Untitled".to_string());
-                    let messages = c.messages.into_iter().filter_map(|m| {
-                        let role = m.role.unwrap_or_else(|| "unknown".to_string());
-                        let content = m.content.unwrap_or_default();
-                        if content.is_empty() {
-                            None
-                        } else {
-                            Some(UnifiedMessage { role, content })
-                        }
-                    }).collect();
-                    (title, messages)
-                }).collect());
+                info!(
+                    "Parsed as Claude export format ({} conversations)",
+                    claude.conversations.len()
+                );
+                return Ok(claude
+                    .conversations
+                    .into_iter()
+                    .map(|c| {
+                        let title = c.title.unwrap_or_else(|| "Untitled".to_string());
+                        let messages = c
+                            .messages
+                            .into_iter()
+                            .filter_map(|m| {
+                                let role = m.role.unwrap_or_else(|| "unknown".to_string());
+                                let content = m.content.unwrap_or_default();
+                                if content.is_empty() {
+                                    None
+                                } else {
+                                    Some(UnifiedMessage { role, content })
+                                }
+                            })
+                            .collect();
+                        (title, messages)
+                    })
+                    .collect());
             }
         }
 
         // Try as array of ChatGPT conversations (some exports have multiple conversations)
         if let Ok(conversations) = serde_json::from_str::<Vec<ChatGptExport>>(content) {
             if !conversations.is_empty() {
-                info!("Parsed as ChatGPT export array ({} conversations)", conversations.len());
-                return Ok(conversations.into_iter()
+                info!(
+                    "Parsed as ChatGPT export array ({} conversations)",
+                    conversations.len()
+                );
+                return Ok(conversations
+                    .into_iter()
                     .map(|c| self.parse_chatgpt_conversation(c))
                     .collect());
             }
@@ -143,7 +158,9 @@ impl ExportPlugin {
         let title = export.title.unwrap_or_else(|| "Untitled".to_string());
 
         // Find root node (parent == null)
-        let root_id = export.mapping.iter()
+        let root_id = export
+            .mapping
+            .iter()
             .find(|(_, node)| node.parent.is_none())
             .map(|(id, _)| id.clone());
 
@@ -173,11 +190,17 @@ impl ExportPlugin {
         if let Some(node) = mapping.get(node_id) {
             // Extract message if present
             if let Some(msg) = &node.message {
-                let content = msg.content.parts.as_ref()
-                    .map(|parts| parts.iter()
-                        .filter_map(|p| p.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n"))
+                let content = msg
+                    .content
+                    .parts
+                    .as_ref()
+                    .map(|parts| {
+                        parts
+                            .iter()
+                            .filter_map(|p| p.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
                     .unwrap_or_default();
 
                 if !content.is_empty() {
@@ -213,8 +236,12 @@ impl ExportPlugin {
                 "system" => "**System**",
                 _ => "**Unknown**",
             };
-            md.push_str(&format!("## Message {}: {}\n\n{}\n\n---\n\n",
-                idx + 1, emoji, msg.content));
+            md.push_str(&format!(
+                "## Message {}: {}\n\n{}\n\n---\n\n",
+                idx + 1,
+                emoji,
+                msg.content
+            ));
         }
 
         md
@@ -222,7 +249,8 @@ impl ExportPlugin {
 
     /// Create URL-safe slug from title
     fn slugify(&self, title: &str) -> String {
-        title.to_lowercase()
+        title
+            .to_lowercase()
             .chars()
             .map(|c| if c.is_alphanumeric() { c } else { '-' })
             .collect::<String>()
@@ -231,7 +259,7 @@ impl ExportPlugin {
             .collect::<Vec<_>>()
             .join("-")
             .chars()
-            .take(100)  // Limit filename length
+            .take(100) // Limit filename length
             .collect()
     }
 }
@@ -242,7 +270,8 @@ impl SourcePlugin for ExportPlugin {
         info!("Export plugin syncing: {}", source_path);
 
         // Read the export file
-        let content = tokio::fs::read_to_string(source_path).await
+        let content = tokio::fs::read_to_string(source_path)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to read export file: {}", e))?;
 
         // Parse the export (supports ChatGPT and Claude formats)
@@ -258,13 +287,18 @@ impl SourcePlugin for ExportPlugin {
 
         // Convert conversations to Markdown files
         // Use enumerate to ensure unique filenames even if titles are identical
-        let files: Vec<RawFile> = conversations.iter()
+        let files: Vec<RawFile> = conversations
+            .iter()
             .enumerate()
             .filter(|(_, (_, messages))| !messages.is_empty())
             .map(|(idx, (title, messages))| {
                 let markdown = self.conversation_to_markdown(title, messages);
                 let slug = self.slugify(title);
-                let base = if slug.is_empty() { "untitled".to_string() } else { slug };
+                let base = if slug.is_empty() {
+                    "untitled".to_string()
+                } else {
+                    slug
+                };
                 // Add index suffix to prevent filename collisions
                 let path = format!("{}-{:03}.md", base, idx + 1);
 
@@ -279,7 +313,10 @@ impl SourcePlugin for ExportPlugin {
             })
             .collect();
 
-        info!("Export plugin: {} conversations converted to Markdown", files.len());
+        info!(
+            "Export plugin: {} conversations converted to Markdown",
+            files.len()
+        );
 
         Ok(SyncResult {
             files,
@@ -363,8 +400,14 @@ mod tests {
     fn test_conversation_to_markdown() {
         let plugin = ExportPlugin::new();
         let messages = vec![
-            UnifiedMessage { role: "user".to_string(), content: "What is RAG?".to_string() },
-            UnifiedMessage { role: "assistant".to_string(), content: "RAG stands for...".to_string() },
+            UnifiedMessage {
+                role: "user".to_string(),
+                content: "What is RAG?".to_string(),
+            },
+            UnifiedMessage {
+                role: "assistant".to_string(),
+                content: "RAG stands for...".to_string(),
+            },
         ];
 
         let md = plugin.conversation_to_markdown("Test", &messages);
@@ -482,17 +525,27 @@ mod tests {
 
         let result = plugin.parse_export(content).unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].1.len(), 2, "Should have 2 messages (user + first branch)");
+        assert_eq!(
+            result[0].1.len(),
+            2,
+            "Should have 2 messages (user + first branch)"
+        );
 
         // First branch should be included
         assert!(
-            result[0].1.iter().any(|m| m.content.contains("First response")),
+            result[0]
+                .1
+                .iter()
+                .any(|m| m.content.contains("First response")),
             "First branch should be included"
         );
 
         // Second branch should be ignored
         assert!(
-            !result[0].1.iter().any(|m| m.content.contains("Alternative response")),
+            !result[0]
+                .1
+                .iter()
+                .any(|m| m.content.contains("Alternative response")),
             "Second branch should be ignored (main path only)"
         );
     }

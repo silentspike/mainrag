@@ -12,7 +12,9 @@ pub async fn run_add(
     symbols: &[String],
     source: Option<&str>,
 ) -> Result<()> {
-    let id = client.create_negative_evidence(concept, path, reason, symbols, source).await?;
+    let id = client
+        .create_negative_evidence(concept, path, reason, symbols, source)
+        .await?;
     println!("{} Dead-end recorded (id: {})", "OK".green(), id);
     println!("  Concept: {}", concept);
     println!("  Path: {}", path);
@@ -23,11 +25,7 @@ pub async fn run_add(
     Ok(())
 }
 
-pub async fn run_list(
-    client: &ApiClient,
-    concept: &str,
-    json_output: bool,
-) -> Result<()> {
+pub async fn run_list(client: &ApiClient, concept: &str, json_output: bool) -> Result<()> {
     let results = client.search_negative_evidence(concept).await?;
 
     if json_output {
@@ -36,11 +34,17 @@ pub async fn run_list(
     }
 
     if results.is_empty() {
-        println!("{}", format!("No dead-ends found for '{}'", concept).yellow());
+        println!(
+            "{}",
+            format!("No dead-ends found for '{}'", concept).yellow()
+        );
         return Ok(());
     }
 
-    println!("{}", format!("{} Found {} dead-end(s)", "OK".green(), results.len()).bold());
+    println!(
+        "{}",
+        format!("{} Found {} dead-end(s)", "OK".green(), results.len()).bold()
+    );
 
     for de in &results {
         println!();

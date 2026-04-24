@@ -192,9 +192,13 @@ impl ApiClient {
 
     /// Raw authenticated GET request, returns response body as string
     pub async fn raw_get(&self, url: &str) -> Result<String> {
-        let response = self.client.get(url)
+        let response = self
+            .client
+            .get(url)
             .bearer_auth(self.token.as_deref().unwrap_or(""))
-            .send().await.context("raw_get failed")?;
+            .send()
+            .await
+            .context("raw_get failed")?;
         if !response.status().is_success() {
             return Err(anyhow!("HTTP {}", response.status()));
         }
@@ -203,8 +207,8 @@ impl ApiClient {
 
     /// Load token from config file if exists
     pub fn load_token_from_file() -> Option<String> {
-        let config_dir = directories::ProjectDirs::from("", "", "mainrag")
-            .map(|d| d.config_dir().to_path_buf());
+        let config_dir =
+            directories::ProjectDirs::from("", "", "mainrag").map(|d| d.config_dir().to_path_buf());
 
         if let Some(dir) = config_dir {
             let token_file = dir.join("token");
@@ -272,10 +276,7 @@ impl ApiClient {
             .context("Failed to connect to API server")?;
 
         if !response.status().is_success() {
-            return Err(anyhow!(
-                "Health check failed: {}",
-                response.status()
-            ));
+            return Err(anyhow!("Health check failed: {}", response.status()));
         }
 
         response
@@ -322,7 +323,11 @@ impl ApiClient {
         source: Option<&str>,
     ) -> Result<SearchResponse> {
         // Use keyword endpoint for keyword mode, hybrid for others
-        let endpoint = if mode == "keyword" { "search/keyword" } else { "search" };
+        let endpoint = if mode == "keyword" {
+            "search/keyword"
+        } else {
+            "search"
+        };
         let url = format!("{}/api/v1/{}", self.base_url, endpoint);
 
         // Build JSON request body (matches API's SearchRequest struct)
@@ -383,10 +388,7 @@ impl ApiClient {
             req = req.bearer_auth(token);
         }
 
-        let response = req
-            .send()
-            .await
-            .context("Failed to fetch sources")?;
+        let response = req.send().await.context("Failed to fetch sources")?;
 
         if !response.status().is_success() {
             return Err(anyhow!("Failed to list sources: {}", response.status()));
@@ -440,7 +442,11 @@ impl ApiClient {
         }
 
         // Try case-insensitive match
-        if let Some(source) = sources.sources.iter().find(|s| s.name.eq_ignore_ascii_case(source_name)) {
+        if let Some(source) = sources
+            .sources
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(source_name))
+        {
             return Ok(source.id);
         }
 
@@ -451,17 +457,17 @@ impl ApiClient {
             }
         }
 
-        Err(anyhow!("Source '{}' not found. Use 'mainrag source list' to see available sources.", source_name))
+        Err(anyhow!(
+            "Source '{}' not found. Use 'mainrag source list' to see available sources.",
+            source_name
+        ))
     }
 
     pub async fn sync_source(&self, source_name: &str) -> Result<SyncSourceResponse> {
         // Resolve name to ID
         let source_id = self.get_source_id_by_name(source_name).await?;
 
-        let url = format!(
-            "{}/api/v1/admin/sources/{}/sync",
-            self.base_url, source_id
-        );
+        let url = format!("{}/api/v1/admin/sources/{}/sync", self.base_url, source_id);
 
         let response = self
             .client
@@ -493,7 +499,11 @@ impl ApiClient {
 
     /// Sync specific files incrementally (for watch mode)
     /// This is much faster than full sync as it only processes the specified files.
-    pub async fn sync_files(&self, source_name: &str, files: &[PathBuf]) -> Result<SyncSourceResponse> {
+    pub async fn sync_files(
+        &self,
+        source_name: &str,
+        files: &[PathBuf],
+    ) -> Result<SyncSourceResponse> {
         // Resolve name to ID
         let source_id = self.get_source_id_by_name(source_name).await?;
 
@@ -503,7 +513,8 @@ impl ApiClient {
         );
 
         // Convert paths to strings
-        let file_paths: Vec<String> = files.iter()
+        let file_paths: Vec<String> = files
+            .iter()
             .map(|p| p.to_string_lossy().to_string())
             .collect();
 
@@ -569,7 +580,10 @@ impl ApiClient {
 
     /// Get detailed stats for a source before deletion
     /// Returns chunk count, symbol count, call-graph entries, and qdrant vectors
-    pub async fn get_source_deletion_stats(&self, source_name: &str) -> Result<SourceDeletionStats> {
+    pub async fn get_source_deletion_stats(
+        &self,
+        source_name: &str,
+    ) -> Result<SourceDeletionStats> {
         let source_id = self.get_source_id_by_name(source_name).await?;
 
         let url = format!("{}/api/v1/admin/sources/{}/stats", self.base_url, source_id);
@@ -637,9 +651,18 @@ impl ApiClient {
     }
 
     /// Search for symbols (functions, classes, etc.)
-    pub async fn search_symbols(&self, query: &str, symbol_type: Option<&str>, limit: u32) -> Result<Vec<SymbolInfo>> {
-        let mut url = format!("{}/api/v1/intelligence/symbols?query={}&limit={}",
-            self.base_url, urlencoding::encode(query), limit);
+    pub async fn search_symbols(
+        &self,
+        query: &str,
+        symbol_type: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<SymbolInfo>> {
+        let mut url = format!(
+            "{}/api/v1/intelligence/symbols?query={}&limit={}",
+            self.base_url,
+            urlencoding::encode(query),
+            limit
+        );
 
         if let Some(st) = symbol_type {
             url.push_str(&format!("&symbol_type={}", st));
@@ -653,17 +676,30 @@ impl ApiClient {
         let response = req.send().await.context("Failed to search symbols")?;
 
         if !response.status().is_success() {
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(anyhow!("Symbol search failed: {}", error_text));
         }
 
-        response.json::<Vec<SymbolInfo>>().await.context("Failed to parse symbol search response")
+        response
+            .json::<Vec<SymbolInfo>>()
+            .await
+            .context("Failed to parse symbol search response")
     }
 
     /// Get callers of a function (direct endpoint)
-    pub async fn find_callers(&self, function_name: &str, source: Option<&str>) -> Result<Vec<CallerInfo>> {
-        let mut url = format!("{}/api/v1/intelligence/callers?function={}",
-            self.base_url, urlencoding::encode(function_name));
+    pub async fn find_callers(
+        &self,
+        function_name: &str,
+        source: Option<&str>,
+    ) -> Result<Vec<CallerInfo>> {
+        let mut url = format!(
+            "{}/api/v1/intelligence/callers?function={}",
+            self.base_url,
+            urlencoding::encode(function_name)
+        );
         if let Some(s) = source {
             url.push_str(&format!("&source={}", urlencoding::encode(s)));
         }
@@ -676,17 +712,30 @@ impl ApiClient {
         let response = req.send().await.context("Failed to find callers")?;
 
         if !response.status().is_success() {
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(anyhow!("Find callers failed: {}", error_text));
         }
 
-        response.json::<Vec<CallerInfo>>().await.context("Failed to parse callers response")
+        response
+            .json::<Vec<CallerInfo>>()
+            .await
+            .context("Failed to parse callers response")
     }
 
     /// Get callees of a function (direct endpoint)
-    pub async fn find_callees(&self, function_name: &str, source: Option<&str>) -> Result<Vec<String>> {
-        let mut url = format!("{}/api/v1/intelligence/callees?function={}",
-            self.base_url, urlencoding::encode(function_name));
+    pub async fn find_callees(
+        &self,
+        function_name: &str,
+        source: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let mut url = format!(
+            "{}/api/v1/intelligence/callees?function={}",
+            self.base_url,
+            urlencoding::encode(function_name)
+        );
         if let Some(s) = source {
             url.push_str(&format!("&source={}", urlencoding::encode(s)));
         }
@@ -699,17 +748,34 @@ impl ApiClient {
         let response = req.send().await.context("Failed to find callees")?;
 
         if !response.status().is_success() {
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(anyhow!("Find callees failed: {}", error_text));
         }
 
-        response.json::<Vec<String>>().await.context("Failed to parse callees response")
+        response
+            .json::<Vec<String>>()
+            .await
+            .context("Failed to parse callees response")
     }
 
     /// N-hop call chain traversal
-    pub async fn find_call_chain(&self, function_name: &str, direction: &str, depth: i32, source: Option<&str>) -> Result<Vec<CallChainEntry>> {
-        let mut url = format!("{}/api/v1/intelligence/call-chain?function={}&direction={}&depth={}",
-            self.base_url, urlencoding::encode(function_name), direction, depth);
+    pub async fn find_call_chain(
+        &self,
+        function_name: &str,
+        direction: &str,
+        depth: i32,
+        source: Option<&str>,
+    ) -> Result<Vec<CallChainEntry>> {
+        let mut url = format!(
+            "{}/api/v1/intelligence/call-chain?function={}&direction={}&depth={}",
+            self.base_url,
+            urlencoding::encode(function_name),
+            direction,
+            depth
+        );
         if let Some(s) = source {
             url.push_str(&format!("&source={}", urlencoding::encode(s)));
         }
@@ -727,7 +793,9 @@ impl ApiClient {
 
         let body: serde_json::Value = response.json().await?;
         let entries: Vec<CallChainEntry> = serde_json::from_value(
-            body.get("entries").cloned().unwrap_or(serde_json::json!([]))
+            body.get("entries")
+                .cloned()
+                .unwrap_or(serde_json::json!([])),
         )?;
         Ok(entries)
     }
@@ -746,11 +814,16 @@ impl ApiClient {
             .context("Failed to trigger backfill")?;
 
         if response.status() == 401 {
-            return Err(anyhow!("Unauthorized. Please login first with: mainrag auth login"));
+            return Err(anyhow!(
+                "Unauthorized. Please login first with: mainrag auth login"
+            ));
         }
 
         if !response.status().is_success() {
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(anyhow!("Backfill failed: {}", error_text));
         }
 
@@ -764,21 +837,38 @@ impl ApiClient {
     // Intelligence Layer Methods
     // =================================================================
 
-    pub async fn get_symbol_cards(&self, name: &str, source: Option<&str>) -> Result<Vec<SymbolCard>> {
-        let mut url = format!("{}/api/v1/intelligence/cards?name={}", self.base_url, urlencoding::encode(name));
+    pub async fn get_symbol_cards(
+        &self,
+        name: &str,
+        source: Option<&str>,
+    ) -> Result<Vec<SymbolCard>> {
+        let mut url = format!(
+            "{}/api/v1/intelligence/cards?name={}",
+            self.base_url,
+            urlencoding::encode(name)
+        );
         if let Some(s) = source {
             url.push_str(&format!("&source_name={}", urlencoding::encode(s)));
         }
-        let response = self.client.get(&url)
+        let response = self
+            .client
+            .get(&url)
             .bearer_auth(self.token.as_deref().unwrap_or(""))
-            .send().await.context("get_symbol_cards request failed")?;
+            .send()
+            .await
+            .context("get_symbol_cards request failed")?;
         if !response.status().is_success() {
             return Err(anyhow!("get_symbol_cards failed: {}", response.status()));
         }
         response.json().await.context("parse symbol cards")
     }
 
-    pub async fn explain_path(&self, symbol_name: &str, source: Option<&str>, max_depth: Option<u32>) -> Result<Vec<DelegationChain>> {
+    pub async fn explain_path(
+        &self,
+        symbol_name: &str,
+        source: Option<&str>,
+        max_depth: Option<u32>,
+    ) -> Result<Vec<DelegationChain>> {
         let url = format!("{}/api/v1/intelligence/explain_path", self.base_url);
         let mut body = serde_json::json!({"symbol_name": symbol_name});
         if let Some(d) = max_depth {
@@ -792,10 +882,14 @@ impl ApiClient {
                 }
             }
         }
-        let response = self.client.post(&url)
+        let response = self
+            .client
+            .post(&url)
             .bearer_auth(self.token.as_deref().unwrap_or(""))
             .json(&body)
-            .send().await.context("explain_path request failed")?;
+            .send()
+            .await
+            .context("explain_path request failed")?;
         if !response.status().is_success() {
             return Err(anyhow!("explain_path failed: {}", response.status()));
         }
@@ -803,8 +897,12 @@ impl ApiClient {
     }
 
     pub async fn create_negative_evidence(
-        &self, concept: &str, path_description: &str, reason: &str,
-        symbols: &[String], source: Option<&str>,
+        &self,
+        concept: &str,
+        path_description: &str,
+        reason: &str,
+        symbols: &[String],
+        source: Option<&str>,
     ) -> Result<i64> {
         let url = format!("{}/api/v1/intelligence/negative_evidence", self.base_url);
         let mut body = serde_json::json!({
@@ -820,24 +918,42 @@ impl ApiClient {
                 }
             }
         }
-        let response = self.client.post(&url)
+        let response = self
+            .client
+            .post(&url)
             .bearer_auth(self.token.as_deref().unwrap_or(""))
             .json(&body)
-            .send().await.context("create_negative_evidence failed")?;
+            .send()
+            .await
+            .context("create_negative_evidence failed")?;
         if !response.status().is_success() {
-            return Err(anyhow!("create_negative_evidence failed: {}", response.status()));
+            return Err(anyhow!(
+                "create_negative_evidence failed: {}",
+                response.status()
+            ));
         }
         let result: serde_json::Value = response.json().await?;
         Ok(result["id"].as_i64().unwrap_or(0))
     }
 
     pub async fn search_negative_evidence(&self, concept: &str) -> Result<Vec<NegativeEvidence>> {
-        let url = format!("{}/api/v1/intelligence/negative_evidence?concept={}", self.base_url, urlencoding::encode(concept));
-        let response = self.client.get(&url)
+        let url = format!(
+            "{}/api/v1/intelligence/negative_evidence?concept={}",
+            self.base_url,
+            urlencoding::encode(concept)
+        );
+        let response = self
+            .client
+            .get(&url)
             .bearer_auth(self.token.as_deref().unwrap_or(""))
-            .send().await.context("search_negative_evidence failed")?;
+            .send()
+            .await
+            .context("search_negative_evidence failed")?;
         if !response.status().is_success() {
-            return Err(anyhow!("search_negative_evidence failed: {}", response.status()));
+            return Err(anyhow!(
+                "search_negative_evidence failed: {}",
+                response.status()
+            ));
         }
         response.json().await.context("parse negative evidence")
     }
@@ -848,10 +964,14 @@ impl ApiClient {
         if let Some(s) = source {
             body["source"] = serde_json::json!(s);
         }
-        let response = self.client.post(&url)
+        let response = self
+            .client
+            .post(&url)
             .bearer_auth(self.token.as_deref().unwrap_or(""))
             .json(&body)
-            .send().await.context("explore request failed")?;
+            .send()
+            .await
+            .context("explore request failed")?;
         if !response.status().is_success() {
             return Err(anyhow!("explore failed: {}", response.status()));
         }

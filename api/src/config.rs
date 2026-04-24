@@ -99,7 +99,7 @@ impl Config {
             server: ServerConfig {
                 host: env::var("API_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
                 port: env::var("API_PORT")
-                    .unwrap_or_else(|_| "3001".to_string())  // Default 3001 (Grafana uses 3000)
+                    .unwrap_or_else(|_| "3001".to_string()) // Default 3001 (Grafana uses 3000)
                     .parse()?,
                 search_default_limit: env::var("SEARCH_DEFAULT_LIMIT")
                     .ok()
@@ -110,7 +110,7 @@ impl Config {
                     // H8: Hard ceiling to prevent excessive allocations
                     .map(|v| v.min(500)),
                 cors_origins: env::var("CORS_ORIGINS")
-                    .unwrap_or_default()  // Empty = no CORS (fail-closed)
+                    .unwrap_or_default() // Empty = no CORS (fail-closed)
                     .split(',')
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
@@ -118,11 +118,7 @@ impl Config {
                 api_key_pepper: {
                     let pepper = env::var("API_KEY_PEPPER")
                         .unwrap_or_else(|_| "<REDACTED_PEPPER_PREV>".to_string());
-                    const WEAK_PEPPERS: &[&str] = &[
-                        "<REDACTED_PEPPER_PREV>",
-                        "changeme",
-                        "pepper",
-                    ];
+                    const WEAK_PEPPERS: &[&str] = &["<REDACTED_PEPPER_PREV>", "changeme", "pepper"];
                     if pepper.len() < 16 {
                         panic!("API_KEY_PEPPER must be at least 16 characters (got {}). Aborting startup.", pepper.len());
                     }
@@ -167,13 +163,11 @@ impl Config {
                     .parse()?,
                 name: env::var("POSTGRES_DB").unwrap_or_else(|_| "mainrag".to_string()),
                 user: env::var("POSTGRES_USER").unwrap_or_else(|_| "mainrag".to_string()),
-                password: env::var("POSTGRES_PASSWORD")
-                    .expect("POSTGRES_PASSWORD must be set"),
+                password: env::var("POSTGRES_PASSWORD").expect("POSTGRES_PASSWORD must be set"),
                 max_connections: env::var("DB_MAX_CONNECTIONS")
                     .unwrap_or_else(|_| "32".to_string())
                     .parse()?,
-                tls_mode: env::var("POSTGRES_TLS")
-                    .unwrap_or_else(|_| "disable".to_string()),
+                tls_mode: env::var("POSTGRES_TLS").unwrap_or_else(|_| "disable".to_string()),
             },
             qdrant: QdrantConfig {
                 url: env::var("QDRANT_REST_URL")
@@ -182,7 +176,9 @@ impl Config {
                 api_key: {
                     let key = env::var("QDRANT_API_KEY").ok().filter(|s| !s.is_empty());
                     if key.is_none() {
-                        tracing::warn!("QDRANT_API_KEY not set — Qdrant requests will be unauthenticated");
+                        tracing::warn!(
+                            "QDRANT_API_KEY not set — Qdrant requests will be unauthenticated"
+                        );
                     }
                     key
                 },
@@ -203,12 +199,14 @@ impl Config {
                     .and_then(|v| v.parse().ok()),
             },
             jwt: {
-                let secret = env::var("JWT_SECRET")
-                    .expect("JWT_SECRET must be set");
+                let secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
 
                 // Sprint 2.6: JWT Secret Validation — fail startup on weak secrets
                 if secret.len() < 32 {
-                    panic!("JWT_SECRET must be at least 32 characters (got {}). Aborting startup.", secret.len());
+                    panic!(
+                        "JWT_SECRET must be at least 32 characters (got {}). Aborting startup.",
+                        secret.len()
+                    );
                 }
                 // Blocklist known defaults
                 const WEAK_SECRETS: &[&str] = &[
@@ -226,7 +224,9 @@ impl Config {
                 }
 
                 // Sprint 4.3: Dual-Key rotation — accept tokens signed with previous secret
-                let secret_previous = env::var("JWT_SECRET_PREVIOUS").ok().filter(|s| !s.is_empty());
+                let secret_previous = env::var("JWT_SECRET_PREVIOUS")
+                    .ok()
+                    .filter(|s| !s.is_empty());
                 if secret_previous.is_some() {
                     tracing::info!("JWT_SECRET_PREVIOUS configured — dual-key rotation active");
                 }
@@ -263,10 +263,7 @@ impl Config {
     pub fn database_url_redacted(&self) -> String {
         format!(
             "host={} port={} user={} password=*** dbname={}",
-            self.database.host,
-            self.database.port,
-            self.database.user,
-            self.database.name
+            self.database.host, self.database.port, self.database.user, self.database.name
         )
     }
 }

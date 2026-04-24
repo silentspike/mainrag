@@ -3,17 +3,16 @@
 //! Clones/pulls git repositories and extracts files
 
 use async_trait::async_trait;
+use git2::Repository;
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use git2::Repository;
 use tracing::{info, warn};
 
-use super::{SourcePlugin, SyncResult, RawFile};
+use super::{RawFile, SourcePlugin, SyncResult};
 
 const INDEXABLE_EXTENSIONS: &[&str] = &[
-    "rs", "py", "js", "ts", "tsx", "go", "java", "c", "cpp", "h", "hpp",
-    "md", "txt", "json", "yaml", "yml", "toml", "sql", "sh", "bash",
-    "html", "css", "scss", "vue", "svelte",
+    "rs", "py", "js", "ts", "tsx", "go", "java", "c", "cpp", "h", "hpp", "md", "txt", "json",
+    "yaml", "yml", "toml", "sql", "sh", "bash", "html", "css", "scss", "vue", "svelte",
 ];
 
 const GIT_CACHE_DIR: &str = "/data/mainrag/git-cache";
@@ -21,16 +20,16 @@ const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
 
 // Binary file signatures to skip
 const BINARY_SIGNATURES: &[&[u8]] = &[
-    b"\xFF\xFE", // UTF-16 LE BOM
-    b"\xFE\xFF", // UTF-16 BE BOM
-    b"\x7FELF",  // ELF binary
-    b"MZ",       // Windows PE
+    b"\xFF\xFE",         // UTF-16 LE BOM
+    b"\xFE\xFF",         // UTF-16 BE BOM
+    b"\x7FELF",          // ELF binary
+    b"MZ",               // Windows PE
     b"\xCA\xFE\xBA\xBE", // Java class
-    b"\x89PNG",  // PNG
-    b"\xFF\xD8\xFF", // JPEG
-    b"GIF87a",   // GIF87
-    b"GIF89a",   // GIF89
-    b"%PDF",     // PDF
+    b"\x89PNG",          // PNG
+    b"\xFF\xD8\xFF",     // JPEG
+    b"GIF87a",           // GIF87
+    b"GIF89a",           // GIF89
+    b"%PDF",             // PDF
 ];
 
 /// Check if a file is binary by examining its magic bytes
@@ -59,9 +58,10 @@ fn check_if_binary(path: &Path) -> anyhow::Result<bool> {
     }
 
     // Check for mostly non-printable characters
-    let non_printable_count = header.iter().filter(|&&b| {
-        b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t'
-    }).count();
+    let non_printable_count = header
+        .iter()
+        .filter(|&&b| b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t')
+        .count();
 
     if non_printable_count as f32 / bytes_read as f32 > 0.3 {
         return Ok(true);
@@ -148,10 +148,7 @@ impl GitPlugin {
             }
 
             // Check extension
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
             if !INDEXABLE_EXTENSIONS.contains(&ext) {
                 continue;
@@ -160,7 +157,8 @@ impl GitPlugin {
             // Check file size
             if let Ok(metadata) = path.metadata() {
                 if metadata.len() > MAX_FILE_SIZE {
-                    warn!("File too large ({}MB > {}MB): {}",
+                    warn!(
+                        "File too large ({}MB > {}MB): {}",
                         metadata.len() / (1024 * 1024),
                         MAX_FILE_SIZE / (1024 * 1024),
                         path.display()
@@ -175,7 +173,7 @@ impl GitPlugin {
                     warn!("Skipping binary file: {}", path.display());
                     continue;
                 }
-                Ok(false) => {}, // Continue to read
+                Ok(false) => {} // Continue to read
                 Err(e) => {
                     warn!("Failed to check binary status {}: {}", path.display(), e);
                     continue;
@@ -232,7 +230,11 @@ impl SourcePlugin for GitPlugin {
         // Collect files
         let files = self.collect_files(&repo_path).await?;
 
-        info!("Git sync complete: {} files from {}", files.len(), source_name);
+        info!(
+            "Git sync complete: {} files from {}",
+            files.len(),
+            source_name
+        );
 
         Ok(SyncResult {
             files,

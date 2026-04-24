@@ -2,11 +2,11 @@
 //!
 //! Simple MCP server that delegates to the MAINRAG API server.
 
+use crate::client::ApiClient;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use crate::client::ApiClient;
 
 /// MCP Request
 #[derive(Debug, Deserialize)]
@@ -295,7 +295,9 @@ impl McpServer {
         let limit = args["limit"].as_u64().unwrap_or(10);
         let source = args["source"].as_str();
 
-        let result = self.client.search(query, "hybrid", limit as u32, source)
+        let result = self
+            .client
+            .search(query, "hybrid", limit as u32, source)
             .await
             .map_err(|e| McpError {
                 code: -32000,
@@ -318,7 +320,9 @@ impl McpServer {
         let symbol_type = args["type"].as_str();
         let limit = args["limit"].as_u64().unwrap_or(20) as u32;
 
-        let result = self.client.search_symbols(query, symbol_type, limit)
+        let result = self
+            .client
+            .search_symbols(query, symbol_type, limit)
             .await
             .map_err(|e| McpError {
                 code: -32000,
@@ -341,7 +345,9 @@ impl McpServer {
 
         let source = args.get("source").and_then(|v| v.as_str());
 
-        let result = self.client.find_callers(function, source)
+        let result = self
+            .client
+            .find_callers(function, source)
             .await
             .map_err(|e| McpError {
                 code: -32000,
@@ -372,7 +378,9 @@ impl McpServer {
         })?;
         let source = args.get("source").and_then(|v| v.as_str());
 
-        let result = self.client.find_callees(function, source)
+        let result = self
+            .client
+            .find_callees(function, source)
             .await
             .map_err(|e| McpError {
                 code: -32000,
@@ -403,50 +411,81 @@ impl McpServer {
         let side_effect = args.get("side_effect").and_then(|v| v.as_str());
 
         // Build query params — pass "*" as name wildcard
-        let mut url = format!("{}/api/v1/intelligence/cards?name=%25", self.client.base_url());
-        if let Some(l) = layer { url.push_str(&format!("&layer={}", l)); }
-        if let Some(r) = resource { url.push_str(&format!("&resource={}", r)); }
-        if let Some(s) = side_effect { url.push_str(&format!("&side_effect={}", s)); }
+        let mut url = format!(
+            "{}/api/v1/intelligence/cards?name=%25",
+            self.client.base_url()
+        );
+        if let Some(l) = layer {
+            url.push_str(&format!("&layer={}", l));
+        }
+        if let Some(r) = resource {
+            url.push_str(&format!("&resource={}", r));
+        }
+        if let Some(s) = side_effect {
+            url.push_str(&format!("&side_effect={}", s));
+        }
 
         // Use get_symbol_cards with a wildcard — the API supports layer/resource/side_effect filters
-        let cards = self.client.get_symbol_cards("%", None)
+        let cards = self
+            .client
+            .get_symbol_cards("%", None)
             .await
-            .map_err(|e| McpError { code: -32000, message: e.to_string() })?;
+            .map_err(|e| McpError {
+                code: -32000,
+                message: e.to_string(),
+            })?;
 
         // Filter client-side if API doesn't support all params yet
-        let filtered: Vec<_> = cards.into_iter().filter(|c| {
-            layer.is_none_or(|l| c.layer.as_deref() == Some(l))
-                && resource.is_none_or(|r| c.affected_resource.as_deref() == Some(r))
-                && side_effect.is_none_or(|s| c.side_effect_type.as_deref() == Some(s))
-        }).take(20).collect();
+        let filtered: Vec<_> = cards
+            .into_iter()
+            .filter(|c| {
+                layer.is_none_or(|l| c.layer.as_deref() == Some(l))
+                    && resource.is_none_or(|r| c.affected_resource.as_deref() == Some(r))
+                    && side_effect.is_none_or(|s| c.side_effect_type.as_deref() == Some(s))
+            })
+            .take(20)
+            .collect();
 
-        Ok(json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&filtered).unwrap_or_default() }] }))
+        Ok(
+            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&filtered).unwrap_or_default() }] }),
+        )
     }
 
     async fn tool_get_ownership(&self, args: &Value) -> Result<Value, McpError> {
         let symbol = args["symbol"].as_str().ok_or_else(|| McpError {
-            code: -32602, message: "Missing symbol".to_string(),
+            code: -32602,
+            message: "Missing symbol".to_string(),
         })?;
 
         // Call ownership endpoint via the API
-        let url = format!("{}/api/v1/intelligence/ownership?symbol={}",
-            self.client.base_url(), urlencoding::encode(symbol));
-        let response = self.client.raw_get(&url)
-            .await
-            .map_err(|e| McpError { code: -32000, message: e.to_string() })?;
+        let url = format!(
+            "{}/api/v1/intelligence/ownership?symbol={}",
+            self.client.base_url(),
+            urlencoding::encode(symbol)
+        );
+        let response = self.client.raw_get(&url).await.map_err(|e| McpError {
+            code: -32000,
+            message: e.to_string(),
+        })?;
 
         Ok(json!({ "content": [{ "type": "text", "text": response }] }))
     }
 
     async fn tool_explore(&self, args: &Value) -> Result<Value, McpError> {
         let query = args["query"].as_str().ok_or_else(|| McpError {
-            code: -32602, message: "Missing query".to_string(),
+            code: -32602,
+            message: "Missing query".to_string(),
         })?;
         let source = args.get("source").and_then(|v| v.as_str());
 
-        let result = self.client.explore(query, source)
+        let result = self
+            .client
+            .explore(query, source)
             .await
-            .map_err(|e| McpError { code: -32000, message: e.to_string() })?;
+            .map_err(|e| McpError {
+                code: -32000,
+                message: e.to_string(),
+            })?;
 
         // Return formatted text directly — structured for LLM consumption
         Ok(json!({ "content": [{ "type": "text", "text": result.formatted }] }))
@@ -459,14 +498,23 @@ impl McpServer {
         })?;
         let source = args.get("source").and_then(|v| v.as_str());
 
-        let cards = self.client.get_symbol_cards(name, source)
+        let cards = self
+            .client
+            .get_symbol_cards(name, source)
             .await
-            .map_err(|e| McpError { code: -32000, message: e.to_string() })?;
+            .map_err(|e| McpError {
+                code: -32000,
+                message: e.to_string(),
+            })?;
 
         if cards.is_empty() {
-            Ok(json!({ "content": [{ "type": "text", "text": format!("No symbol card found for '{}'", name) }] }))
+            Ok(
+                json!({ "content": [{ "type": "text", "text": format!("No symbol card found for '{}'", name) }] }),
+            )
         } else {
-            Ok(json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&cards).unwrap_or_default() }] }))
+            Ok(
+                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&cards).unwrap_or_default() }] }),
+            )
         }
     }
 
@@ -476,38 +524,65 @@ impl McpServer {
             message: "Missing symbol_name".to_string(),
         })?;
         let source = args.get("source").and_then(|v| v.as_str());
-        let max_depth = args.get("max_depth").and_then(|v| v.as_u64()).map(|d| d as u32);
+        let max_depth = args
+            .get("max_depth")
+            .and_then(|v| v.as_u64())
+            .map(|d| d as u32);
 
-        let chains = self.client.explain_path(symbol_name, source, max_depth)
+        let chains = self
+            .client
+            .explain_path(symbol_name, source, max_depth)
             .await
-            .map_err(|e| McpError { code: -32000, message: e.to_string() })?;
+            .map_err(|e| McpError {
+                code: -32000,
+                message: e.to_string(),
+            })?;
 
         if chains.is_empty() {
-            Ok(json!({ "content": [{ "type": "text", "text": format!("No delegation chain found for '{}'", symbol_name) }] }))
+            Ok(
+                json!({ "content": [{ "type": "text", "text": format!("No delegation chain found for '{}'", symbol_name) }] }),
+            )
         } else {
-            Ok(json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&chains).unwrap_or_default() }] }))
+            Ok(
+                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&chains).unwrap_or_default() }] }),
+            )
         }
     }
 
     async fn tool_report_dead_end(&self, args: &Value) -> Result<Value, McpError> {
         let concept = args["concept"].as_str().ok_or_else(|| McpError {
-            code: -32602, message: "Missing concept".to_string(),
+            code: -32602,
+            message: "Missing concept".to_string(),
         })?;
         let path_description = args["path_description"].as_str().ok_or_else(|| McpError {
-            code: -32602, message: "Missing path_description".to_string(),
+            code: -32602,
+            message: "Missing path_description".to_string(),
         })?;
         let reason = args["reason"].as_str().ok_or_else(|| McpError {
-            code: -32602, message: "Missing reason".to_string(),
+            code: -32602,
+            message: "Missing reason".to_string(),
         })?;
-        let symbols: Vec<String> = args.get("symbols")
+        let symbols: Vec<String> = args
+            .get("symbols")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
-        let id = self.client.create_negative_evidence(concept, path_description, reason, &symbols, None)
+        let id = self
+            .client
+            .create_negative_evidence(concept, path_description, reason, &symbols, None)
             .await
-            .map_err(|e| McpError { code: -32000, message: e.to_string() })?;
+            .map_err(|e| McpError {
+                code: -32000,
+                message: e.to_string(),
+            })?;
 
-        Ok(json!({ "content": [{ "type": "text", "text": format!("Dead-end recorded (id: {})", id) }] }))
+        Ok(
+            json!({ "content": [{ "type": "text", "text": format!("Dead-end recorded (id: {})", id) }] }),
+        )
     }
 }

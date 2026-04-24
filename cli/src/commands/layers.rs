@@ -17,10 +17,20 @@ pub async fn run(
     }
 
     // Build URL with server-side filters
-    let mut url = format!("{}/api/v1/intelligence/cards?name=%25&limit={}", client.base_url(), limit);
-    if let Some(l) = layer { url.push_str(&format!("&layer={}", urlencoding::encode(l))); }
-    if let Some(r) = resource { url.push_str(&format!("&resource={}", urlencoding::encode(r))); }
-    if let Some(s) = side_effect { url.push_str(&format!("&side_effect={}", urlencoding::encode(s))); }
+    let mut url = format!(
+        "{}/api/v1/intelligence/cards?name=%25&limit={}",
+        client.base_url(),
+        limit
+    );
+    if let Some(l) = layer {
+        url.push_str(&format!("&layer={}", urlencoding::encode(l)));
+    }
+    if let Some(r) = resource {
+        url.push_str(&format!("&resource={}", urlencoding::encode(r)));
+    }
+    if let Some(s) = side_effect {
+        url.push_str(&format!("&side_effect={}", urlencoding::encode(s)));
+    }
 
     let body = client.raw_get(&url).await?;
     let cards: Vec<crate::client::api::SymbolCard> = serde_json::from_str(&body)?;
@@ -35,14 +45,18 @@ pub async fn run(
         return Ok(());
     }
 
-    println!("{}", format!("\r{} Found {} symbol(s)", "OK".green(), cards.len()).bold());
+    println!(
+        "{}",
+        format!("\r{} Found {} symbol(s)", "OK".green(), cards.len()).bold()
+    );
 
     for card in &cards {
         let layer_str = card.layer.as_deref().unwrap_or("?");
         let effect_str = card.side_effect_type.as_deref().unwrap_or("-");
         let res_str = card.affected_resource.as_deref().unwrap_or("-");
 
-        println!("  {} {} [{}] {} ({})",
+        println!(
+            "  {} {} [{}] {} ({})",
             card.name.bold(),
             format!("[{}]", layer_str).cyan(),
             effect_str,

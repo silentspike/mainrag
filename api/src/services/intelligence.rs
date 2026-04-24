@@ -4,8 +4,8 @@ use anyhow::Result;
 use deadpool_postgres::Pool;
 use std::path::Path;
 
-use crate::db::DEFAULT_USER_ID;
 use super::parser::{CodeParser, ParseResult};
+use crate::db::DEFAULT_USER_ID;
 
 /// Code Intelligence Service
 /// Thread-safe: CodeParser uses per-language Mutex internally, allowing concurrent parsing.
@@ -16,7 +16,10 @@ pub struct IntelligenceService {
 
 impl IntelligenceService {
     pub fn new(pool: Pool) -> Result<Self> {
-        Ok(Self { pool, parser: CodeParser::new()? })
+        Ok(Self {
+            pool,
+            parser: CodeParser::new()?,
+        })
     }
 
     /// Get a database client with RLS context applied (using default admin user)
@@ -24,10 +27,12 @@ impl IntelligenceService {
         let client = self.pool.get().await?;
         // Dereference LazyLock<Uuid> to get Uuid, then convert to String for set_config
         let user_id_str = DEFAULT_USER_ID.to_string();
-        client.execute(
-            "SELECT set_config('app.user_id', $1::text, true)",
-            &[&user_id_str],
-        ).await?;
+        client
+            .execute(
+                "SELECT set_config('app.user_id', $1::text, true)",
+                &[&user_id_str],
+            )
+            .await?;
         Ok(client)
     }
 
@@ -36,7 +41,10 @@ impl IntelligenceService {
     ///
     /// Sprint 3.1: Batch-INSERTs via UNNEST — ~290+ DB roundtrips → ~4
     pub async fn analyze_file(
-        &self, file_id: i64, path: &Path, content: &str,
+        &self,
+        file_id: i64,
+        path: &Path,
+        content: &str,
     ) -> Result<ParseResult> {
         // Per-language locking: only the parser for this file's language is locked
         let result = self.parser.parse_file(path, content)?;
@@ -72,8 +80,9 @@ impl IntelligenceService {
                 languages.push(s.language.clone());
             }
 
-            let rows = client.query(
-                r#"
+            let rows = client
+                .query(
+                    r#"
                 INSERT INTO symbols (file_id, name, qualified_name, type, line_start, line_end,
                                      context, signature, doc_comment, visibility, language)
                 SELECT $1, unnest($2::text[]), unnest($3::text[]), unnest($4::text[]),
@@ -91,12 +100,20 @@ impl IntelligenceService {
                     language = EXCLUDED.language
                 RETURNING id, name
                 "#,
-                &[
-                    &file_id, &names, &qualified_names, &types,
-                    &line_starts, &line_ends,
-                    &signatures, &doc_comments, &visibilities, &languages,
-                ],
-            ).await?;
+                    &[
+                        &file_id,
+                        &names,
+                        &qualified_names,
+                        &types,
+                        &line_starts,
+                        &line_ends,
+                        &signatures,
+                        &doc_comments,
+                        &visibilities,
+                        &languages,
+                    ],
+                )
+                .await?;
 
             // Build name→id map for call graph resolution
             let mut symbol_map = std::collections::HashMap::new();
@@ -150,12 +167,17 @@ impl IntelligenceService {
     /// Find symbols by name pattern
     #[allow(dead_code)]
     pub async fn find_symbols(
-        &self, query: &str, source_id: Option<i64>, symbol_type: Option<&str>, limit: i32,
+        &self,
+        query: &str,
+        source_id: Option<i64>,
+        symbol_type: Option<&str>,
+        limit: i32,
     ) -> Result<Vec<SymbolResult>> {
         let client = self.get_rls_client().await?;
 
-        let rows = client.query(
-            r#"
+        let rows = client
+            .query(
+                r#"
             SELECT s.id, s.name, s.qualified_name, s.type, s.line_start, s.line_end,
                    s.signature, s.visibility, s.language, f.path, src.name
             FROM symbols s
@@ -166,24 +188,40 @@ impl IntelligenceService {
               AND ($3::TEXT IS NULL OR s.type = $3)
             ORDER BY s.name LIMIT $4
             "#,
-            &[&format!("%{}%", query), &source_id, &symbol_type, &limit],
-        ).await?;
+                &[&format!("%{}%", query), &source_id, &symbol_type, &limit],
+            )
+            .await?;
 
-        Ok(rows.iter().map(|row| SymbolResult {
-            id: row.get(0), name: row.get(1), qualified_name: row.get(2),
-            symbol_type: row.get(3), line_start: row.get(4), line_end: row.get(5),
-            signature: row.get(6), visibility: row.get(7), language: row.get(8),
-            file_path: row.get(9), source_name: row.get(10),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|row| SymbolResult {
+                id: row.get(0),
+                name: row.get(1),
+                qualified_name: row.get(2),
+                symbol_type: row.get(3),
+                line_start: row.get(4),
+                line_end: row.get(5),
+                signature: row.get(6),
+                visibility: row.get(7),
+                language: row.get(8),
+                file_path: row.get(9),
+                source_name: row.get(10),
+            })
+            .collect())
     }
 
     /// Find all callers of a function
     #[allow(dead_code)]
-    pub async fn find_callers(&self, function_name: &str, source_id: Option<i64>) -> Result<Vec<CallerResult>> {
+    pub async fn find_callers(
+        &self,
+        function_name: &str,
+        source_id: Option<i64>,
+    ) -> Result<Vec<CallerResult>> {
         let client = self.get_rls_client().await?;
 
-        let rows = client.query(
-            r#"
+        let rows = client
+            .query(
+                r#"
             SELECT caller.name, f.path, cg.call_line, cg.call_type, src.name
             FROM call_graph cg
             JOIN symbols caller ON cg.caller_symbol_id = caller.id
@@ -193,22 +231,34 @@ impl IntelligenceService {
               AND ($2::BIGINT IS NULL OR f.source_id = $2)
             ORDER BY f.path, cg.call_line LIMIT 100
             "#,
-            &[&function_name, &source_id],
-        ).await?;
+                &[&function_name, &source_id],
+            )
+            .await?;
 
-        Ok(rows.iter().map(|row| CallerResult {
-            caller_name: row.get(0), caller_file: row.get(1), call_line: row.get(2),
-            call_type: row.get(3), source_name: row.get(4),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|row| CallerResult {
+                caller_name: row.get(0),
+                caller_file: row.get(1),
+                call_line: row.get(2),
+                call_type: row.get(3),
+                source_name: row.get(4),
+            })
+            .collect())
     }
 
     /// Find all functions called by a function
     #[allow(dead_code)]
-    pub async fn find_callees(&self, function_name: &str, source_id: Option<i64>) -> Result<Vec<CalleeResult>> {
+    pub async fn find_callees(
+        &self,
+        function_name: &str,
+        source_id: Option<i64>,
+    ) -> Result<Vec<CalleeResult>> {
         let client = self.get_rls_client().await?;
 
-        let rows = client.query(
-            r#"
+        let rows = client
+            .query(
+                r#"
             SELECT cg.callee_name, cg.callee_symbol_id IS NOT NULL, cg.call_line,
                    cg.call_type, f.path, src.name
             FROM call_graph cg
@@ -219,13 +269,21 @@ impl IntelligenceService {
               AND ($2::BIGINT IS NULL OR f.source_id = $2)
             ORDER BY cg.call_line LIMIT 100
             "#,
-            &[&function_name, &source_id],
-        ).await?;
+                &[&function_name, &source_id],
+            )
+            .await?;
 
-        Ok(rows.iter().map(|row| CalleeResult {
-            callee_name: row.get(0), resolved: row.get(1), call_line: row.get(2),
-            call_type: row.get(3), caller_file: row.get(4), source_name: row.get(5),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|row| CalleeResult {
+                callee_name: row.get(0),
+                resolved: row.get(1),
+                call_line: row.get(2),
+                call_type: row.get(3),
+                caller_file: row.get(4),
+                source_name: row.get(5),
+            })
+            .collect())
     }
 
     /// Find N-hop call chain — iterative BFS in Rust (not recursive SQL).
@@ -246,12 +304,15 @@ impl IntelligenceService {
         let mut frontier_names: Vec<String> = vec![function_name.to_string()];
 
         for depth in 1..=max_depth {
-            if frontier_names.is_empty() { break; }
+            if frontier_names.is_empty() {
+                break;
+            }
 
             let rows = if direction == "callees" {
                 // Forward: find callees of frontier symbols
-                client.query(
-                    "SELECT DISTINCT ON (cg.callee_name)
+                client
+                    .query(
+                        "SELECT DISTINCT ON (cg.callee_name)
                             caller.name as from_name, cg.callee_name as to_name,
                             f.path, cg.call_line, cg.callee_symbol_id
                      FROM call_graph cg
@@ -261,12 +322,14 @@ impl IntelligenceService {
                        AND ($2::BIGINT IS NULL OR f.source_id = $2)
                      ORDER BY cg.callee_name
                      LIMIT 20",
-                    &[&frontier_names, &source_id],
-                ).await?
+                        &[&frontier_names, &source_id],
+                    )
+                    .await?
             } else {
                 // Backward: find callers of frontier symbols
-                client.query(
-                    "SELECT DISTINCT ON (caller.name)
+                client
+                    .query(
+                        "SELECT DISTINCT ON (caller.name)
                             caller.name as from_name, cg.callee_name as to_name,
                             f.path, cg.call_line, cg.caller_symbol_id
                      FROM call_graph cg
@@ -276,8 +339,9 @@ impl IntelligenceService {
                        AND ($2::BIGINT IS NULL OR f.source_id = $2)
                      ORDER BY caller.name
                      LIMIT 20",
-                    &[&frontier_names, &source_id],
-                ).await?
+                        &[&frontier_names, &source_id],
+                    )
+                    .await?
             };
 
             let mut next_frontier = Vec::new();
@@ -290,14 +354,31 @@ impl IntelligenceService {
 
                 // Skip already visited symbols (cycle detection)
                 if let Some(id) = sym_id {
-                    if visited.contains(&id) { continue; }
+                    if visited.contains(&id) {
+                        continue;
+                    }
                     visited.insert(id);
                 }
 
                 // Skip common noise functions
-                let target = if direction == "callees" { &to_name } else { &from_name };
-                if ["SWC", "r3B", "assert", "equals", "toString", "isControlSurfaceThread",
-                    "isDocumentThread", "exec", "deprecated"].contains(&target.as_str()) {
+                let target = if direction == "callees" {
+                    &to_name
+                } else {
+                    &from_name
+                };
+                if [
+                    "SWC",
+                    "r3B",
+                    "assert",
+                    "equals",
+                    "toString",
+                    "isControlSurfaceThread",
+                    "isDocumentThread",
+                    "exec",
+                    "deprecated",
+                ]
+                .contains(&target.as_str())
+                {
                     continue;
                 }
 
@@ -310,14 +391,20 @@ impl IntelligenceService {
                 });
 
                 // Next frontier: the newly discovered names
-                let next_name = if direction == "callees" { to_name } else { from_name };
+                let next_name = if direction == "callees" {
+                    to_name
+                } else {
+                    from_name
+                };
                 if !frontier_names.contains(&next_name) {
                     next_frontier.push(next_name);
                 }
             }
 
             frontier_names = next_frontier;
-            if results.len() >= 100 { break; } // Safety cap
+            if results.len() >= 100 {
+                break;
+            } // Safety cap
         }
 
         Ok(results)
@@ -384,8 +471,9 @@ impl IntelligenceService {
         } else {
             // Backward: who calls this, and who calls THOSE callers?
             // Uses caller_symbol_id for reverse traversal.
-            client.query(
-                r#"
+            client
+                .query(
+                    r#"
                 WITH RECURSIVE chain AS (
                     -- Seed: functions that call the target
                     SELECT cg.caller_symbol_id,
@@ -423,17 +511,21 @@ impl IntelligenceService {
                 ORDER BY depth, caller_name, callee_name
                 LIMIT 100
                 "#,
-                &[&function_name, &max_depth, &source_id],
-            ).await?
+                    &[&function_name, &max_depth, &source_id],
+                )
+                .await?
         };
 
-        Ok(rows.iter().map(|row| CallChainEntry {
-            depth: row.get::<_, i32>(0) as u32,
-            from_name: row.get(1),
-            to_name: row.get(2),
-            file_path: row.get(3),
-            line: row.get(4),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|row| CallChainEntry {
+                depth: row.get::<_, i32>(0) as u32,
+                from_name: row.get(1),
+                to_name: row.get(2),
+                file_path: row.get(3),
+                line: row.get(4),
+            })
+            .collect())
     }
 
     /// Get stats
@@ -456,33 +548,54 @@ impl IntelligenceService {
             &[&source_id],
         ).await?;
 
-        let languages: Vec<(String, i64)> = lang_rows.iter().map(|row| (row.get(0), row.get(1))).collect();
+        let languages: Vec<(String, i64)> = lang_rows
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
 
-        Ok(IntelligenceStats { symbols_count, calls_count, languages })
+        Ok(IntelligenceStats {
+            symbols_count,
+            calls_count,
+            languages,
+        })
     }
 }
 
 #[allow(dead_code)]
 #[derive(Debug, serde::Serialize)]
 pub struct SymbolResult {
-    pub id: i64, pub name: String, pub qualified_name: Option<String>,
-    pub symbol_type: String, pub line_start: i32, pub line_end: i32,
-    pub signature: Option<String>, pub visibility: Option<String>,
-    pub language: String, pub file_path: String, pub source_name: String,
+    pub id: i64,
+    pub name: String,
+    pub qualified_name: Option<String>,
+    pub symbol_type: String,
+    pub line_start: i32,
+    pub line_end: i32,
+    pub signature: Option<String>,
+    pub visibility: Option<String>,
+    pub language: String,
+    pub file_path: String,
+    pub source_name: String,
 }
 
 #[allow(dead_code)]
 #[derive(Debug, serde::Serialize)]
 pub struct CallerResult {
-    pub caller_name: String, pub caller_file: String, pub call_line: i32,
-    pub call_type: String, pub source_name: String,
+    pub caller_name: String,
+    pub caller_file: String,
+    pub call_line: i32,
+    pub call_type: String,
+    pub source_name: String,
 }
 
 #[allow(dead_code)]
 #[derive(Debug, serde::Serialize)]
 pub struct CalleeResult {
-    pub callee_name: String, pub resolved: bool, pub call_line: i32,
-    pub call_type: String, pub caller_file: String, pub source_name: String,
+    pub callee_name: String,
+    pub resolved: bool,
+    pub call_line: i32,
+    pub call_type: String,
+    pub caller_file: String,
+    pub source_name: String,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -497,22 +610,27 @@ pub struct CallChainEntry {
 #[allow(dead_code)]
 #[derive(Debug, serde::Serialize)]
 pub struct IntelligenceStats {
-    pub symbols_count: i64, pub calls_count: i64, pub languages: Vec<(String, i64)>,
+    pub symbols_count: i64,
+    pub calls_count: i64,
+    pub languages: Vec<(String, i64)>,
 }
 
 // =============================================================================
 // Intelligence Layer: Symbol Cards + Annotations + Negative Evidence
 // =============================================================================
 
-use crate::db::models::{SymbolCard, AnnotationInfo, NegativeEvidence, DelegationChain, DelegationStep};
+use crate::db::models::{
+    AnnotationInfo, DelegationChain, DelegationStep, NegativeEvidence, SymbolCard,
+};
 
 impl IntelligenceService {
     /// Get a single symbol card by symbol_id.
     /// LEFT JOINs symbol_cards so cards without enrichment still return (with None fields).
     pub async fn get_symbol_card(&self, symbol_id: i64) -> Result<Option<SymbolCard>> {
         let client = self.get_rls_client().await?;
-        let row = client.query_opt(
-            r#"
+        let row = client
+            .query_opt(
+                r#"
             SELECT s.id, s.name, s.qualified_name, s.type, s.signature,
                    f.path, s.line_start, s.line_end, src.name as source_name,
                    s.visibility,
@@ -525,8 +643,9 @@ impl IntelligenceService {
             LEFT JOIN symbol_cards sc ON sc.symbol_id = s.id
             WHERE s.id = $1
             "#,
-            &[&symbol_id],
-        ).await?;
+                &[&symbol_id],
+            )
+            .await?;
 
         Ok(row.map(|r| row_to_symbol_card(&r)))
     }
@@ -549,8 +668,9 @@ impl IntelligenceService {
         let resource_owned = resource.map(|s| s.to_string());
         let side_effect_owned = side_effect.map(|s| s.to_string());
 
-        let rows = client.query(
-            r#"
+        let rows = client
+            .query(
+                r#"
             SELECT s.id, s.name, s.qualified_name, s.type, s.signature,
                    f.path, s.line_start, s.line_end, src.name as source_name,
                    s.visibility,
@@ -569,8 +689,16 @@ impl IntelligenceService {
             ORDER BY sc.classification_confidence DESC NULLS LAST, s.name
             LIMIT $6
             "#,
-            &[&search_pattern, &source_id, &layer_owned, &resource_owned, &side_effect_owned, &(limit as i64)],
-        ).await?;
+                &[
+                    &search_pattern,
+                    &source_id,
+                    &layer_owned,
+                    &resource_owned,
+                    &side_effect_owned,
+                    &(limit as i64),
+                ],
+            )
+            .await?;
 
         Ok(rows.iter().map(row_to_symbol_card).collect())
     }
@@ -578,21 +706,26 @@ impl IntelligenceService {
     /// Get annotations for a symbol.
     pub async fn get_annotations(&self, symbol_id: i64) -> Result<Vec<AnnotationInfo>> {
         let client = self.get_rls_client().await?;
-        let rows = client.query(
-            r#"
+        let rows = client
+            .query(
+                r#"
             SELECT annotation_type, value, confidence
             FROM symbol_annotations
             WHERE symbol_id = $1
             ORDER BY annotation_type, value
             "#,
-            &[&symbol_id],
-        ).await?;
+                &[&symbol_id],
+            )
+            .await?;
 
-        Ok(rows.iter().map(|r| AnnotationInfo {
-            annotation_type: r.get(0),
-            value: r.get(1),
-            confidence: r.get(2),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| AnnotationInfo {
+                annotation_type: r.get(0),
+                value: r.get(1),
+                confidence: r.get(2),
+            })
+            .collect())
     }
 
     /// Get ownership/containment relations for a symbol name.
@@ -642,15 +775,18 @@ impl IntelligenceService {
             &[&search_pattern, &exact_name],
         ).await?;
 
-        Ok(rows.iter().map(|r| crate::db::models::OwnershipInfo {
-            symbol_name: r.get(0),
-            relation_type: r.get(1),
-            direction: r.get(2),
-            target_name: r.get(3),
-            confidence: r.get::<_, f64>(4) as f32,
-            evidence_line: r.get(5),
-            target_file: r.get(6),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| crate::db::models::OwnershipInfo {
+                symbol_name: r.get(0),
+                relation_type: r.get(1),
+                direction: r.get(2),
+                target_name: r.get(3),
+                confidence: r.get::<_, f64>(4) as f32,
+                evidence_line: r.get(5),
+                target_file: r.get(6),
+            })
+            .collect())
     }
 
     /// Create a negative evidence entry.
@@ -688,8 +824,9 @@ impl IntelligenceService {
         let client = self.get_rls_client().await?;
 
         // Use FTS for better matching (websearch handles natural language queries)
-        let rows = client.query(
-            r#"
+        let rows = client
+            .query(
+                r#"
             SELECT id, concept, path_description, reason, symbols, severity,
                    created_by, domain_profile
             FROM negative_evidence
@@ -698,19 +835,23 @@ impl IntelligenceService {
             ORDER BY created_at DESC
             LIMIT 20
             "#,
-            &[&concept, &source_id],
-        ).await?;
+                &[&concept, &source_id],
+            )
+            .await?;
 
-        Ok(rows.iter().map(|r| NegativeEvidence {
-            id: r.get(0),
-            concept: r.get(1),
-            path_description: r.get(2),
-            reason: r.get(3),
-            symbols: r.get(4),
-            severity: r.get(5),
-            created_by: r.get(6),
-            domain_profile: r.get(7),
-        }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| NegativeEvidence {
+                id: r.get(0),
+                concept: r.get(1),
+                path_description: r.get(2),
+                reason: r.get(3),
+                symbols: r.get(4),
+                severity: r.get(5),
+                created_by: r.get(6),
+                domain_profile: r.get(7),
+            })
+            .collect())
     }
 
     /// Trace delegation chain from a symbol through proxy → dispatch → mutation.
@@ -725,7 +866,9 @@ impl IntelligenceService {
         let client = self.get_rls_client().await?;
 
         // Find all symbols matching the name
-        let entry_cards = self.search_symbol_cards(symbol_name, source_id, None, None, None, 10).await?;
+        let entry_cards = self
+            .search_symbol_cards(symbol_name, source_id, None, None, None, 10)
+            .await?;
         if entry_cards.is_empty() {
             return Ok(vec![]);
         }
@@ -738,7 +881,9 @@ impl IntelligenceService {
             visited.insert(entry.symbol_id);
 
             // Walk delegation_targets recursively
-            let mut current_targets = entry.delegation_targets.clone()
+            let mut current_targets = entry
+                .delegation_targets
+                .clone()
                 .and_then(|v| serde_json::from_value::<Vec<DelegationTarget>>(v).ok())
                 .unwrap_or_default();
 
@@ -753,20 +898,28 @@ impl IntelligenceService {
                 };
 
                 // Get code snippet from call_graph.call_line (using CURRENT caller, not entry)
-                let snippet = self.get_call_site_snippet(
-                    &client, current_caller_id, &target.name,
-                ).await.ok().flatten();
+                let snippet = self
+                    .get_call_site_snippet(&client, current_caller_id, &target.name)
+                    .await
+                    .ok()
+                    .flatten();
 
                 // Try to load the target's symbol card
                 let target_card = if let Some(tid) = target.symbol_id {
-                    if visited.contains(&tid) { break; }
+                    if visited.contains(&tid) {
+                        break;
+                    }
                     visited.insert(tid);
                     self.get_symbol_card(tid).await.ok().flatten()
                 } else {
                     // Resolve by name
-                    let results = self.search_symbol_cards(&target.name, source_id, None, None, None, 1).await?;
+                    let results = self
+                        .search_symbol_cards(&target.name, source_id, None, None, None, 1)
+                        .await?;
                     if let Some(card) = results.into_iter().next() {
-                        if visited.contains(&card.symbol_id) { break; }
+                        if visited.contains(&card.symbol_id) {
+                            break;
+                        }
                         visited.insert(card.symbol_id);
                         Some(card)
                     } else {
@@ -776,7 +929,9 @@ impl IntelligenceService {
 
                 // Get annotations for this step
                 let step_anns = if let Some(ref card) = target_card {
-                    self.get_annotations(card.symbol_id).await.unwrap_or_default()
+                    self.get_annotations(card.symbol_id)
+                        .await
+                        .unwrap_or_default()
                 } else {
                     vec![]
                 };
@@ -804,7 +959,9 @@ impl IntelligenceService {
                 });
 
                 // Get next delegation targets from this step's card
-                let next_targets = step_card.delegation_targets.clone()
+                let next_targets = step_card
+                    .delegation_targets
+                    .clone()
                     .and_then(|v| serde_json::from_value::<Vec<DelegationTarget>>(v).ok())
                     .unwrap_or_default();
 
@@ -825,7 +982,10 @@ impl IntelligenceService {
             }
 
             // Collect all annotations from the entry point
-            let entry_anns = self.get_annotations(entry.symbol_id).await.unwrap_or_default();
+            let entry_anns = self
+                .get_annotations(entry.symbol_id)
+                .await
+                .unwrap_or_default();
 
             chains.push(DelegationChain {
                 entry_point: entry.clone(),
@@ -844,8 +1004,9 @@ impl IntelligenceService {
         caller_symbol_id: i64,
         callee_name: &str,
     ) -> Result<Option<String>> {
-        let row = client.query_opt(
-            r#"
+        let row = client
+            .query_opt(
+                r#"
             SELECT cg.call_line, c.content_text, c.start_line
             FROM call_graph cg
             JOIN symbols s ON cg.caller_symbol_id = s.id
@@ -856,8 +1017,9 @@ impl IntelligenceService {
             ORDER BY (c.end_line - c.start_line) ASC
             LIMIT 1
             "#,
-            &[&caller_symbol_id, &callee_name],
-        ).await?;
+                &[&caller_symbol_id, &callee_name],
+            )
+            .await?;
 
         Ok(row.and_then(|r| {
             let call_line: i32 = r.get(0);
@@ -881,13 +1043,14 @@ impl IntelligenceService {
         source_name: Option<&str>,
         domain_registry: Option<&crate::services::domain_profile::DomainProfileRegistry>,
     ) -> Result<crate::db::models::ExploreResponse> {
-        use crate::db::models::{ExploreResponse, CandidatePath, SuggestedQuery};
+        use crate::db::models::{CandidatePath, ExploreResponse, SuggestedQuery};
 
         // 1. Resolve domain profile and expand query
         let mut symbol_queries: Vec<String> = vec![query.to_string()];
         let mut intent: Option<String> = None;
         let mut domain_name: Option<String> = None;
-        let mut operation_symbol_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut operation_symbol_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         if let (Some(registry), Some(src)) = (domain_registry, source_name) {
             if let Some(expansion) = registry.expand_query(query, src) {
@@ -906,10 +1069,12 @@ impl IntelligenceService {
         // 2. Resolve source_id
         let source_id = if let Some(src) = source_name {
             let client = self.get_rls_client().await?;
-            let row = client.query_opt(
-                "SELECT id FROM sources WHERE name = $1",
-                &[&src.to_string()],
-            ).await?;
+            let row = client
+                .query_opt(
+                    "SELECT id FROM sources WHERE name = $1",
+                    &[&src.to_string()],
+                )
+                .await?;
             row.map(|r| r.get::<_, i64>(0))
         } else {
             None
@@ -920,7 +1085,9 @@ impl IntelligenceService {
         let mut seen_ids = std::collections::HashSet::new();
 
         for sq in &symbol_queries {
-            let cards = self.search_symbol_cards(sq, source_id, None, None, None, 10).await?;
+            let cards = self
+                .search_symbol_cards(sq, source_id, None, None, None, 10)
+                .await?;
             for card in cards {
                 if seen_ids.insert(card.symbol_id) {
                     all_cards.push(card);
@@ -929,10 +1096,14 @@ impl IntelligenceService {
         }
 
         // 4. Load negative evidence FIRST (before candidate selection)
-        let negative = self.search_negative_evidence(query, None).await.unwrap_or_default();
+        let negative = self
+            .search_negative_evidence(query, None)
+            .await
+            .unwrap_or_default();
 
         // Build dead-end symbol set for demotion
-        let dead_end_symbols: std::collections::HashSet<String> = negative.iter()
+        let dead_end_symbols: std::collections::HashSet<String> = negative
+            .iter()
             .flat_map(|ne| {
                 let mut names = vec![ne.path_description.clone()];
                 if let Some(arr) = ne.symbols.as_array() {
@@ -943,7 +1114,8 @@ impl IntelligenceService {
             .collect();
 
         // Dead-end reason lookup for why_might_not_work
-        let dead_end_reasons: std::collections::HashMap<String, String> = negative.iter()
+        let dead_end_reasons: std::collections::HashMap<String, String> = negative
+            .iter()
             .flat_map(|ne| {
                 let reason = ne.reason.clone();
                 let mut entries = vec![(ne.path_description.clone(), reason.clone())];
@@ -967,7 +1139,8 @@ impl IntelligenceService {
         let mut intent_candidates: Vec<&SymbolCard> = Vec::new();
         if let Some(ref intent) = intent {
             // Primary: direct profile operation matches (e.g. createEmptyClip from operations.create)
-            let primary: Vec<&SymbolCard> = all_cards.iter()
+            let primary: Vec<&SymbolCard> = all_cards
+                .iter()
                 .filter(|c| c.side_effect_type.as_deref() == Some(intent.as_str()))
                 .filter(|c| operation_symbol_names.contains(&c.name.to_lowercase()))
                 .filter(|c| !dead_end_symbols.contains(&c.name))
@@ -979,9 +1152,14 @@ impl IntelligenceService {
             // Secondary: generic intent matches (only if primary < 2)
             if intent_candidates.len() < 2 {
                 let remaining = 2 - intent_candidates.len();
-                let secondary: Vec<&SymbolCard> = all_cards.iter()
+                let secondary: Vec<&SymbolCard> = all_cards
+                    .iter()
                     .filter(|c| c.side_effect_type.as_deref() == Some(intent.as_str()))
-                    .filter(|c| !intent_candidates.iter().any(|ic| ic.symbol_id == c.symbol_id))
+                    .filter(|c| {
+                        !intent_candidates
+                            .iter()
+                            .any(|ic| ic.symbol_id == c.symbol_id)
+                    })
                     .filter(|c| !dead_end_symbols.contains(&c.name))
                     .take(remaining)
                     .collect();
@@ -992,14 +1170,20 @@ impl IntelligenceService {
         // Stage 2: Chain candidates — ONLY if intent didn't fill enough slots
         let chain_candidates: Vec<&SymbolCard> = if intent_candidates.len() < 2 {
             let remaining = 2 - intent_candidates.len();
-            all_cards.iter()
+            all_cards
+                .iter()
                 .filter(|c| {
-                    c.delegation_targets.as_ref()
+                    c.delegation_targets
+                        .as_ref()
                         .and_then(|v| v.as_array())
                         .map(|a| !a.is_empty())
                         .unwrap_or(false)
                 })
-                .filter(|c| !intent_candidates.iter().any(|ic| ic.symbol_id == c.symbol_id))
+                .filter(|c| {
+                    !intent_candidates
+                        .iter()
+                        .any(|ic| ic.symbol_id == c.symbol_id)
+                })
                 .filter(|c| !dead_end_symbols.contains(&c.name))
                 .take(remaining)
                 .collect()
@@ -1013,7 +1197,8 @@ impl IntelligenceService {
         top_candidates.truncate(3);
 
         // Stage 3: Dead-end candidates at the end (demoted, not excluded)
-        let dead_end_candidates: Vec<&SymbolCard> = all_cards.iter()
+        let dead_end_candidates: Vec<&SymbolCard> = all_cards
+            .iter()
             .filter(|c| dead_end_symbols.contains(&c.name))
             .filter(|c| !top_candidates.iter().any(|tc| tc.symbol_id == c.symbol_id))
             .take(1)
@@ -1028,17 +1213,25 @@ impl IntelligenceService {
         // 6. Trace delegation chains for top candidates
         let mut candidate_paths = Vec::new();
         for (i, card) in top_candidates.iter().enumerate() {
-            let chains = self.trace_delegation_chain(&card.name, source_id, 6).await?;
+            let chains = self
+                .trace_delegation_chain(&card.name, source_id, 6)
+                .await?;
 
             // Pick the best chain (one with most steps), or empty chain for interfaces
-            let chain = chains.into_iter().max_by_key(|c| c.steps.len())
+            let chain = chains
+                .into_iter()
+                .max_by_key(|c| c.steps.len())
                 .unwrap_or_else(|| DelegationChain {
                     entry_point: (*card).clone(),
                     steps: vec![],
                     annotations: vec![],
                 });
 
-            let title = format!("Via {} [{}]", card.name, card.layer.as_deref().unwrap_or("?"));
+            let title = format!(
+                "Via {} [{}]",
+                card.name,
+                card.layer.as_deref().unwrap_or("?")
+            );
 
             let confidence = if card.classification_confidence.unwrap_or(0.0) >= 0.8 {
                 "high".to_string()
@@ -1051,12 +1244,20 @@ impl IntelligenceService {
             // Check dead-end status for this candidate and its chain steps
             let mut dead_end_reason: Option<String> = None;
             if let Some(reason) = dead_end_reasons.get(&card.name) {
-                dead_end_reason = Some(format!("KNOWN DEAD END (matched symbol: {}): {}", card.name, reason));
+                dead_end_reason = Some(format!(
+                    "KNOWN DEAD END (matched symbol: {}): {}",
+                    card.name, reason
+                ));
             }
             for step in &chain.steps {
-                if dead_end_reason.is_some() { break; }
+                if dead_end_reason.is_some() {
+                    break;
+                }
                 if let Some(reason) = dead_end_reasons.get(&step.symbol.name) {
-                    dead_end_reason = Some(format!("KNOWN DEAD END (matched chain step: {}): {}", step.symbol.name, reason));
+                    dead_end_reason = Some(format!(
+                        "KNOWN DEAD END (matched chain step: {}): {}",
+                        step.symbol.name, reason
+                    ));
                 }
             }
 
@@ -1074,20 +1275,35 @@ impl IntelligenceService {
         let mut suggested = Vec::new();
         if let Some(first) = candidate_paths.first() {
             suggested.push(SuggestedQuery {
-                query: format!("mainrag call-graph {} --source {}", first.chain.entry_point.name, source_name.unwrap_or("?")),
+                query: format!(
+                    "mainrag call-graph {} --source {}",
+                    first.chain.entry_point.name,
+                    source_name.unwrap_or("?")
+                ),
                 rationale: "Find all callers/callees of the entry point".to_string(),
             });
         }
         if all_cards.len() > 3 {
             suggested.push(SuggestedQuery {
-                query: format!("mainrag card {} --source {}", all_cards[0].name, source_name.unwrap_or("?")),
+                query: format!(
+                    "mainrag card {} --source {}",
+                    all_cards[0].name,
+                    source_name.unwrap_or("?")
+                ),
                 rationale: "Inspect the top-ranked symbol card in detail".to_string(),
             });
         }
 
         // 8. Format as structured text for LLM
-        let formatted = format_explore_response(query, intent.as_deref(), domain_name.as_deref(),
-            source_name, &candidate_paths, &negative, &suggested);
+        let formatted = format_explore_response(
+            query,
+            intent.as_deref(),
+            domain_name.as_deref(),
+            source_name,
+            &candidate_paths,
+            &negative,
+            &suggested,
+        );
 
         Ok(ExploreResponse {
             query: query.to_string(),
@@ -1126,25 +1342,37 @@ fn format_explore_response(
     out.push_str("\n\n");
 
     for path in paths {
-        out.push_str(&format!("### Path {} ({}): {}\n", path.rank, path.confidence, path.title));
+        out.push_str(&format!(
+            "### Path {} ({}): {}\n",
+            path.rank, path.confidence, path.title
+        ));
 
         if let Some(ref thread) = path.chain.entry_point.thread_requirement {
             out.push_str(&format!("Thread: {}\n", thread));
         }
 
         out.push_str("Chain:\n");
-        out.push_str(&format!("  {} [{}:{}]\n",
+        out.push_str(&format!(
+            "  {} [{}:{}]\n",
             path.chain.entry_point.name,
             path.chain.entry_point.file_path,
-            path.chain.entry_point.line_start));
+            path.chain.entry_point.line_start
+        ));
 
         for step in &path.chain.steps {
-            let dispatch = step.dispatch_via.as_ref()
+            let dispatch = step
+                .dispatch_via
+                .as_ref()
                 .map(|d| format!(" via {}", d))
                 .unwrap_or_default();
-            out.push_str(&format!("    -> [{}]{} {} [{}:{}]\n",
-                step.role, dispatch, step.symbol.name,
-                step.symbol.file_path, step.symbol.line_start));
+            out.push_str(&format!(
+                "    -> [{}]{} {} [{}:{}]\n",
+                step.role,
+                dispatch,
+                step.symbol.name,
+                step.symbol.file_path,
+                step.symbol.line_start
+            ));
 
             if let Some(ref snippet) = step.code_snippet {
                 for line in snippet.lines().take(3) {
@@ -1166,7 +1394,10 @@ fn format_explore_response(
     if !negative.is_empty() {
         out.push_str("### Dead Ends:\n");
         for ne in negative {
-            out.push_str(&format!("- {} -> {} ({})\n", ne.concept, ne.path_description, ne.reason));
+            out.push_str(&format!(
+                "- {} -> {} ({})\n",
+                ne.concept, ne.path_description, ne.reason
+            ));
         }
         out.push('\n');
     }
@@ -1183,7 +1414,10 @@ fn format_explore_response(
 
 /// Pick the best delegation target using 4-stage caller-scoped prioritization.
 /// No global helper patterns — purely context-based.
-fn pick_primary_target(targets: &[DelegationTarget], caller_name: &str) -> Option<DelegationTarget> {
+fn pick_primary_target(
+    targets: &[DelegationTarget],
+    caller_name: &str,
+) -> Option<DelegationTarget> {
     if targets.is_empty() {
         return None;
     }
@@ -1200,25 +1434,36 @@ fn pick_primary_target(targets: &[DelegationTarget], caller_name: &str) -> Optio
     }
 
     // Stage 2: dispatch/mutation role (from enricher)
-    if let Some(t) = targets.iter().find(|t| t.role == "dispatch" || t.role == "mutation") {
+    if let Some(t) = targets
+        .iter()
+        .find(|t| t.role == "dispatch" || t.role == "mutation")
+    {
         return Some(t.clone());
     }
 
     // Stage 3: Highest confidence among non-unknown targets
-    if let Some(t) = targets.iter()
+    if let Some(t) = targets
+        .iter()
         .filter(|t| t.role != "unknown")
-        .max_by(|a, b| a.confidence.unwrap_or(0.0)
-            .partial_cmp(&b.confidence.unwrap_or(0.0))
-            .unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|a, b| {
+            a.confidence
+                .unwrap_or(0.0)
+                .partial_cmp(&b.confidence.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     {
         return Some(t.clone());
     }
 
     // Stage 4: Fallback — highest confidence overall
-    targets.iter()
-        .max_by(|a, b| a.confidence.unwrap_or(0.0)
-            .partial_cmp(&b.confidence.unwrap_or(0.0))
-            .unwrap_or(std::cmp::Ordering::Equal))
+    targets
+        .iter()
+        .max_by(|a, b| {
+            a.confidence
+                .unwrap_or(0.0)
+                .partial_cmp(&b.confidence.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .cloned()
 }
 

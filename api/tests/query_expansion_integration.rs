@@ -15,7 +15,14 @@ use std::sync::Arc;
 fn services_available() -> bool {
     // Quick check if Qdrant is reachable
     std::process::Command::new("curl")
-        .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "http://localhost:6333/healthz"])
+        .args([
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "http://localhost:6333/healthz",
+        ])
         .output()
         .map(|o| o.stdout.starts_with(b"200"))
         .unwrap_or(false)
@@ -51,7 +58,10 @@ async fn test_query_expander_finds_synonyms() {
     let expander = QueryExpander::new(&qdrant_config, tei, true);
 
     // Test: German term should find synonyms
-    let result = expander.expand("fehler", None).await.expect("expand failed");
+    let result = expander
+        .expand("fehler", None)
+        .await
+        .expect("expand failed");
 
     // Should have found synonyms
     assert!(
@@ -90,7 +100,11 @@ async fn test_query_expander_finds_synonyms() {
         result.embedding.len()
     );
 
-    println!("Test passed! Query: '{}' -> {} synonyms", result.original, result.synonyms.len());
+    println!(
+        "Test passed! Query: '{}' -> {} synonyms",
+        result.original,
+        result.synonyms.len()
+    );
     println!("FTS: {}", result.fts_query);
 }
 
@@ -124,7 +138,10 @@ async fn test_query_expander_handles_unknown_terms() {
     let expander = QueryExpander::new(&qdrant_config, tei, true);
 
     // Test: Very specific term unlikely to have synonyms
-    let result = expander.expand("xyzabc123nonsense", None).await.expect("expand failed");
+    let result = expander
+        .expand("xyzabc123nonsense", None)
+        .await
+        .expect("expand failed");
 
     // Should still have embedding (even without synonyms)
     assert_eq!(result.embedding.len(), 768);
@@ -173,7 +190,10 @@ async fn test_query_expander_disabled_mode() {
     assert!(!expander.is_enabled(), "Expander should be disabled");
 
     // Should return original query without expansion
-    let result = expander.expand("fehler", None).await.expect("expand failed");
+    let result = expander
+        .expand("fehler", None)
+        .await
+        .expect("expand failed");
 
     assert!(
         result.synonyms.is_empty(),
@@ -226,15 +246,13 @@ async fn test_query_expander_cross_language() {
     for (query, expected_any) in test_cases {
         let result = expander.expand(query, None).await.expect("expand failed");
 
-        let found_any = expected_any.iter().any(|exp|
-            result.fts_query.to_lowercase().contains(exp)
-        );
+        let found_any = expected_any
+            .iter()
+            .any(|exp| result.fts_query.to_lowercase().contains(exp));
 
         println!(
             "Cross-language: '{}' -> FTS has expected: {} ({})",
-            query,
-            found_any,
-            result.fts_query
+            query, found_any, result.fts_query
         );
     }
 }

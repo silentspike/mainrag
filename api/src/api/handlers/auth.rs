@@ -18,7 +18,7 @@ use crate::{auth::Claims, error::AppError, AppState};
 
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
-    pub username: String,  // Can be username or email
+    pub username: String, // Can be username or email
     pub password: String,
 }
 
@@ -69,36 +69,51 @@ pub async fn login(
 
     // K3: Fetch user data in transaction-scoped context
     let login_username_q = login_username.clone();
-    let user_data = state.rls_client.with_system(|txn| Box::pin(async move {
-        let row = txn
-            .query_opt(
-                r#"
+    let user_data = state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let row = txn
+                    .query_opt(
+                        r#"
                 SELECT id, username, email, password_hash, display_name, is_admin, is_active,
                        created_at, failed_login_count, locked_until
                 FROM users
                 WHERE username = $1 OR email = $1
                 "#,
-                &[&login_username_q],
-            )
-            .await?
-            .ok_or_else(|| AppError::Unauthorized("Invalid credentials".to_string()))?;
+                        &[&login_username_q],
+                    )
+                    .await?
+                    .ok_or_else(|| AppError::Unauthorized("Invalid credentials".to_string()))?;
 
-        Ok((
-            row.get::<_, Uuid>("id"),
-            row.get::<_, String>("password_hash"),
-            row.get::<_, bool>("is_admin"),
-            row.get::<_, bool>("is_active"),
-            row.get::<_, String>("username"),
-            row.get::<_, Option<String>>("email"),
-            row.get::<_, Option<String>>("display_name"),
-            row.get::<_, chrono::DateTime<chrono::Utc>>("created_at"),
-            row.get::<_, Option<i32>>("failed_login_count"),
-            row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("locked_until"),
-        ))
-    })).await?;
+                Ok((
+                    row.get::<_, Uuid>("id"),
+                    row.get::<_, String>("password_hash"),
+                    row.get::<_, bool>("is_admin"),
+                    row.get::<_, bool>("is_active"),
+                    row.get::<_, String>("username"),
+                    row.get::<_, Option<String>>("email"),
+                    row.get::<_, Option<String>>("display_name"),
+                    row.get::<_, chrono::DateTime<chrono::Utc>>("created_at"),
+                    row.get::<_, Option<i32>>("failed_login_count"),
+                    row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("locked_until"),
+                ))
+            })
+        })
+        .await?;
 
-    let (user_id, password_hash, is_admin, is_active, username, email, display_name,
-         created_at, failed_login_count, locked_until) = user_data;
+    let (
+        user_id,
+        password_hash,
+        is_admin,
+        is_active,
+        username,
+        email,
+        display_name,
+        created_at,
+        failed_login_count,
+        locked_until,
+    ) = user_data;
 
     // Check account lockout (Sprint 2.3: 5 failures → 15min lock)
     if let Some(until) = locked_until {
@@ -193,29 +208,36 @@ pub async fn get_profile(
         .map_err(|_| AppError::Internal("Invalid user ID in token".to_string()))?;
 
     // K3: All DB queries via RlsClient
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        let row = txn
-            .query_opt(
-                r#"
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let row = txn
+                    .query_opt(
+                        r#"
                 SELECT id, username, email, display_name, is_admin, is_active, created_at
                 FROM users
                 WHERE id = $1
                 "#,
-                &[&user_id],
-            )
-            .await?
-            .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+                        &[&user_id],
+                    )
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-        Ok(Json(UserResponse {
-            id: row.get::<_, Uuid>("id").to_string(),
-            username: row.get("username"),
-            email: row.get("email"),
-            display_name: row.get("display_name"),
-            is_admin: row.get("is_admin"),
-            is_active: row.get("is_active"),
-            created_at: row.get::<_, chrono::DateTime<chrono::Utc>>("created_at").to_rfc3339(),
-        }))
-    })).await
+                Ok(Json(UserResponse {
+                    id: row.get::<_, Uuid>("id").to_string(),
+                    username: row.get("username"),
+                    email: row.get("email"),
+                    display_name: row.get("display_name"),
+                    is_admin: row.get("is_admin"),
+                    is_active: row.get("is_active"),
+                    created_at: row
+                        .get::<_, chrono::DateTime<chrono::Utc>>("created_at")
+                        .to_rfc3339(),
+                }))
+            })
+        })
+        .await
 }
 
 /// PATCH /api/v1/auth/me
@@ -290,16 +312,18 @@ pub async fn change_password(
         .map_err(|_| AppError::Internal("Invalid user ID in token".to_string()))?;
 
     // K3: Fetch current password hash
-    let current_hash: String = state.rls_client.with_system(|txn| Box::pin(async move {
-        let row = txn
-            .query_opt(
-                "SELECT password_hash FROM users WHERE id = $1",
-                &[&user_id],
-            )
-            .await?
-            .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-        Ok(row.get("password_hash"))
-    })).await?;
+    let current_hash: String = state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let row = txn
+                    .query_opt("SELECT password_hash FROM users WHERE id = $1", &[&user_id])
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+                Ok(row.get("password_hash"))
+            })
+        })
+        .await?;
 
     // Verify current password (CPU-intensive, runs in blocking thread)
     let password_valid = {
@@ -312,7 +336,9 @@ pub async fn change_password(
     };
 
     if !password_valid {
-        return Err(AppError::Unauthorized("Current password is incorrect".to_string()));
+        return Err(AppError::Unauthorized(
+            "Current password is incorrect".to_string(),
+        ));
     }
 
     // Hash new password (CPU-intensive, runs in blocking thread)
@@ -325,13 +351,19 @@ pub async fn change_password(
     };
 
     // K3: Update password in transaction
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        txn.execute(
-            "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
-            &[&new_hash, &user_id],
-        ).await?;
-        Ok(())
-    })).await?;
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                txn.execute(
+                    "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
+                    &[&new_hash, &user_id],
+                )
+                .await?;
+                Ok(())
+            })
+        })
+        .await?;
 
     Ok(Json(serde_json::json!({
         "message": "Password changed successfully"
@@ -363,16 +395,22 @@ pub async fn logout(
     })).await?;
 
     // Best-effort audit log (separate transaction, ignore failure)
-    let _ = state.rls_client.with_system(|txn| Box::pin(async move {
-        txn.execute(
-            r#"
+    let _ = state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                txn.execute(
+                    r#"
             INSERT INTO audit_log (user_id, action, resource_type, details, created_at)
             VALUES ($1, 'logout', 'session', '{}', NOW())
             "#,
-            &[&user_id],
-        ).await?;
-        Ok(())
-    })).await;
+                    &[&user_id],
+                )
+                .await?;
+                Ok(())
+            })
+        })
+        .await;
 
     tracing::info!(user_id = %user_id, jti = %claims.jti, "Token revoked via logout");
 
@@ -396,39 +434,46 @@ pub async fn admin_list_users(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<UserListResponse>, AppError> {
     // K3: All DB queries via RlsClient (users table has no RLS, use with_system)
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        let rows = txn
-            .query(
-                r#"
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let rows = txn
+                    .query(
+                        r#"
                 SELECT id, username, email, display_name, is_admin, is_active, created_at
                 FROM users
                 ORDER BY created_at DESC
                 LIMIT 100
                 "#,
-                &[],
-            )
-            .await?;
+                        &[],
+                    )
+                    .await?;
 
-        let count_row = txn
-            .query_one("SELECT COUNT(*) as total FROM users", &[])
-            .await?;
-        let total: i64 = count_row.get("total");
+                let count_row = txn
+                    .query_one("SELECT COUNT(*) as total FROM users", &[])
+                    .await?;
+                let total: i64 = count_row.get("total");
 
-        let users = rows
-            .iter()
-            .map(|row| UserResponse {
-                id: row.get::<_, Uuid>("id").to_string(),
-                username: row.get("username"),
-                email: row.get("email"),
-                display_name: row.get("display_name"),
-                is_admin: row.get("is_admin"),
-                is_active: row.get("is_active"),
-                created_at: row.get::<_, chrono::DateTime<chrono::Utc>>("created_at").to_rfc3339(),
+                let users = rows
+                    .iter()
+                    .map(|row| UserResponse {
+                        id: row.get::<_, Uuid>("id").to_string(),
+                        username: row.get("username"),
+                        email: row.get("email"),
+                        display_name: row.get("display_name"),
+                        is_admin: row.get("is_admin"),
+                        is_active: row.get("is_active"),
+                        created_at: row
+                            .get::<_, chrono::DateTime<chrono::Utc>>("created_at")
+                            .to_rfc3339(),
+                    })
+                    .collect();
+
+                Ok(Json(UserListResponse { users, total }))
             })
-            .collect();
-
-        Ok(Json(UserListResponse { users, total }))
-    })).await
+        })
+        .await
 }
 
 /// GET /api/v1/admin/users/:id
@@ -436,29 +481,36 @@ pub async fn admin_get_user(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<UserResponse>, AppError> {
-    state.rls_client.with_system(|txn| Box::pin(async move {
-        let row = txn
-            .query_opt(
-                r#"
+    state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let row = txn
+                    .query_opt(
+                        r#"
                 SELECT id, username, email, display_name, is_admin, is_active, created_at
                 FROM users
                 WHERE id = $1
                 "#,
-                &[&id],
-            )
-            .await?
-            .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+                        &[&id],
+                    )
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-        Ok(Json(UserResponse {
-            id: row.get::<_, Uuid>("id").to_string(),
-            username: row.get("username"),
-            email: row.get("email"),
-            display_name: row.get("display_name"),
-            is_admin: row.get("is_admin"),
-            is_active: row.get("is_active"),
-            created_at: row.get::<_, chrono::DateTime<chrono::Utc>>("created_at").to_rfc3339(),
-        }))
-    })).await
+                Ok(Json(UserResponse {
+                    id: row.get::<_, Uuid>("id").to_string(),
+                    username: row.get("username"),
+                    email: row.get("email"),
+                    display_name: row.get("display_name"),
+                    is_admin: row.get("is_admin"),
+                    is_active: row.get("is_active"),
+                    created_at: row
+                        .get::<_, chrono::DateTime<chrono::Utc>>("created_at")
+                        .to_rfc3339(),
+                }))
+            })
+        })
+        .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -532,19 +584,29 @@ pub async fn admin_update_user(
 /// Validate password strength: min 8 chars, 1 upper, 1 lower, 1 digit, 1 special
 fn validate_password_strength(password: &str) -> Result<(), AppError> {
     if password.len() < 8 {
-        return Err(AppError::BadRequest("Password must be at least 8 characters".to_string()));
+        return Err(AppError::BadRequest(
+            "Password must be at least 8 characters".to_string(),
+        ));
     }
     if !password.chars().any(|c| c.is_uppercase()) {
-        return Err(AppError::BadRequest("Password must contain at least one uppercase letter".to_string()));
+        return Err(AppError::BadRequest(
+            "Password must contain at least one uppercase letter".to_string(),
+        ));
     }
     if !password.chars().any(|c| c.is_lowercase()) {
-        return Err(AppError::BadRequest("Password must contain at least one lowercase letter".to_string()));
+        return Err(AppError::BadRequest(
+            "Password must contain at least one lowercase letter".to_string(),
+        ));
     }
     if !password.chars().any(|c| c.is_ascii_digit()) {
-        return Err(AppError::BadRequest("Password must contain at least one digit".to_string()));
+        return Err(AppError::BadRequest(
+            "Password must contain at least one digit".to_string(),
+        ));
     }
     if !password.chars().any(|c| !c.is_alphanumeric()) {
-        return Err(AppError::BadRequest("Password must contain at least one special character".to_string()));
+        return Err(AppError::BadRequest(
+            "Password must contain at least one special character".to_string(),
+        ));
     }
     Ok(())
 }
@@ -557,35 +619,42 @@ pub async fn admin_delete_user(
 ) -> Result<StatusCode, AppError> {
     // Prevent self-deletion (check outside transaction)
     if claims.sub == id.to_string() {
-        return Err(AppError::BadRequest("Cannot delete your own account".to_string()));
+        return Err(AppError::BadRequest(
+            "Cannot delete your own account".to_string(),
+        ));
     }
 
     // K3: Delete user in transaction
-    let result = state.rls_client.with_system(|txn| Box::pin(async move {
-        // H10: Prevent deleting the last admin — would lock out the system
-        let target_is_admin: bool = txn
-            .query_one("SELECT is_admin FROM users WHERE id = $1", &[&id])
-            .await
-            .map(|row| row.get::<_, bool>("is_admin"))
-            .unwrap_or(false);
+    let result = state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                // H10: Prevent deleting the last admin — would lock out the system
+                let target_is_admin: bool = txn
+                    .query_one("SELECT is_admin FROM users WHERE id = $1", &[&id])
+                    .await
+                    .map(|row| row.get::<_, bool>("is_admin"))
+                    .unwrap_or(false);
 
-        if target_is_admin {
-            let admin_count: i64 = txn
-                .query_one("SELECT COUNT(*) FROM users WHERE is_admin = true", &[])
-                .await?
-                .get(0);
-            if admin_count <= 1 {
-                return Err(crate::error::AppError::BadRequest(
-                    "Cannot delete the last admin user".to_string(),
-                ));
-            }
-        }
+                if target_is_admin {
+                    let admin_count: i64 = txn
+                        .query_one("SELECT COUNT(*) FROM users WHERE is_admin = true", &[])
+                        .await?
+                        .get(0);
+                    if admin_count <= 1 {
+                        return Err(crate::error::AppError::BadRequest(
+                            "Cannot delete the last admin user".to_string(),
+                        ));
+                    }
+                }
 
-        let result = txn
-            .execute("DELETE FROM users WHERE id = $1", &[&id])
-            .await?;
-        Ok(result)
-    })).await?;
+                let result = txn
+                    .execute("DELETE FROM users WHERE id = $1", &[&id])
+                    .await?;
+                Ok(result)
+            })
+        })
+        .await?;
 
     if result == 0 {
         return Err(AppError::NotFound("User not found".to_string()));

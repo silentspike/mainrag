@@ -16,8 +16,8 @@
 //! For **exact** byte positions, use [`SemanticChunker`] which uses tree-sitter
 //! and provides precise AST-based byte offsets.
 
+use super::{Chunk, ChunkType, Chunker, ChunkerConfig};
 use std::sync::LazyLock;
-use super::{Chunk, ChunkType, ChunkerConfig, Chunker};
 
 /// Dual tokenizer backend — selected once at startup via TOKENIZER_VERSION env var.
 #[allow(clippy::large_enum_variant)]
@@ -32,13 +32,14 @@ unsafe impl Sync for TokenizerBackend {}
 
 /// Known SHA256 hash of the shipped BGE tokenizer.json (BAAI/bge-base-en-v1.5).
 /// Override with TOKENIZER_ASSET_SHA256 env var if you use a different model version.
-const BGE_TOKENIZER_SHA256: &str = "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66";
+const BGE_TOKENIZER_SHA256: &str =
+    "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66";
 
 /// Global singleton tokenizer — loaded once, reused everywhere.
 /// Backend selected by `TOKENIZER_VERSION` env var (default: hf_bge_wordpiece).
 pub static TOKENIZER: LazyLock<TokenizerBackend> = LazyLock::new(|| {
-    let version = std::env::var("TOKENIZER_VERSION")
-        .unwrap_or_else(|_| "hf_bge_wordpiece".to_string());
+    let version =
+        std::env::var("TOKENIZER_VERSION").unwrap_or_else(|_| "hf_bge_wordpiece".to_string());
 
     match version.as_str() {
         "hf_bge_wordpiece" => {
@@ -70,12 +71,14 @@ pub static TOKENIZER: LazyLock<TokenizerBackend> = LazyLock::new(|| {
                 );
             }
 
-            let tok = tokenizers::Tokenizer::from_bytes(&file_bytes)
-                .unwrap_or_else(|e| panic!("Failed to parse BGE tokenizer from {}: {}", asset_path, e));
+            let tok = tokenizers::Tokenizer::from_bytes(&file_bytes).unwrap_or_else(|e| {
+                panic!("Failed to parse BGE tokenizer from {}: {}", asset_path, e)
+            });
 
             tracing::info!(
                 "HF BGE WordPiece tokenizer loaded from {} (SHA256 verified) in {:?}",
-                asset_path, start.elapsed()
+                asset_path,
+                start.elapsed()
             );
             TokenizerBackend::HuggingFace(tok)
         }
@@ -85,8 +88,9 @@ pub static TOKENIZER: LazyLock<TokenizerBackend> = LazyLock::new(|| {
             let asset_path = std::env::var("TOKENIZER_ASSET_PATH")
                 .unwrap_or_else(|_| "/data/models/gte-modernbert-base/tokenizer.json".to_string());
 
-            let expected_hash = std::env::var("TOKENIZER_ASSET_SHA256")
-                .unwrap_or_else(|_| "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30".to_string());
+            let expected_hash = std::env::var("TOKENIZER_ASSET_SHA256").unwrap_or_else(|_| {
+                "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30".to_string()
+            });
 
             let file_bytes = std::fs::read(&asset_path).unwrap_or_else(|e| panic!(
                 "Failed to read GTE tokenizer asset {}: {}. \
@@ -106,17 +110,21 @@ pub static TOKENIZER: LazyLock<TokenizerBackend> = LazyLock::new(|| {
                 );
             }
 
-            let tok = tokenizers::Tokenizer::from_bytes(&file_bytes)
-                .unwrap_or_else(|e| panic!("Failed to parse GTE tokenizer from {}: {}", asset_path, e));
+            let tok = tokenizers::Tokenizer::from_bytes(&file_bytes).unwrap_or_else(|e| {
+                panic!("Failed to parse GTE tokenizer from {}: {}", asset_path, e)
+            });
 
             tracing::info!(
                 "HF GTE-ModernBERT BPE tokenizer loaded from {} (SHA256 verified) in {:?}",
-                asset_path, start.elapsed()
+                asset_path,
+                start.elapsed()
             );
             TokenizerBackend::HuggingFace(tok)
         }
         _ => {
-            tracing::warn!("Loading tiktoken cl100k tokenizer (LEGACY — mismatches embedding model)");
+            tracing::warn!(
+                "Loading tiktoken cl100k tokenizer (LEGACY — mismatches embedding model)"
+            );
             let start = std::time::Instant::now();
             let tok = tiktoken_rs::get_bpe_from_model("gpt-3.5-turbo")
                 .expect("Failed to load tiktoken tokenizer");
@@ -131,11 +139,10 @@ pub static TOKENIZER: LazyLock<TokenizerBackend> = LazyLock::new(|| {
 pub fn count_tokens(text: &str) -> usize {
     match &*TOKENIZER {
         TokenizerBackend::Tiktoken(t) => t.encode_with_special_tokens(text).len(),
-        TokenizerBackend::HuggingFace(t) => {
-            t.encode(text, false)
-                .map(|enc| enc.get_ids().len())
-                .unwrap_or(0)
-        }
+        TokenizerBackend::HuggingFace(t) => t
+            .encode(text, false)
+            .map(|enc| enc.get_ids().len())
+            .unwrap_or(0),
     }
 }
 
@@ -165,16 +172,17 @@ fn encode_with_offsets(text: &str) -> EncodeResult {
             }
             EncodeResult { ids, offsets }
         }
-        TokenizerBackend::HuggingFace(t) => {
-            match t.encode(text, false) {
-                Ok(enc) => {
-                    let ids = enc.get_ids().to_vec();
-                    let offsets: Vec<(usize, usize)> = enc.get_offsets().to_vec();
-                    EncodeResult { ids, offsets }
-                }
-                Err(_) => EncodeResult { ids: vec![], offsets: vec![] },
+        TokenizerBackend::HuggingFace(t) => match t.encode(text, false) {
+            Ok(enc) => {
+                let ids = enc.get_ids().to_vec();
+                let offsets: Vec<(usize, usize)> = enc.get_offsets().to_vec();
+                EncodeResult { ids, offsets }
             }
-        }
+            Err(_) => EncodeResult {
+                ids: vec![],
+                offsets: vec![],
+            },
+        },
     }
 }
 
@@ -186,10 +194,7 @@ fn decode(tokens: &[u32]) -> String {
             // tiktoken-rs 0.6: Rank = u32
             t.decode(tokens.to_vec()).unwrap_or_default()
         }
-        TokenizerBackend::HuggingFace(t) => {
-            t.decode(tokens, true)
-                .unwrap_or_default()
-        }
+        TokenizerBackend::HuggingFace(t) => t.decode(tokens, true).unwrap_or_default(),
     }
 }
 
@@ -201,9 +206,7 @@ fn decode_single(token: u32) -> String {
             // tiktoken-rs 0.6: Rank = u32
             t.decode(vec![token]).unwrap_or_default()
         }
-        TokenizerBackend::HuggingFace(t) => {
-            t.decode(&[token], false).unwrap_or_default()
-        }
+        TokenizerBackend::HuggingFace(t) => t.decode(&[token], false).unwrap_or_default(),
     }
 }
 
@@ -217,8 +220,8 @@ pub fn tokenizer_name() -> &'static str {
 }
 
 pub struct TokenChunker {
-    max_tokens: usize,      // Default: 256
-    overlap_tokens: usize,  // Default: 32
+    max_tokens: usize,     // Default: 256
+    overlap_tokens: usize, // Default: 32
 }
 
 impl TokenChunker {
@@ -295,12 +298,16 @@ impl Chunker for TokenChunker {
             let end_byte = end_byte.min(content.len());
             let safe_start = {
                 let mut b = start_byte;
-                while b > 0 && !content.is_char_boundary(b) { b -= 1; }
+                while b > 0 && !content.is_char_boundary(b) {
+                    b -= 1;
+                }
                 b
             };
             let safe_end = {
                 let mut b = end_byte;
-                while b < content.len() && !content.is_char_boundary(b) { b += 1; }
+                while b < content.len() && !content.is_char_boundary(b) {
+                    b += 1;
+                }
                 b.min(content.len())
             };
 
@@ -393,7 +400,10 @@ mod tests {
             assert!(
                 chunks[i].start_byte > chunks[i - 1].start_byte,
                 "Chunk {} start_byte ({}) should be > chunk {} start_byte ({})",
-                i, chunks[i].start_byte, i - 1, chunks[i - 1].start_byte
+                i,
+                chunks[i].start_byte,
+                i - 1,
+                chunks[i - 1].start_byte
             );
         }
     }
@@ -416,7 +426,8 @@ mod tests {
         let name = tokenizer_name();
         assert!(
             name == "tiktoken_cl100k" || name == "hf_bge_wordpiece",
-            "Unexpected tokenizer name: {}", name
+            "Unexpected tokenizer name: {}",
+            name
         );
     }
 
@@ -430,7 +441,8 @@ mod tests {
             ..Default::default()
         });
 
-        let content = "const RRF_K: f32 = 60.0;\nconst OVERLAP_MULTIPLIER: f32 = 1.5;\nfn foo_bar_baz() {}";
+        let content =
+            "const RRF_K: f32 = 60.0;\nconst OVERLAP_MULTIPLIER: f32 = 1.5;\nfn foo_bar_baz() {}";
         let chunks = chunker.chunk(content, Some("rust"));
 
         assert!(!chunks.is_empty(), "Should produce at least one chunk");

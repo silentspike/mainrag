@@ -222,7 +222,10 @@ fn classify_as_heading(
 /// Convert raw blocks to PdfBlocks with relative heading classification
 fn classify_blocks(raw_blocks: Vec<RawBlockData>) -> Vec<PdfBlock> {
     // Collect font sizes for statistics
-    let font_sizes: Vec<f32> = raw_blocks.iter().filter_map(|(_, _, fs, _, _)| *fs).collect();
+    let font_sizes: Vec<f32> = raw_blocks
+        .iter()
+        .filter_map(|(_, _, fs, _, _)| *fs)
+        .collect();
 
     let stats = FontStats::from_sizes(&font_sizes);
 
@@ -433,7 +436,8 @@ mod tests {
             chunk_index: 0,
         }];
 
-        let files = chunks_to_raw_files(chunks, "My Report", "My Report.pdf", "/path/to/report.pdf");
+        let files =
+            chunks_to_raw_files(chunks, "My Report", "My Report.pdf", "/path/to/report.pdf");
 
         assert_eq!(files.len(), 1);
         // Path should have format: {slug}-{hash}__p001-003__000.md
@@ -458,7 +462,8 @@ mod tests {
         ));
 
         // y=90 with page_height=100 → y_norm = 1.0 - (90/100) = 0.1 (bottom)
-        let block_type = classify_as_heading("Normal paragraph text here.", 12.0, &stats, 90.0, 100.0);
+        let block_type =
+            classify_as_heading("Normal paragraph text here.", 12.0, &stats, 90.0, 100.0);
         assert_eq!(block_type, BlockType::Paragraph);
     }
 

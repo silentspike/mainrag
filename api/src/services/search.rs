@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::db::PostgresPool;
 use crate::db::models::SearchResult;
+use crate::db::PostgresPool;
 use crate::error::Result;
-use crate::services::{TeiClient, QdrantClient, RerankerService, QueryExpander};
 use crate::services::circuit_breaker::CircuitBreaker;
 use crate::services::gpu_semaphore::GpuSemaphores;
 pub use crate::services::qdrant::TenantContext;
+use crate::services::{QdrantClient, QueryExpander, RerankerService, TeiClient};
 
 /// RRF constant (k) - higher values give more weight to lower-ranked results
 const RRF_K: f32 = 60.0;
@@ -58,51 +58,63 @@ fn file_path_boost(file_path: &str) -> f32 {
     }
 
     // Eval/golden-set files contain queries + expected results, not actual code
-    if path_lower.contains("golden-set") || path_lower.contains("golden_set")
+    if path_lower.contains("golden-set")
+        || path_lower.contains("golden_set")
         || (path_lower.contains("/eval/") && path_lower.ends_with(".jsonl"))
     {
         return 0.1;
     }
 
     // License, support, contributing — rarely useful for code search
-    if path_lower.contains("license") || path_lower.contains("support.md")
-        || path_lower.contains("contributing") || path_lower.contains("code_of_conduct")
+    if path_lower.contains("license")
+        || path_lower.contains("support.md")
+        || path_lower.contains("contributing")
+        || path_lower.contains("code_of_conduct")
     {
         return 0.2;
     }
 
     // Test fixtures/data — almost never useful for conceptual search
-    if path_lower.contains("/testdata/") || path_lower.contains("/test/fixtures/")
-        || path_lower.contains("/test/testdata/") || path_lower.contains("_testdata")
+    if path_lower.contains("/testdata/")
+        || path_lower.contains("/test/fixtures/")
+        || path_lower.contains("/test/testdata/")
+        || path_lower.contains("_testdata")
         || path_lower.contains("/conformance/testdata/")
     {
         return 0.15;
     }
 
     // Test files — useful for "how to test X" but not for conceptual queries
-    if path_lower.contains("/test") || path_lower.contains("_test.")
-        || path_lower.contains(".test.") || path_lower.contains("/spec/")
-        || path_lower.contains("_test_") || path_lower.contains("/tests/")
+    if path_lower.contains("/test")
+        || path_lower.contains("_test.")
+        || path_lower.contains(".test.")
+        || path_lower.contains("/spec/")
+        || path_lower.contains("_test_")
+        || path_lower.contains("/tests/")
     {
         return 0.4;
     }
 
     // Vendor/third-party code — less relevant than own code
-    if path_lower.contains("/vendor/") || path_lower.contains("/third_party/")
+    if path_lower.contains("/vendor/")
+        || path_lower.contains("/third_party/")
         || path_lower.contains("/node_modules/")
     {
         return 0.6;
     }
 
     // Generated code (protobuf, swagger, etc.)
-    if path_lower.contains(".pb.") || path_lower.contains("generated")
-        || path_lower.contains("/zz_generated") || path_lower.contains(".gen.")
+    if path_lower.contains(".pb.")
+        || path_lower.contains("generated")
+        || path_lower.contains("/zz_generated")
+        || path_lower.contains(".gen.")
     {
         return 0.5;
     }
 
     // OpenAPI specs — large JSON files that match many keywords but have low signal
-    if path_lower.contains("openapi-spec") || path_lower.contains("swagger")
+    if path_lower.contains("openapi-spec")
+        || path_lower.contains("swagger")
         || (path_lower.contains("openapi") && path_lower.ends_with(".json"))
     {
         return 0.3;
@@ -112,8 +124,8 @@ fn file_path_boost(file_path: &str) -> f32 {
     if let Some(ext) = file_path.rsplit('.').next() {
         match ext {
             // Implementation code — highest boost
-            "rs" | "go" | "py" | "ts" | "js" | "java" | "c" | "cpp"
-            | "cs" | "rb" | "php" | "lua" | "zig" | "swift" | "kt" => 1.2,
+            "rs" | "go" | "py" | "ts" | "js" | "java" | "c" | "cpp" | "cs" | "rb" | "php"
+            | "lua" | "zig" | "swift" | "kt" => 1.2,
             // Schema/config — medium
             "sql" | "toml" | "yaml" | "yml" | "json" => 1.0,
             // Shell scripts
@@ -135,21 +147,21 @@ fn file_path_boost(file_path: &str) -> f32 {
 /// Content length normalization — very short or very long chunks are less useful
 fn content_length_boost(content_len: usize) -> f32 {
     match content_len {
-        0..=30 => 0.3,        // Almost empty (imports, single-line comments)
-        31..=80 => 0.6,       // Very short (declarations, type aliases)
-        81..=200 => 0.85,     // Short but may have useful info
-        201..=3000 => 1.0,    // Sweet spot for code chunks
-        3001..=6000 => 0.9,   // Getting long, some noise
-        _ => 0.75,            // Very long — diluted content
+        0..=30 => 0.3,      // Almost empty (imports, single-line comments)
+        31..=80 => 0.6,     // Very short (declarations, type aliases)
+        81..=200 => 0.85,   // Short but may have useful info
+        201..=3000 => 1.0,  // Sweet spot for code chunks
+        3001..=6000 => 0.9, // Getting long, some noise
+        _ => 0.75,          // Very long — diluted content
     }
 }
 
 /// Hierarchy level boost — function-level chunks are most specific
 fn level_boost(level: i16) -> f32 {
     match level {
-        2 => 1.15,  // Function/method — most specific and useful
-        1 => 1.05,  // Class/section — good structural context
-        0 => 0.9,   // File-level — often just the header
+        2 => 1.15, // Function/method — most specific and useful
+        1 => 1.05, // Class/section — good structural context
+        0 => 0.9,  // File-level — often just the header
         _ => 1.0,
     }
 }
@@ -163,19 +175,19 @@ fn domain_boost(chunk_type: Option<&str>, level: Option<i16>, is_domain_source: 
     }
     // In domain sources, strongly prefer symbol-level chunks (function, class)
     let type_boost = match chunk_type.unwrap_or("code") {
-        "function" => 1.3,  // Methods are the primary symbol cards
-        "class" => 1.25,    // Class definitions show ownership/structure
-        "type" => 1.2,      // Interfaces, enums
-        "module" => 1.1,    // Impl blocks
-        "code" => 0.85,     // Generic code chunks — less targeted
-        "text" => 0.5,      // Comments/docs — rarely what LLM needs for code nav
+        "function" => 1.3, // Methods are the primary symbol cards
+        "class" => 1.25,   // Class definitions show ownership/structure
+        "type" => 1.2,     // Interfaces, enums
+        "module" => 1.1,   // Impl blocks
+        "code" => 0.85,    // Generic code chunks — less targeted
+        "text" => 0.5,     // Comments/docs — rarely what LLM needs for code nav
         _ => 1.0,
     };
     // Prefer deeper hierarchy (function > class > file)
     let level_boost = match level.unwrap_or(0) {
-        2 => 1.2,   // Function-level — most specific
-        1 => 1.1,   // Class-level
-        0 => 0.8,   // File-level — too broad for domain exploration
+        2 => 1.2, // Function-level — most specific
+        1 => 1.1, // Class-level
+        0 => 0.8, // File-level — too broad for domain exploration
         _ => 1.0,
     };
     type_boost * level_boost
@@ -217,14 +229,23 @@ fn detect_query_type(query: &str) -> QueryType {
     let has_slash = query.contains('/');
 
     // CamelCase detection: lowercase followed by uppercase
-    let has_camel_case = query.chars().zip(query.chars().skip(1))
+    let has_camel_case = query
+        .chars()
+        .zip(query.chars().skip(1))
         .any(|(a, b)| a.is_lowercase() && b.is_uppercase());
 
     // Code indicators
-    let code_signals = [has_dot, has_double_colon, has_arrow, has_underscore, has_slash, has_camel_case]
-        .iter()
-        .filter(|&&x| x)
-        .count();
+    let code_signals = [
+        has_dot,
+        has_double_colon,
+        has_arrow,
+        has_underscore,
+        has_slash,
+        has_camel_case,
+    ]
+    .iter()
+    .filter(|&&x| x)
+    .count();
 
     // Word count (NL queries tend to have more words)
     let word_count = query.split_whitespace().count();
@@ -262,10 +283,11 @@ pub struct SearchResults {
 fn detect_phrase_query(query: &str) -> (String, bool) {
     let trimmed = query.trim();
     // Check for quoted phrase: "exact phrase" or 'exact phrase'
-    if (trimmed.starts_with('"') && trimmed.ends_with('"')) ||
-       (trimmed.starts_with('\'') && trimmed.ends_with('\'')) {
+    if (trimmed.starts_with('"') && trimmed.ends_with('"'))
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+    {
         // Remove quotes and return as phrase
-        let inner = &trimmed[1..trimmed.len()-1];
+        let inner = &trimmed[1..trimmed.len() - 1];
         (inner.to_string(), true)
     } else {
         (trimmed.to_string(), false)
@@ -342,9 +364,13 @@ impl SearchService {
         domain_source_names: std::collections::HashSet<String>,
     ) -> Self {
         let cb_threshold: u32 = std::env::var("CB_FAILURE_THRESHOLD")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5);
         let cb_recovery_s: u64 = std::env::var("CB_RECOVERY_TIMEOUT_S")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
         let recovery = std::time::Duration::from_secs(cb_recovery_s);
 
         if backfill_active {
@@ -355,7 +381,11 @@ impl SearchService {
         }
 
         Self {
-            db, tei, qdrant, reranker, query_expander,
+            db,
+            tei,
+            qdrant,
+            reranker,
+            query_expander,
             cb_tei_embed: Arc::new(CircuitBreaker::new("tei_embed", cb_threshold, recovery)),
             cb_tei_rerank: Arc::new(CircuitBreaker::new("tei_rerank", cb_threshold, recovery)),
             cb_qdrant: Arc::new(CircuitBreaker::new("qdrant", cb_threshold, recovery)),
@@ -429,8 +459,9 @@ impl SearchService {
         let can_embed = matches!(search_mode, SearchMode::Full | SearchMode::DegradedNoRerank);
         let expanded = if can_embed {
             // Sprint 7.3b: Acquire embed semaphore before TEI call
-            let _embed_permit = self.semaphores.embed.acquire().await
-                .map_err(|_| crate::error::AppError::Internal("Embed semaphore closed".to_string()))?;
+            let _embed_permit = self.semaphores.embed.acquire().await.map_err(|_| {
+                crate::error::AppError::Internal("Embed semaphore closed".to_string())
+            })?;
             let result = self.query_expander.expand(&clean_query, agent_id).await?;
             drop(_embed_permit);
 
@@ -446,10 +477,16 @@ impl SearchService {
             result
         } else {
             // TEI down — skip expansion, use plain query with empty embedding
-            tracing::debug!("Skipping query expansion (TEI unavailable in {:?} mode)", search_mode);
+            tracing::debug!(
+                "Skipping query expansion (TEI unavailable in {:?} mode)",
+                search_mode
+            );
             self.query_expander.expand_fts_only(&clean_query).await
         };
-        tracing::info!(elapsed_ms = phase_start.elapsed().as_millis() as u64, "Phase 1: Query expansion + embedding");
+        tracing::info!(
+            elapsed_ms = phase_start.elapsed().as_millis() as u64,
+            "Phase 1: Query expansion + embedding"
+        );
         let phase_start = std::time::Instant::now();
 
         // Wave 2b: Decouple candidate pool from response limit
@@ -460,7 +497,8 @@ impl SearchService {
         let fetch_limit = candidate_pool.max(limit as u64 * 3);
 
         // Sprint 7.6: Conditional search paths based on service availability
-        let can_do_semantic = matches!(search_mode, SearchMode::Full | SearchMode::DegradedNoRerank);
+        let can_do_semantic =
+            matches!(search_mode, SearchMode::Full | SearchMode::DegradedNoRerank);
 
         // Wave 2a: Wire expanded FTS query instead of clean_query
         // Phrase queries bypass expansion (they need exact sequence matching)
@@ -473,8 +511,19 @@ impl SearchService {
         // Run searches in parallel (semantic only if services are available)
         let (semantic_results, fts_results) = if can_do_semantic {
             let (semantic_result, fts_result) = tokio::join!(
-                self.semantic_search_with_embedding_cb(&expanded.embedding, source_id, fetch_limit, tenant),
-                self.fts_search_internal(fts_query_str, source_id, fetch_limit as u32, is_phrase, tenant)
+                self.semantic_search_with_embedding_cb(
+                    &expanded.embedding,
+                    source_id,
+                    fetch_limit,
+                    tenant
+                ),
+                self.fts_search_internal(
+                    fts_query_str,
+                    source_id,
+                    fetch_limit as u32,
+                    is_phrase,
+                    tenant
+                )
             );
             // If semantic fails at runtime (circuit breaker was half-open), fall back gracefully
             let semantic = match semantic_result {
@@ -487,11 +536,22 @@ impl SearchService {
             (semantic, fts_result?)
         } else {
             // FTS-only mode
-            let fts_result = self.fts_search_internal(fts_query_str, source_id, fetch_limit as u32, is_phrase, tenant).await;
+            let fts_result = self
+                .fts_search_internal(
+                    fts_query_str,
+                    source_id,
+                    fetch_limit as u32,
+                    is_phrase,
+                    tenant,
+                )
+                .await;
             (vec![], fts_result?)
         };
 
-        tracing::info!(elapsed_ms = phase_start.elapsed().as_millis() as u64, "Phase 2: FTS + Qdrant parallel search");
+        tracing::info!(
+            elapsed_ms = phase_start.elapsed().as_millis() as u64,
+            "Phase 2: FTS + Qdrant parallel search"
+        );
         let phase_start = std::time::Instant::now();
 
         // Build RRF scores
@@ -501,7 +561,8 @@ impl SearchService {
         // Add semantic results with RRF contribution
         for (rank, (chunk_id, _score)) in semantic_results.iter().enumerate() {
             let rrf_contribution = 1.0 / (RRF_K + (rank + 1) as f32);
-            rrf_scores.entry(*chunk_id)
+            rrf_scores
+                .entry(*chunk_id)
                 .and_modify(|(score, sem_rank, _)| {
                     *score += rrf_contribution;
                     *sem_rank = Some(rank + 1);
@@ -513,7 +574,8 @@ impl SearchService {
         // Sprint 7.1: fts_weight is adaptive based on query type (code vs NL)
         for (rank, (chunk_id, _score)) in fts_results.iter().enumerate() {
             let rrf_contribution = fts_weight / (RRF_K + (rank + 1) as f32);
-            rrf_scores.entry(*chunk_id)
+            rrf_scores
+                .entry(*chunk_id)
                 .and_modify(|(score, _, fts_rank)| {
                     *score += rrf_contribution;
                     *fts_rank = Some(rank + 1);
@@ -531,7 +593,11 @@ impl SearchService {
 
         // Sort by RRF score
         let mut sorted_chunks: Vec<_> = rrf_scores.into_iter().collect();
-        sorted_chunks.sort_by(|a, b| b.1.0.partial_cmp(&a.1.0).unwrap_or(std::cmp::Ordering::Equal));
+        sorted_chunks.sort_by(|a, b| {
+            b.1 .0
+                .partial_cmp(&a.1 .0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Wave 2b: Use candidate_pool for dedup limit too (aligned with fetch)
         let dedup_fetch_limit = candidate_pool as usize;
@@ -542,9 +608,8 @@ impl SearchService {
         } else {
             None
         };
-        let expansion_terms: Vec<String> = expanded.synonyms.iter()
-            .map(|s| s.term.clone())
-            .collect();
+        let expansion_terms: Vec<String> =
+            expanded.synonyms.iter().map(|s| s.term.clone()).collect();
 
         if sorted_chunks.is_empty() {
             return Ok(SearchResults {
@@ -563,24 +628,27 @@ impl SearchService {
 
         if query_type == QueryType::Code && clean_query.split_whitespace().count() <= 2 {
             // Single-symbol query — check for callees
-            let callee_rows = client.query(
-                "SELECT DISTINCT cg.callee_name
+            let callee_rows = client
+                .query(
+                    "SELECT DISTINCT cg.callee_name
                  FROM call_graph cg
                  JOIN symbols s ON cg.caller_symbol_id = s.id
                  WHERE s.name = $1
                  LIMIT 10",
-                &[&clean_query],
-            ).await.unwrap_or_default();
+                    &[&clean_query],
+                )
+                .await
+                .unwrap_or_default();
 
             if !callee_rows.is_empty() {
-                let callee_names: Vec<String> = callee_rows.iter()
-                    .map(|r| r.get::<_, String>(0))
-                    .collect();
+                let callee_names: Vec<String> =
+                    callee_rows.iter().map(|r| r.get::<_, String>(0)).collect();
 
                 // Find chunks for callees: use callee_symbol_id → symbol → file+line → chunk
                 // This avoids scanning all chunks — goes through the call_graph directly
-                if let Ok(callee_fts) = client.query(
-                    "SELECT DISTINCT c.id as chunk_id
+                if let Ok(callee_fts) = client
+                    .query(
+                        "SELECT DISTINCT c.id as chunk_id
                      FROM call_graph cg
                      JOIN symbols caller ON cg.caller_symbol_id = caller.id
                      JOIN symbols callee ON cg.callee_symbol_id = callee.id
@@ -588,10 +656,17 @@ impl SearchService {
                        AND c.start_line <= callee.line_start AND c.end_line >= callee.line_end
                      WHERE caller.name = $1 AND cg.callee_symbol_id IS NOT NULL
                      LIMIT 10",
-                    &[&clean_query],
-                ).await {
-                    let existing_ids: std::collections::HashSet<i64> = sorted_chunks.iter().map(|(id, _)| *id).collect();
-                    let base_score = sorted_chunks.first().map(|(_, (s, _, _))| *s).unwrap_or(0.5) * 0.3;
+                        &[&clean_query],
+                    )
+                    .await
+                {
+                    let existing_ids: std::collections::HashSet<i64> =
+                        sorted_chunks.iter().map(|(id, _)| *id).collect();
+                    let base_score = sorted_chunks
+                        .first()
+                        .map(|(_, (s, _, _))| *s)
+                        .unwrap_or(0.5)
+                        * 0.3;
 
                     for row in &callee_fts {
                         let chunk_id: i64 = row.get(0);
@@ -603,14 +678,19 @@ impl SearchService {
                     if !callee_fts.is_empty() {
                         tracing::info!(
                             "Symbol expansion: '{}' → {} callees, {} extra chunks",
-                            clean_query, callee_names.len(), callee_fts.len()
+                            clean_query,
+                            callee_names.len(),
+                            callee_fts.len()
                         );
                     }
                 }
             }
         }
 
-        tracing::info!(elapsed_ms = phase_start.elapsed().as_millis() as u64, "Phase 3: RRF merge + symbol expansion");
+        tracing::info!(
+            elapsed_ms = phase_start.elapsed().as_millis() as u64,
+            "Phase 3: RRF merge + symbol expansion"
+        );
         let phase_start = std::time::Instant::now();
 
         // Rebuild top_chunk_ids after potential symbol expansion
@@ -722,33 +802,46 @@ impl SearchService {
         if results.len() < pre_floor {
             tracing::debug!(
                 "Score floor removed {} noise results (threshold: {})",
-                pre_floor - results.len(), SCORE_FLOOR
+                pre_floor - results.len(),
+                SCORE_FLOOR
             );
         }
 
-        tracing::info!(elapsed_ms = phase_start.elapsed().as_millis() as u64, "Phase 4: Result fetch + popularity boost");
+        tracing::info!(
+            elapsed_ms = phase_start.elapsed().as_millis() as u64,
+            "Phase 4: Result fetch + popularity boost"
+        );
         let phase_start = std::time::Instant::now();
 
         // Sort by boosted score descending
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Parent-context enrichment: for function-level chunks, fetch the parent class/module
         // signature so the LLM understands the surrounding context.
-        let function_chunk_ids: Vec<i64> = results.iter()
+        let function_chunk_ids: Vec<i64> = results
+            .iter()
             .filter(|r| r.chunk_type.as_deref() == Some("function") && r.level == Some(2))
             .take(20) // Max 20 parent lookups per search
             .map(|r| r.chunk_id)
             .collect();
 
         if !function_chunk_ids.is_empty() {
-            if let Ok(parent_rows) = client.query(
-                "SELECT c.id as chunk_id, LEFT(pc.content_text, 200) as parent_text
+            if let Ok(parent_rows) = client
+                .query(
+                    "SELECT c.id as chunk_id, LEFT(pc.content_text, 200) as parent_text
                  FROM chunks c
                  JOIN chunks pc ON pc.id = c.parent_chunk_id
                  WHERE c.id = ANY($1) AND c.parent_chunk_id IS NOT NULL",
-                &[&function_chunk_ids],
-            ).await {
-                let parent_map: HashMap<i64, String> = parent_rows.iter()
+                    &[&function_chunk_ids],
+                )
+                .await
+            {
+                let parent_map: HashMap<i64, String> = parent_rows
+                    .iter()
                     .filter_map(|r| {
                         let cid: i64 = r.get("chunk_id");
                         let text: Option<String> = r.get("parent_text");
@@ -759,14 +852,21 @@ impl SearchService {
                 for result in &mut results {
                     if let Some(parent_text) = parent_map.get(&result.chunk_id) {
                         // Extract first meaningful line (class/struct/interface declaration)
-                        let sig = parent_text.lines()
+                        let sig = parent_text
+                            .lines()
                             .find(|l| {
                                 let t = l.trim();
-                                t.starts_with("pub ") || t.starts_with("class ") || t.starts_with("interface ")
-                                    || t.starts_with("struct ") || t.starts_with("impl ")
-                                    || t.starts_with("public ") || t.starts_with("abstract ")
-                                    || t.starts_with("func ") || t.starts_with("def ")
-                                    || t.starts_with("type ") || t.starts_with("module ")
+                                t.starts_with("pub ")
+                                    || t.starts_with("class ")
+                                    || t.starts_with("interface ")
+                                    || t.starts_with("struct ")
+                                    || t.starts_with("impl ")
+                                    || t.starts_with("public ")
+                                    || t.starts_with("abstract ")
+                                    || t.starts_with("func ")
+                                    || t.starts_with("def ")
+                                    || t.starts_with("type ")
+                                    || t.starts_with("module ")
                             })
                             .unwrap_or_else(|| parent_text.lines().next().unwrap_or(""));
 
@@ -786,14 +886,23 @@ impl SearchService {
 
         // Apply reranking if requested and results exist
         // Sprint 7.6: Skip reranking if reranker circuit breaker is open
-        tracing::info!(elapsed_ms = phase_start.elapsed().as_millis() as u64, "Phase 5: Parent context + dedup + sort");
+        tracing::info!(
+            elapsed_ms = phase_start.elapsed().as_millis() as u64,
+            "Phase 5: Parent context + dedup + sort"
+        );
 
-        let can_rerank = matches!(search_mode, SearchMode::Full | SearchMode::DegradedNoVectors);
+        let can_rerank = matches!(
+            search_mode,
+            SearchMode::Full | SearchMode::DegradedNoVectors
+        );
         if rerank && can_rerank && !results.is_empty() {
             let rerank_start = std::time::Instant::now();
             match self.rerank_results_cb(query, &results).await {
                 Ok(reranked) => {
-                    tracing::info!(elapsed_ms = rerank_start.elapsed().as_millis() as u64, "Phase 6: Reranking");
+                    tracing::info!(
+                        elapsed_ms = rerank_start.elapsed().as_millis() as u64,
+                        "Phase 6: Reranking"
+                    );
                     // Record search metrics
                     metrics::histogram!("search_duration_seconds", "type" => "hybrid", "rerank" => "true")
                         .record(start.elapsed().as_secs_f64());
@@ -838,7 +947,8 @@ impl SearchService {
         tenant: &TenantContext,
     ) -> Result<Vec<(i64, f32)>> {
         let embedding = self.tei.embed(query).await?;
-        self.semantic_search_with_embedding(&embedding, source_id, limit, tenant).await
+        self.semantic_search_with_embedding(&embedding, source_id, limit, tenant)
+            .await
     }
 
     /// Semantic search with pre-computed embedding (for query expansion)
@@ -853,14 +963,16 @@ impl SearchService {
         tenant: &TenantContext,
     ) -> Result<Vec<(i64, f32)>> {
         // K4-FIX2: Oversample when post-filter is active (some results will be filtered)
-        let effective_limit = if self.backfill_active && matches!(tenant, TenantContext::Agent { .. }) {
-            limit * self.backfill_oversampling_factor
-        } else {
-            limit
-        };
+        let effective_limit =
+            if self.backfill_active && matches!(tenant, TenantContext::Agent { .. }) {
+                limit * self.backfill_oversampling_factor
+            } else {
+                limit
+            };
 
         // K4: Use tenant-aware search (user_id filter in Qdrant)
-        let qdrant_results = self.qdrant
+        let qdrant_results = self
+            .qdrant
             .search_chunks_with_tenant(embedding.to_vec(), effective_limit, tenant, source_id)
             .await?;
 
@@ -882,7 +994,8 @@ impl SearchService {
                         filtered_out = filtered,
                         "K4 backfill post-filter removed cross-tenant results"
                     );
-                    metrics::counter!("mainrag_backfill_postfilter_removed").increment(filtered as u64);
+                    metrics::counter!("mainrag_backfill_postfilter_removed")
+                        .increment(filtered as u64);
                 }
                 // Trim back to original limit after filtering
                 results.truncate(limit as usize);
@@ -953,7 +1066,8 @@ impl SearchService {
         // Sanitize expanded queries: remove empty terms and leading/trailing pipes
         let effective_query: String;
         let tsquery = if is_expanded {
-            let cleaned: Vec<&str> = query.split(" | ")
+            let cleaned: Vec<&str> = query
+                .split(" | ")
                 .map(|t| t.trim())
                 .filter(|t| !t.is_empty())
                 .collect();
@@ -1031,7 +1145,9 @@ impl SearchService {
                     let full_query = format!(
                         "{} WHERE s.user_id = $2 AND f.source_id = $3 GROUP BY dual.chunk_id, f.source_id, s.user_id ORDER BY score DESC LIMIT $4",
                         base_query);
-                    client.query(&full_query, &[&query, user_id, &sid, &(limit as i64)]).await?
+                    client
+                        .query(&full_query, &[&query, user_id, &sid, &(limit as i64)])
+                        .await?
                 } else {
                     let diverse_query = format!(
                         "SELECT chunk_id, score FROM (\
@@ -1059,7 +1175,12 @@ impl SearchService {
                             cl = FTS_CHANNEL_LIMIT
                         )
                     );
-                    client.query(&diverse_query, &[&query, user_id, &FTS_PER_SOURCE_LIMIT, &(limit as i64)]).await?
+                    client
+                        .query(
+                            &diverse_query,
+                            &[&query, user_id, &FTS_PER_SOURCE_LIMIT, &(limit as i64)],
+                        )
+                        .await?
                 }
             }
             TenantContext::Admin => {
@@ -1067,7 +1188,9 @@ impl SearchService {
                     let full_query = format!(
                         "{} WHERE f.source_id = $2 GROUP BY dual.chunk_id, f.source_id, s.user_id ORDER BY score DESC LIMIT $3",
                         base_query);
-                    client.query(&full_query, &[&query, &sid, &(limit as i64)]).await?
+                    client
+                        .query(&full_query, &[&query, &sid, &(limit as i64)])
+                        .await?
                 } else {
                     let diverse_query = format!(
                         "SELECT chunk_id, score FROM (\
@@ -1095,7 +1218,12 @@ impl SearchService {
                             cl = FTS_CHANNEL_LIMIT
                         )
                     );
-                    client.query(&diverse_query, &[&query, &FTS_PER_SOURCE_LIMIT, &(limit as i64)]).await?
+                    client
+                        .query(
+                            &diverse_query,
+                            &[&query, &FTS_PER_SOURCE_LIMIT, &(limit as i64)],
+                        )
+                        .await?
                 }
             }
         };
@@ -1104,7 +1232,10 @@ impl SearchService {
         metrics::histogram!("fts_query_duration_seconds", "strategy" => "direct")
             .record(fts_start.elapsed().as_secs_f64());
 
-        Ok(rows.iter().map(|row| (row.get::<_, i64>("chunk_id"), row.get::<_, f32>("score"))).collect())
+        Ok(rows
+            .iter()
+            .map(|row| (row.get::<_, i64>("chunk_id"), row.get::<_, f32>("score")))
+            .collect())
     }
 
     /// Pure semantic search using Qdrant
@@ -1121,7 +1252,8 @@ impl SearchService {
         let embedding = self.tei.embed(query).await?;
 
         // K4: Use tenant-aware search
-        let qdrant_results = self.qdrant
+        let qdrant_results = self
+            .qdrant
             .search_chunks_with_tenant(embedding, limit as u64, tenant, source_id)
             .await?;
 
@@ -1135,10 +1267,7 @@ impl SearchService {
         }
 
         // Convert Qdrant results to chunk IDs
-        let chunk_ids: Vec<i64> = qdrant_results
-            .iter()
-            .map(|(id, _)| *id as i64)
-            .collect();
+        let chunk_ids: Vec<i64> = qdrant_results.iter().map(|(id, _)| *id as i64).collect();
 
         // Create score map from Qdrant results
         let score_map: std::collections::HashMap<i64, f32> = qdrant_results
@@ -1248,23 +1377,36 @@ impl SearchService {
         let rows = match tenant {
             TenantContext::Agent { user_id } => {
                 if let Some(sid) = source_id {
-                    let full_query = format!("{} AND s.user_id = $2 AND f.source_id = $3 ORDER BY score DESC LIMIT $4", base_query);
-                    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 4] = [&clean_query, user_id, &sid, &limit_i64];
+                    let full_query = format!(
+                        "{} AND s.user_id = $2 AND f.source_id = $3 ORDER BY score DESC LIMIT $4",
+                        base_query
+                    );
+                    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 4] =
+                        [&clean_query, user_id, &sid, &limit_i64];
                     client.query(&full_query, &params).await?
                 } else {
-                    let full_query = format!("{} AND s.user_id = $2 ORDER BY score DESC LIMIT $3", base_query);
-                    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 3] = [&clean_query, user_id, &limit_i64];
+                    let full_query = format!(
+                        "{} AND s.user_id = $2 ORDER BY score DESC LIMIT $3",
+                        base_query
+                    );
+                    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 3] =
+                        [&clean_query, user_id, &limit_i64];
                     client.query(&full_query, &params).await?
                 }
             }
             TenantContext::Admin => {
                 if let Some(sid) = source_id {
-                    let full_query = format!("{} AND f.source_id = $2 ORDER BY score DESC LIMIT $3", base_query);
-                    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 3] = [&clean_query, &sid, &limit_i64];
+                    let full_query = format!(
+                        "{} AND f.source_id = $2 ORDER BY score DESC LIMIT $3",
+                        base_query
+                    );
+                    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 3] =
+                        [&clean_query, &sid, &limit_i64];
                     client.query(&full_query, &params).await?
                 } else {
                     let full_query = format!("{} ORDER BY score DESC LIMIT $2", base_query);
-                    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&clean_query, &limit_i64];
+                    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] =
+                        [&clean_query, &limit_i64];
                     client.query(&full_query, &params).await?
                 }
             }
@@ -1311,11 +1453,15 @@ impl SearchService {
         tenant: &TenantContext,
     ) -> Result<Vec<(i64, f32)>> {
         // Sprint 7.3b: Acquire Qdrant semaphore permit before searching
-        let _qdrant_permit = self.semaphores.qdrant.acquire().await
-            .map_err(|_| crate::error::AppError::Internal("Qdrant semaphore closed".to_string()))?;
+        let _qdrant_permit =
+            self.semaphores.qdrant.acquire().await.map_err(|_| {
+                crate::error::AppError::Internal("Qdrant semaphore closed".to_string())
+            })?;
 
         let start = std::time::Instant::now();
-        let result = self.semantic_search_with_embedding(embedding, source_id, limit, tenant).await;
+        let result = self
+            .semantic_search_with_embedding(embedding, source_id, limit, tenant)
+            .await;
         metrics::histogram!("mainrag_qdrant_semaphore_wait_ms")
             .record(start.elapsed().as_millis() as f64);
 
@@ -1345,8 +1491,10 @@ impl SearchService {
         results: &[SearchResult],
     ) -> Result<Vec<SearchResult>> {
         // Sprint 7.3b: Acquire rerank semaphore permit before reranking
-        let _rerank_permit = self.semaphores.rerank.acquire().await
-            .map_err(|_| crate::error::AppError::Internal("Rerank semaphore closed".to_string()))?;
+        let _rerank_permit =
+            self.semaphores.rerank.acquire().await.map_err(|_| {
+                crate::error::AppError::Internal("Rerank semaphore closed".to_string())
+            })?;
 
         let start = std::time::Instant::now();
         let result = self.rerank_results(query, results).await;
@@ -1377,8 +1525,14 @@ impl SearchService {
 
         // Limit candidates for reranking — top 30 is enough, beyond that quality gain is negligible
         let rerank_limit: usize = std::env::var("RERANK_CANDIDATE_LIMIT")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(30);
-        let rerank_input = if results.len() > rerank_limit { &results[..rerank_limit] } else { results };
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+        let rerank_input = if results.len() > rerank_limit {
+            &results[..rerank_limit]
+        } else {
+            results
+        };
 
         // Extract content for reranking (safely truncate at char boundary)
         let texts: Vec<String> = rerank_input
@@ -1400,8 +1554,10 @@ impl SearchService {
             .collect();
 
         // Call reranker
-        let reranked_indices = self.reranker.rerank(query, texts).await
-            .map_err(|e| crate::error::AppError::Internal(format!("Reranking failed: {}", e)))?;
+        let reranked_indices =
+            self.reranker.rerank(query, texts).await.map_err(|e| {
+                crate::error::AppError::Internal(format!("Reranking failed: {}", e))
+            })?;
 
         // Sprint 7.4: Reorder results based on reranker scores,
         // preserving RRF score information via weighted combination

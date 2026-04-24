@@ -4,17 +4,16 @@ use crate::client::ApiClient;
 use anyhow::Result;
 use colored::Colorize;
 
-pub async fn run(
-    client: &ApiClient,
-    symbol: &str,
-    json_output: bool,
-) -> Result<()> {
+pub async fn run(client: &ApiClient, symbol: &str, json_output: bool) -> Result<()> {
     if !json_output {
         eprint!("{}", "Loading ownership...".cyan());
     }
 
-    let url = format!("{}/api/v1/intelligence/ownership?symbol={}",
-        client.base_url(), urlencoding::encode(symbol));
+    let url = format!(
+        "{}/api/v1/intelligence/ownership?symbol={}",
+        client.base_url(),
+        urlencoding::encode(symbol)
+    );
     let body = client.raw_get(&url).await?;
 
     if json_output {
@@ -25,11 +24,23 @@ pub async fn run(
     let results: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap_or_default();
 
     if results.is_empty() {
-        println!("{}", format!("\rNo ownership relations found for '{}'", symbol).yellow());
+        println!(
+            "{}",
+            format!("\rNo ownership relations found for '{}'", symbol).yellow()
+        );
         return Ok(());
     }
 
-    println!("{}", format!("\r{} Found {} relation(s) for '{}'", "OK".green(), results.len(), symbol).bold());
+    println!(
+        "{}",
+        format!(
+            "\r{} Found {} relation(s) for '{}'",
+            "OK".green(),
+            results.len(),
+            symbol
+        )
+        .bold()
+    );
 
     for rel in &results {
         let rel_type = rel["relation_type"].as_str().unwrap_or("?");
@@ -51,7 +62,8 @@ pub async fn run(
         };
 
         if direction == "incoming" {
-            println!("  {} {} {} {} ({:.0}%) {}",
+            println!(
+                "  {} {} {} {} ({:.0}%) {}",
                 source_name.bold(),
                 "<-".dimmed(),
                 rel_colored,
@@ -60,7 +72,8 @@ pub async fn run(
                 file.dimmed(),
             );
         } else {
-            println!("  {} -> {} {} ({:.0}%) {}",
+            println!(
+                "  {} -> {} {} ({:.0}%) {}",
                 source_name.bold(),
                 rel_colored,
                 target.bold(),

@@ -63,7 +63,10 @@ fn test_jwt_secret_minimum_length() {
     // We must set all required env vars to reach the JWT_SECRET check.
     env::set_var("JWT_SECRET", "too_short");
     env::set_var("POSTGRES_PASSWORD", "test_password");
-    env::set_var("API_KEY_PEPPER", "a_unique_pepper_for_test_that_is_not_default");
+    env::set_var(
+        "API_KEY_PEPPER",
+        "a_unique_pepper_for_test_that_is_not_default",
+    );
 
     // This should panic with the 32-char minimum message
     let _config = mainrag_api::config::Config::from_env();
@@ -153,11 +156,7 @@ fn test_password_policy_accepts_strong() {
 // exported from lib.rs. We replicate the creation logic using the same
 // governor crate to verify the rate limiter invariants.
 
-use governor::{
-    clock::DefaultClock,
-    state::keyed::DefaultKeyedStateStore,
-    Quota, RateLimiter,
-};
+use governor::{clock::DefaultClock, state::keyed::DefaultKeyedStateStore, Quota, RateLimiter};
 
 type KeyedRateLimiter = Arc<RateLimiter<String, DefaultKeyedStateStore<String>, DefaultClock>>;
 
@@ -202,7 +201,10 @@ fn test_keyed_rate_limiter_blocks_excess() {
     }
 
     // First 10 should succeed (burst capacity), rest should be denied
-    assert_eq!(ok_count, 10, "Expected 10 allowed requests (burst capacity)");
+    assert_eq!(
+        ok_count, 10,
+        "Expected 10 allowed requests (burst capacity)"
+    );
     assert_eq!(err_count, 10, "Expected 10 denied requests");
 }
 
@@ -232,7 +234,10 @@ fn test_api_key_hash_deterministic() {
     let hash1 = compute_key_hash(pepper, api_key);
     let hash2 = compute_key_hash(pepper, api_key);
 
-    assert_eq!(hash1, hash2, "Same pepper + api_key must produce identical hash");
+    assert_eq!(
+        hash1, hash2,
+        "Same pepper + api_key must produce identical hash"
+    );
     assert_eq!(hash1.len(), 32, "HMAC-SHA256 output must be 32 bytes");
 }
 
@@ -263,9 +268,11 @@ fn test_api_key_hash_changes_with_pepper() {
 fn test_registration_endpoint_removed() {
     // Verify at the source level: the auth handler file should contain the
     // removal comment and NOT contain a RegisterRequest struct.
-    let auth_handler_source =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/api/handlers/auth.rs"))
-            .expect("Should be able to read auth handler source");
+    let auth_handler_source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/api/handlers/auth.rs"
+    ))
+    .expect("Should be able to read auth handler source");
 
     assert!(
         auth_handler_source.contains("RegisterRequest removed"),
