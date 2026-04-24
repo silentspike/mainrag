@@ -98,7 +98,7 @@ scraper = "0.21"
 hex = "0.4"
 
 # PDF Plugin - Fallback (immer verfügbar)
-pdf-extract = "0.7"
+pdf-extract = "0.10"
 
 # PDF Plugin - MuPDF (optional, braucht libmupdf-dev)
 mupdf = { version = "0.5", optional = true }
