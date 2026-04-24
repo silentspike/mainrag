@@ -1,0 +1,5 @@
+error[E0616]: field `pool` of struct `RlsClient` is private
+ --> tests/compile_fail/pool_field_private.rs:9:25
+  |
+9 |     let _pool = &client.pool;
+  |                         ^^^^ private field

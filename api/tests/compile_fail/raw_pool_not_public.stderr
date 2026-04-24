@@ -1,0 +1,10 @@
+error[E0624]: method `raw_pool` is private
+ --> tests/compile_fail/raw_pool_not_public.rs:9:24
+  |
+9 |     let _pool = client.raw_pool();
+  |                        ^^^^^^^^ private method
+  |
+ ::: src/db/rls_client.rs
+  |
+  |     pub(crate) fn raw_pool(&self) -> &Pool {
+  |     -------------------------------------- private method defined here
