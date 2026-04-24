@@ -1,0 +1,46 @@
+[Unit]
+# LEGACY TEMPLATE — pre-Docker-compose systemd unit for running a native
+# Text-Embeddings-Inference server. Retained for single-host deployments
+# that prefer systemd over Docker for everything.
+#
+# The official deployment path is docker-compose.yml at the repo root.
+# Do NOT enable both simultaneously — port 8091 will conflict.
+#
+# Usage:
+#   1. Install TEI binary at /opt/mainrag/tei/text-embeddings-inference
+#   2. Pre-stage model at /data/models/gte-modernbert-base/
+#   3. Copy this file to /etc/systemd/system/
+#   4. `sudo systemctl daemon-reload && sudo systemctl enable --now mainrag-tei`
+
+Description=MainRag TEI Embeddings Server (legacy single-host template)
+Documentation=https://github.com/silentspike/mainrag
+After=network.target
+
+[Service]
+Type=simple
+User=mainrag
+Group=mainrag
+WorkingDirectory=/opt/mainrag/tei
+ExecStart=/opt/mainrag/tei/text-embeddings-inference \
+  --model-id Alibaba-NLP/gte-modernbert-base \
+  --port 8091 \
+  --max-batch-tokens 8192 \
+  --max-concurrent-requests 128 \
+  --max-client-batch-size 32 \
+  --auto-truncate
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/mainrag/tei /data/models
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mainrag-tei
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,6 @@
 [Unit]
-Description=MAINRAG Daily Backup Timer
+Description=MainRag Daily Backup Timer
+Documentation=https://github.com/silentspike/mainrag
 
 [Timer]
 OnCalendar=*-*-* 03:00:00

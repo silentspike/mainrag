@@ -136,8 +136,8 @@ POST /api/v1/intelligence/negative_evidence
 ```
 
 These records survive re-indexing (not regenerated from code) and are
-weighted heavily by the reranker when a query contains the negated
-concept — so "does hybrid_search cache results" returns the
+weighted heavily by the retrieval pipeline when a query contains the
+negated concept — so "does hybrid_search cache results" returns the
 negative-evidence annotation before the code body.
 
 ## CLI shortcuts

@@ -15,7 +15,7 @@ who need *grounded, citable, low-latency* answers over large private codebases
 (~860k chunks tested) without sending data to a third party.
 
 - **Embedding model:** `Alibaba-NLP/gte-modernbert-base` (768d, 8192-token context)
-- **Reranker:** `Alibaba-NLP/gte-reranker-modernbert-base` (cross-encoder)
+- **Reranker:** `BAAI/bge-reranker-base` (cross-encoder)
 - **Vector store:** Qdrant 1.16 with HNSW + Scalar Quantization (INT8)
 - **Lexical index:** PostgreSQL 18 FTS (GIN, `UNION ALL simple+english`)
 - **Intelligence layer:** Tree-sitter symbol extraction, call-graph edges, N-hop BFS traversal

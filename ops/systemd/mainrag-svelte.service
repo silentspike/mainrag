@@ -1,5 +1,6 @@
 [Unit]
-Description=MAINRAG SvelteKit Frontend
+Description=MainRag SvelteKit Frontend
+Documentation=https://github.com/silentspike/mainrag
 After=network.target mainrag-api.service
 Wants=mainrag-api.service
 

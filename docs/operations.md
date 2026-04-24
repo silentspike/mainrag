@@ -17,8 +17,8 @@ services run under systemd (for reboot-resilience and log integration).
 | API            | systemd  | 3001          | `mainrag-api.service`              |
 | Watchers       | systemd  | —             | `mainrag-watcher*.service`         |
 | SvelteKit UI   | systemd  | 5173 (dev)    | `mainrag-svelte.service`           |
-| Embedder (GTE) | Docker   | 8091          | `mainrag-tei-gte`                  |
-| Reranker (GTE) | Docker   | 8082          | `mainrag-tei-reranker`             |
+| Embedder (GTE-ModernBERT)      | Docker | 8091 | `mainrag-tei-gte`           |
+| Reranker (BGE-reranker-base)   | Docker | 8082 | `mainrag-tei-reranker`      |
 | Qdrant         | Docker   | 6333 (HTTP) / 6334 (gRPC) | `qdrant-mainrag`        |
 | PostgreSQL 18  | native   | 5432          | system package                     |
 
@@ -29,12 +29,13 @@ services run under systemd (for reboot-resilience and log integration).
 
 ## Model requirements
 
-The retrieval stack pulls two ~300 MB model directories on first start.
-Pre-stage them to avoid the Hugging Face download at deploy time:
+The retrieval stack pulls two model directories on first start.
+Pre-stage them via the TEI container's HuggingFace cache to avoid the
+Hugging Face download at deploy time:
 
 ```
-/data/models/gte-modernbert-base/            # ~310 MB
-/data/models/gte-reranker-modernbert-base/   # ~290 MB
+/data/models/models--Alibaba-NLP--gte-modernbert-base/   # embedder, ~310 MB
+/data/models/models--BAAI--bge-reranker-base/            # reranker, ~280 MB
 ```
 
 Both trees are mounted into the TEI containers as read-only volumes (see
@@ -55,6 +56,7 @@ example file with all keys and redacted secrets ships as `mainrag.env.example`
 | `QDRANT_EF_SEARCH`              | HNSW ef_search (default 64)               |
 | `TEI_URL` / `TEI_REST_URL`      | Embedder REST endpoint (default `http://localhost:8091`) |
 | `TEI_MODEL`                     | `Alibaba-NLP/gte-modernbert-base`         |
+| `TEI_RERANKER_MODEL`            | `BAAI/bge-reranker-base` (docker-compose default) |
 | `TEI_RERANKER_URL`              | Reranker REST endpoint (default `http://localhost:8082`) |
 | `TOKENIZER_VERSION`             | `hf_gte_modernbert`                       |
 | `TOKENIZER_ASSET_PATH`          | `/data/models/gte-modernbert-base/tokenizer.json` |
@@ -94,8 +96,8 @@ cargo build --release --workspace    # or: cargo remote -c -- build --release
 
 # 3. Pre-stage models
 sudo mkdir -p /data/models
-hf_hub download Alibaba-NLP/gte-modernbert-base          --local-dir /data/models/gte-modernbert-base
-hf_hub download Alibaba-NLP/gte-reranker-modernbert-base --local-dir /data/models/gte-reranker-modernbert-base
+HF_HOME=/data/models hf_hub download Alibaba-NLP/gte-modernbert-base
+HF_HOME=/data/models hf_hub download BAAI/bge-reranker-base
 
 # 4. Start GPU services
 docker compose up -d
