@@ -1,0 +1,28 @@
+# cargo-audit configuration. Read by `cargo audit` automatically when run
+# from the workspace root. Each entry below is an unmaintained-crate
+# advisory (NOT a vulnerability) that is reachable only transitively
+# through dependencies we do not control. Tracked under issue #8 for
+# eventual replacement.
+#
+# Re-evaluate this file whenever cargo-audit fires on a NEW advisory ID.
+
+[advisories]
+ignore = [
+    # fxhash 0.2.1 — unmaintained.
+    # Pulled in by scraper -> selectors. We already use rustc-hash directly
+    # for our own hashing (see api/Cargo.toml). Will drop scraper when an
+    # alternative HTML parser lands.
+    "RUSTSEC-2025-0057",
+
+    # number_prefix 0.4.0 — unmaintained.
+    # Pulled in by indicatif -> tokenizers (Hugging Face). Upstream tokenizers
+    # tracks this; will pick up automatically when indicatif releases a
+    # replacement.
+    "RUSTSEC-2025-0119",
+
+    # paste 1.0.15 — unmaintained.
+    # Macro-only crate, transitive via tokenizers + rmcp. Both upstreams are
+    # actively maintained and will swap paste for an alternative on their
+    # own cadence.
+    "RUSTSEC-2024-0436",
+]

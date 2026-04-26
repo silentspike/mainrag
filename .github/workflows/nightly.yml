@@ -13,20 +13,23 @@ jobs:
   test:
     name: cargo test (unit, no service deps)
     runs-on: ubuntu-latest
-    # Several chunker tests load a real tokenizer asset from /data/models,
-    # which the public runner does not have. The job is informational until
-    # we either skip those tests at CI level or mount a model cache.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Run workspace unit tests (model-dependent tests are flagged below)
+      - name: Stage BGE tokenizer asset for chunker tests
+        # Several `services::chunker::semantic::tests` and the gemini jsonl
+        # test load /data/models/bge-base-en-v1.5/tokenizer.json at runtime.
+        # Download it (~400 KB) so the tests run for real on CI. Closes #7.
         run: |
-          cargo test --workspace --no-default-features --lib -- \
-            --nocapture \
-            --skip services::chunker::semantic::tests \
-            --skip services::chunker::jsonl::tests::test_gemini
+          sudo mkdir -p /data/models/bge-base-en-v1.5
+          sudo chown -R "$USER:$USER" /data/models
+          curl -sSL --fail-with-body \
+            https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/main/tokenizer.json \
+            -o /data/models/bge-base-en-v1.5/tokenizer.json
+          ls -la /data/models/bge-base-en-v1.5/tokenizer.json
+      - name: Run workspace unit tests
+        run: cargo test --workspace --no-default-features --lib -- --nocapture
 
   docs:
     name: cargo doc
@@ -40,10 +43,9 @@ jobs:
   audit:
     name: cargo audit (RUSTSEC advisories)
     runs-on: ubuntu-latest
-    # `cargo audit` warns on unmaintained crates (fxhash is the current one).
-    # The job fails only on actual vulnerabilities via --ignore; warnings stay
-    # informational without breaking the green bar.
-    continue-on-error: true
+    # No continue-on-error: the job must stay green. audit.toml at the repo
+    # root documents the exact unmaintained-crate advisories we accept (see
+    # issue #8) and `cargo audit` reads it automatically.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
