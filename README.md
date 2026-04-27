@@ -33,8 +33,8 @@ who need *grounded, citable, low-latency* answers over large private codebases
 MainRag ships a Model Context Protocol server alongside the HTTP API.
 Coding agents on private codebases need grounded retrieval over the
 company repository, not just the open files — MainRag is that retrieval
-layer. 13 tools are exposed live under `/api/v1/mcp/tools` and
-`/api/v1/mcp/call`:
+layer. 13 tools are exposed live under `/api/v1/mcp/tools` (list) and
+`/api/v1/mcp/tools/execute` (call):
 
 | Tool | Purpose |
 | --- | --- |
