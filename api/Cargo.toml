@@ -25,7 +25,7 @@ pdf-mupdf = ["dep:mupdf"]
 tokio = { version = "1.42", features = ["full"] }
 
 # Web Framework
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.8", features = ["macros"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "limit", "set-header", "timeout"] }
 http-body-util = "0.1"
