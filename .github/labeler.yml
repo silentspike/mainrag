@@ -45,7 +45,6 @@
           - "**/*.md"
           - docs/**
           - README.md
-          - ARCHITECTURE.md
 
 "ci":
   - changed-files:

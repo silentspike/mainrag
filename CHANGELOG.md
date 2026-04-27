@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Removed the legacy root `ARCHITECTURE.md`. The single source of truth
+  for system architecture is `docs/architecture.md`; the root file was
+  an older draft that overclaimed unimplemented techniques and is no
+  longer reconcilable with the running code.
+
 ## [0.1.0-alpha.1] — 2026-04-24
 
 First public preview of MainRag as a standalone Apache-2.0 project at
