@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an older draft that overclaimed unimplemented techniques and is no
   longer reconcilable with the running code.
 
+### Known limits
+
+- **Not for production multi-tenant use.** MainRag v0.1.0-alpha is a
+  single-tenant developer preview. The transactional outbox + the
+  `DEFAULT_USER_ID` rework are scoped for v0.2 (multi-tenant beta);
+  tracked in [#10](https://github.com/silentspike/mainrag/issues/10).
+
 ## [0.1.0-alpha.1] — 2026-04-24
 
 First public preview of MainRag as a standalone Apache-2.0 project at

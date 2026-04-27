@@ -189,6 +189,12 @@ This is an early public preview (`v0.1.0-alpha.1`). The system runs
 production traffic on a single node but public-facing APIs, CI, and the
 plugin interface are not yet stabilized. Expect breaking changes.
 
+**Not for production multi-tenant use.** MainRag v0.1.0-alpha is a
+single-tenant developer preview. The transactional outbox and the
+`DEFAULT_USER_ID` hardening are scoped for v0.2 (multi-tenant beta) —
+see [#10](https://github.com/silentspike/mainrag/issues/10) for the
+plan.
+
 ## License
 
 Licensed under the Apache License, Version 2.0. See [`LICENSE`](LICENSE).
