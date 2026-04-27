@@ -228,7 +228,7 @@ pub async fn list_file_symbols(
 #[derive(Debug, Deserialize)]
 pub struct CallerQuery {
     pub function: String,
-    /// Optional source name filter (e.g. "bitwig6-decompiled")
+    /// Optional source name filter (e.g. "internal-java-corpus")
     pub source: Option<String>,
 }
 

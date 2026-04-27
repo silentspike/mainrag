@@ -3,14 +3,20 @@
 # Model: BAAI/bge-base-en-v1.5 (768d, 512 tokens)
 # Chunks: 859k | Sources: 18 | Qdrant: 883k vectors
 
+> **Note on the corpus.** The `internal-java-corpus` label is anonymised
+> to keep this document IP-clean. The actual corpus was a private
+> 600k-LoC Java codebase indexed during evaluation. The relevance
+> ratings and recall numbers are real measurements; the corpus itself
+> is not redistributable.
+
 ## Test Queries & Results
 
 ### Query: "createClip delegation proxy"
-Source: bitwig6-decompiled
+Source: internal-java-corpus
 ```
 Found 100 results (showing 5).
 
-#1 [bitwig6-decompiled] com/bitwig/flt/control_surface/proxy/DelegatingClipProxy.java (0.71) com/bitwig/flt/control_surface/proxy/DelegatingClipProxy.java:25-64
+#1 [internal-java-corpus] com/bitwig/flt/control_surface/proxy/DelegatingClipProxy.java (0.71) com/bitwig/flt/control_surface/proxy/DelegatingClipProxy.java:25-64
   public abstract class DelegatingClipProxy
   extends DelegatingControlSurfaceObjectProxy
   implements Clip {
@@ -22,25 +28,25 @@ Found 100 results (showing 5).
   ((Clip)this.mDelegate).scrollToKey(n2);
   }
 
-#2 [bitwig6-decompiled] com/bitwig/flt/control_surface/proxy/CursorTrackCursorClipProxy.java > publi... (0.36) com/bitwig/flt/control_surface/proxy/CursorTrackCursorClipProxy.java:42-45
+#2 [internal-java-corpus] com/bitwig/flt/control_surface/proxy/CursorTrackCursorClipProxy.java > publi... (0.36) com/bitwig/flt/control_surface/proxy/CursorTrackCursorClipProxy.java:42-45
   @Override
   public ClipProxy getDelegateProxy() {
   return (ClipProxy)super.getDelegateProxy();
   }
 
-#3 [bitwig6-decompiled] com/bitwig/flt/control_surface/proxy/DelegatingClipProxy.java > public abstr... (0.25) com/bitwig/flt/control_surface/proxy/DelegatingClipProxy.java:87-90
+#3 [internal-java-corpus] com/bitwig/flt/control_surface/proxy/DelegatingClipProxy.java > public abstr... (0.25) com/bitwig/flt/control_surface/proxy/DelegatingClipProxy.java:87-90
   @Override
   public void addCanScrollKeysUpObserver(BooleanValueChangedCallback booleanValueChangedCallback) {
   ((Clip)this.mDelegate).addCanScrollKeysUpObserver(booleanValueChangedCallback);
   }
 
-#4 [bitwig6-decompiled] com/bitwig/flt/control_surface/proxy/DelegatingControlSurfaceObjectProxy.jav... (0.19) com/bitwig/flt/control_surface/proxy/DelegatingControlSurfaceObjectProxy.java:54-57
+#4 [internal-java-corpus] com/bitwig/flt/control_surface/proxy/DelegatingControlSurfaceObjectProxy.jav... (0.19) com/bitwig/flt/control_surface/proxy/DelegatingControlSurfaceObjectProxy.java:54-57
   public ControlSurfaceProxy getDelegateProxy() {
   assert (this.SWC(this.mDelegate != null));
   return (ControlSurfaceProxy)((Object)this.mDelegate);
   }
 
-#5 [bitwig6-decompiled] com/bitwig/flt/control_surface/proxy/DelegatingControlSurfaceObjectProxy.jav... (0.15) com/bitwig/flt/control_surface/proxy/DelegatingControlSurfaceObjectProxy.java:25-37
+#5 [internal-java-corpus] com/bitwig/flt/control_surface/proxy/DelegatingControlSurfaceObjectProxy.jav... (0.15) com/bitwig/flt/control_surface/proxy/DelegatingControlSurfaceObjectProxy.java:25-37
   protected final void initDelegate(ObjectProxy objectProxy) {
   assert (this.SWC(objectProxy != null));
   assert (this.SWC(objectProxy instanceof ControlSurfaceProxy));
@@ -57,18 +63,18 @@ Scores: 0.71 0.36 0.25 0.19 0.15
 ---
 
 ### Query: "how to delete a clip from arranger"
-Source: bitwig6-decompiled
+Source: internal-java-corpus
 ```
 Found 100 results (showing 5).
 
-#1 [bitwig6-decompiled] com/bitwig/flt/document/core/iface/clipboard/clip/ArrangerClipInsertionPoint... (0.71) com/bitwig/flt/document/core/iface/clipboard/clip/ArrangerClipInsertionPoint.java:96-100
+#1 [internal-java-corpus] com/bitwig/flt/document/core/iface/clipboard/clip/ArrangerClipInsertionPoint... (0.71) com/bitwig/flt/document/core/iface/clipboard/clip/ArrangerClipInsertionPoint.java:96-100
   @Override
   protected void Xzy(YJP yJP) {
   super.Xzy(yJP);
   tye tye2 = yJP.Hm();
   }
 
-#2 [bitwig6-decompiled] com/bitwig/flt/control_surface/proxy/ClipProxy.java > public class ClipProxy (0.36) com/bitwig/flt/control_surface/proxy/ClipProxy.java:1278-1288
+#2 [internal-java-corpus] com/bitwig/flt/control_surface/proxy/ClipProxy.java > public class ClipProxy (0.36) com/bitwig/flt/control_surface/proxy/ClipProxy.java:1278-1288
   protected void disconnectFromClipContentTimeline(xhO xhO2) {
   if (this.mInstrumentClipListener != null) {
   this.mInstrumentClipListener.dispose();
@@ -81,17 +87,17 @@ Found 100 results (showing 5).
   this.mClipContentTimeline = null;
   }
 
-#3 [bitwig6-decompiled] com/bitwig/flt/control_surface/proxy/ClipProxy$InstrumentClipListener.java >... (0.24) com/bitwig/flt/control_surface/proxy/ClipProxy$InstrumentClipListener.java:30-33
+#3 [internal-java-corpus] com/bitwig/flt/control_surface/proxy/ClipProxy$InstrumentClipListener.java >... (0.24) com/bitwig/flt/control_surface/proxy/ClipProxy$InstrumentClipListener.java:30-33
   public void dispose() {
   this.mInstrumentNoteClipContent.ngq(this);
   this.mInstrumentNoteClipContent.BuY().Xzy(this);
   }
 
-#4 [bitwig6-decompiled] com/bitwig/extension/controller/api/Clip.java > public interface Clip (0.18) com/bitwig/extension/controller/api/Clip.java:109-110
+#4 [internal-java-corpus] com/bitwig/extension/controller/api/Clip.java > public interface Clip (0.18) com/bitwig/extension/controller/api/Clip.java:109-110
   @OscMethod
   public void clearSteps();
 
-#5 [bitwig6-decompiled] com/bitwig/extension/controller/api/Clip.java > public interface Clip (0.15) com/bitwig/extension/controller/api/Clip.java:106-107
+#5 [internal-java-corpus] com/bitwig/extension/controller/api/Clip.java > public interface Clip (0.15) com/bitwig/extension/controller/api/Clip.java:106-107
   @OscMethod
   public void clearStepsAtY(int var1, int var2);
 
