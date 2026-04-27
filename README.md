@@ -1,7 +1,13 @@
 # MainRag
 
-> Hybrid retrieval & context system for code understanding.
-> PostgreSQL FTS + Qdrant (HNSW + INT8) + GTE-ModernBERT embeddings + cross-encoder reranking + code intelligence (symbols, call-graph, N-hop traversal).
+> **Self-hosted context layer for AI coding agents.** MainRag exposes
+> private repositories, docs, and prior agent conversations to coding
+> agents (Codex, Claude Code, ...) through MCP — with citations and
+> tenant boundaries.
+>
+> Under the hood: PostgreSQL FTS + Qdrant (HNSW + INT8) + GTE-ModernBERT
+> embeddings + cross-encoder reranking + code intelligence (symbols,
+> call-graph, N-hop traversal).
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Recall@10: 70%](https://img.shields.io/badge/Recall%4010-70%25-brightgreen)](docs/search-baseline-gte-modernbert.md)
@@ -22,6 +28,27 @@ who need *grounded, citable, low-latency* answers over large private codebases
 
 > Last verified: 2026-04-24 via commit `2d597cb`
 
+## MCP for AI coding agents
+
+MainRag ships a Model Context Protocol server alongside the HTTP API.
+Coding agents on private codebases need grounded retrieval over the
+company repository, not just the open files — MainRag is that retrieval
+layer. 13 tools are exposed live under `/api/v1/mcp/tools` and
+`/api/v1/mcp/call`:
+
+| Tool | Purpose |
+| --- | --- |
+| `search_code` | Hybrid retrieval over indexed sources with citations |
+| `search_symbols` | Identifier-aware lookup (functions, types, methods) |
+| `find_callers` / `find_callees` | Call-graph navigation (1..N hops) |
+| `get_symbol_callgraph` / `get_symbol_card` | Symbol-centric context bundles |
+| `explain_path` | Why was this chunk retrieved? (signal breakdown) |
+| `list_sources` / `get_source_stats` | Inventory of indexed corpora |
+| `browse_layers` / `explore` / `get_ownership` / `report_dead_end` | Agent-driven exploration |
+
+End-to-end demo (3 minutes from `docker compose up` to a Codex patch):
+[`docs/demo-mcp-codex.md`](docs/demo-mcp-codex.md).
+
 ## Why MainRag
 
 Pure vector search overfits to paraphrase. Pure keyword search misses
@@ -37,6 +64,10 @@ synonyms. Most hybrid stacks stop at RRF. MainRag adds:
 4. **Code intelligence, not just text:** tree-sitter parses 25+ languages
    into symbols, edges are stored as a proper graph, and N-hop call chains
    are reachable via a single API call.
+
+Coding agents on private codebases need grounded retrieval over the
+company repository, not just the open files. MainRag is that retrieval
+layer — citable, tenant-bounded, fully self-hosted.
 
 ## Performance
 
