@@ -158,9 +158,11 @@ Postgres and Qdrant credentials are rotated the same day with
 
 - **Single node, single GPU.** MainRag has no clustering story. Scale by
   running independent instances behind a tenant-aware load balancer.
-- **Qdrant server-side auth is disabled in the shipped compose file.** The
-  public-readiness sprint will enable it in Phase 11; until then, Qdrant
-  must not be exposed beyond `localhost`.
+- **Qdrant server-side auth is enabled in the shipped compose file.**
+  `QDRANT__SERVICE__API_KEY` is set from `mainrag.env`'s `QDRANT_API_KEY`,
+  and the client uses the same key. Anonymous requests return HTTP 401.
+  Qdrant should still not be exposed beyond `localhost`/the private VPN
+  in alpha — there is no rate-limit per remote IP on Qdrant itself.
 - **Disk-bound vector payloads.** The collection is configured with
   originals on disk. First-query latency after restart is higher until
   HNSW traversal warms the page cache (~30 s for the 860k-chunk corpus).
