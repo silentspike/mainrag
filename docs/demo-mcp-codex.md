@@ -4,9 +4,13 @@ This document walks through connecting MainRag to a coding agent
 (Codex CLI, Claude Code, Cursor, ...) over the Model Context Protocol
 and using it to ground a code-modification task on a private codebase.
 
-> Recording asset (asciinema cast / GIF) is tracked separately —
-> see [issues](https://github.com/silentspike/mainrag/issues) labeled
-> `area/mcp` + `type:enhancement`.
+![mainrag MCP demo: docker compose · 13 tools · cited search](images/mcp-codex-demo.gif)
+
+> The cast above is reproducible from
+> [`docs/images/mcp-codex-demo.tape`](images/mcp-codex-demo.tape):
+> `vhs docs/images/mcp-codex-demo.tape` regenerates the GIF and an
+> MP4 next to it. It records against the live API on `localhost:3001`
+> with the JWT in `~/.config/mainrag/token`.
 
 ## 1. Setup (≈ 60 seconds)
 
@@ -25,15 +29,25 @@ psql "$DATABASE_URL" -f schema_intelligence.sql
 cargo build --release --workspace
 ./target/release/mainrag-api &
 
-# Index axum as a corpus
+# Authenticate as admin and capture a JWT
+TOKEN=$(curl -sf -X POST http://localhost:3001/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"<your-admin-password>"}' \
+  | jq -r .token)
+
+# Index axum as a corpus through the admin source endpoint
 git clone --depth 1 https://github.com/tokio-rs/axum.git /tmp/axum
-./target/release/mainrag source add /tmp/axum --name axum
+SRC_ID=$(curl -sf -X POST http://localhost:3001/api/v1/admin/sources \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"axum","source_type":"fs","path":"/tmp/axum"}' | jq -r .id)
+curl -sf -X POST "http://localhost:3001/api/v1/admin/sources/$SRC_ID/sync" \
+  -H "Authorization: Bearer $TOKEN" | jq '.status'
 ```
 
 After indexing finishes, sanity check that retrieval works:
 
 ```bash
-./target/release/mainrag search "where does the router match a path"
+mainrag search "where does the router match a path" --limit 5
 ```
 
 ## 2. Connect the agent over MCP

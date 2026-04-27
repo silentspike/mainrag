@@ -5,6 +5,9 @@
 > agents (Codex, Claude Code, ...) through MCP — with citations and
 > tenant boundaries.
 >
+> Coding agents query the right files first time, with citations, on
+> the customer's own infrastructure.
+>
 > Under the hood: PostgreSQL FTS + Qdrant (HNSW + INT8) + GTE-ModernBERT
 > embeddings + cross-encoder reranking + code intelligence (symbols,
 > call-graph, N-hop traversal).
@@ -69,6 +72,9 @@ Coding agents on private codebases need grounded retrieval over the
 company repository, not just the open files. MainRag is that retrieval
 layer — citable, tenant-bounded, fully self-hosted.
 
+Pairs with [noaide](https://github.com/silentspike/noaide) — context
+(mainrag) + control (noaide) for coding agents.
+
 ## Performance
 
 Measured on a single workstation (AMD Ryzen 9 5900HS, RTX 3050 Ti 4 GB, 16 GB RAM),
@@ -99,7 +105,39 @@ PARTIAL / WEAK by inspecting the top-5 results per query.
 Evidence: [`docs/search-baseline-bge-base.md`](docs/search-baseline-bge-base.md),
 [`docs/search-baseline-gte-modernbert.md`](docs/search-baseline-gte-modernbert.md).
 
+## Capabilities at a glance
+
+Honest status per area, in four buckets — *Implemented* (code on
+main + tests in CI), *Demo-backed* (code on main + a recorded
+walkthrough or fixture), *Partial* (code on main but a polish or
+hardening gap remains), *Roadmap* (an open issue, no code yet).
+
+| Capability | Status |
+| --- | --- |
+| Hybrid retrieval (BM25 + vector + cross-encoder rerank) | Implemented |
+| MCP server (13 tools live under `/api/v1/mcp/tools`) | Implemented |
+| Code intelligence (tree-sitter, 25+ languages) | Implemented |
+| Call-graph + N-hop BFS traversal | Implemented |
+| Watch-mode (incremental re-indexing) | Implemented |
+| RLS + JWT + rate-limit + pepper-hashed API keys | Implemented |
+| Performance baseline (Recall@10 70 %, p50 132 ms) | Demo-backed (`data/benchmarks/`) |
+| MCP demo walkthrough | Demo-backed (`docs/demo-mcp-codex.md`, `docs/images/mcp-codex-demo.gif`) |
+| Multi-tenant isolation | Partial (RLS on `sources` / `files` / `chunks`; `symbols` / `call_graph_edges` and `DEFAULT_USER_ID` outbox are v0.2 work — see [#10](https://github.com/silentspike/mainrag/issues/10)) |
+| Multi-tenant beta hardening | Roadmap ([#10](https://github.com/silentspike/mainrag/issues/10), scoped for v0.2-beta) |
+
 ## Architecture at a glance
+
+```mermaid
+flowchart LR
+  CLI["mainrag CLI / MCP"] -->|HTTP / JSON| API["axum API :3001<br/>auth · rate-limit · CORS"]
+  API --> PG[("PostgreSQL<br/>FTS + RLS<br/>symbols · call-graph")]
+  API --> QD[("Qdrant<br/>HNSW + INT8<br/>~860k vec")]
+  API --> EMB["TEI GTE<br/>embedder :8091"]
+  API --> RR["TEI BGE<br/>reranker :8082"]
+```
+
+<details>
+<summary>Terminal-readable ASCII variant</summary>
 
 ```
                       ┌────────────────────────────┐
@@ -114,12 +152,14 @@ Evidence: [`docs/search-baseline-bge-base.md`](docs/search-baseline-bge-base.md)
      ┌───────────────────┼──────────────────────┼───────────────────┐
      │                   │                      │                   │
 ┌────▼────┐        ┌─────▼─────┐         ┌──────▼──────┐      ┌─────▼─────┐
-│PostgreSQL│        │  Qdrant   │         │  TEI GTE   │      │ TEI GTE   │
+│PostgreSQL│        │  Qdrant   │         │  TEI GTE   │      │ TEI BGE   │
 │FTS + RLS │        │HNSW + INT8│         │  Embedder  │      │ Reranker  │
 │ symbols  │        │ 860k vec  │         │  :8091     │      │  :8082    │
 │callgraph │        │           │         │            │      │           │
 └──────────┘        └───────────┘         └────────────┘      └───────────┘
 ```
+
+</details>
 
 Full diagram and data-flow: [`docs/architecture.md`](docs/architecture.md).
 
@@ -140,8 +180,16 @@ psql "$DATABASE_URL" -f schema_intelligence.sql
 # 4. Run the API
 ./target/release/mainrag-api
 
-# 5. From another shell: index a source, then search
-./target/release/mainrag source add ./path/to/code --name my-repo
+# 5. From another shell: register a source via the admin API,
+#    sync it, then search
+TOKEN=$(curl -sf -X POST http://localhost:3001/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"<your-admin-password>"}' | jq -r .token)
+SRC_ID=$(curl -sf -X POST http://localhost:3001/api/v1/admin/sources \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"my-repo","source_type":"fs","path":"./path/to/code"}' | jq -r .id)
+curl -sf -X POST "http://localhost:3001/api/v1/admin/sources/$SRC_ID/sync" \
+  -H "Authorization: Bearer $TOKEN" | jq '.status'
 ./target/release/mainrag search "how does hybrid_search work"
 ```
 
@@ -182,6 +230,17 @@ topology, model requirements (~600 MB for GTE embedder + reranker), and
 | [`docs/intelligence.md`](docs/intelligence.md) | Call-graph, N-hop traversal, symbol cards |
 | [`docs/search-baseline-gte-modernbert.md`](docs/search-baseline-gte-modernbert.md) | Current relevance evidence (10 queries) |
 | [`docs/search-baseline-bge-base.md`](docs/search-baseline-bge-base.md) | Prior BGE baseline (historical) |
+| [`docs/demo-mcp-codex.md`](docs/demo-mcp-codex.md) | 3-minute MCP/Codex demo walkthrough |
+| [`examples/`](examples/) | Copy-pasteable walkthroughs (index OSS repo · call MCP tools · agent with context) |
+
+The repository's social preview (the image GitHub renders when the
+repo is shared) lives at
+[`docs/images/og-preview.png`](docs/images/og-preview.png) and is
+reproducible from
+[`docs/images/og-preview.source.html`](docs/images/og-preview.source.html).
+Uploading it is a manual maintainer step under *Settings → General →
+Social preview* — GitHub does not expose a REST endpoint for that
+upload.
 
 ## Status
 
@@ -194,6 +253,9 @@ single-tenant developer preview. The transactional outbox and the
 `DEFAULT_USER_ID` hardening are scoped for v0.2 (multi-tenant beta) —
 see [#10](https://github.com/silentspike/mainrag/issues/10) for the
 plan.
+
+MainRag is developed using AI coding agents — the same tools it
+serves with private-code context.
 
 ## License
 
