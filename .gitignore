@@ -70,3 +70,6 @@ data/benchmarks/*
 # Temporary / intermediate run output (never committed):
 data/benchmarks/*.tmp
 eval/results/*.tmp
+
+# playwright-cli session cache (screenshots + console logs from local renders)
+.playwright-cli/

@@ -137,7 +137,7 @@ pub async fn list_mcp_tools(
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "Symbol name to look up" },
-                    "source": { "type": "string", "description": "Optional source name filter (e.g. 'bitwig6-decompiled')" }
+                    "source": { "type": "string", "description": "Optional source name filter (e.g. 'internal-java-corpus')" }
                 },
                 "required": ["name"]
             }),
@@ -188,7 +188,7 @@ pub async fn list_mcp_tools(
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Natural language question about the codebase" },
-                    "source": { "type": "string", "description": "Source name (e.g. 'bitwig6-decompiled')" }
+                    "source": { "type": "string", "description": "Source name (e.g. 'internal-java-corpus')" }
                 },
                 "required": ["query"]
             }),

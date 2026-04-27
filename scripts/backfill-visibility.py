@@ -67,7 +67,7 @@ def extract_visibility(content: str, symbol_line_start: int, chunk_start_line: i
 
 def main():
     parser = argparse.ArgumentParser(description="Backfill symbols.visibility for Java")
-    parser.add_argument("--source-id", type=int, default=146, help="Source ID (default: 146 = bitwig6-decompiled)")
+    parser.add_argument("--source-id", type=int, default=146, help="Source ID (default: 146 = internal-java-corpus)")
     parser.add_argument("--batch-size", type=int, default=1000)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()

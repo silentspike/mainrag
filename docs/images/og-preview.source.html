@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MainRag OG preview</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    width: 1280px; height: 640px;
+    background: linear-gradient(135deg, #0a1f44 0%, #133075 50%, #1a3a8f 100%);
+    color: #f0f4ff;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+                 "Helvetica Neue", Arial, sans-serif;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px);
+    background-size: 64px 64px;
+    pointer-events: none;
+  }
+
+  main {
+    position: relative;
+    width: 100%; height: 100%;
+    display: grid;
+    grid-template-columns: 1fr;
+    padding: 64px 72px;
+  }
+
+  .brand {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: #9bbcff;
+  }
+
+  .brand .dot { color: #58e1c2; }
+
+  h1 {
+    margin: 24px 0 12px 0;
+    font-size: 64px;
+    line-height: 1.05;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+  }
+
+  .tag {
+    font-size: 30px;
+    font-weight: 500;
+    color: #c9d6ff;
+    max-width: 1000px;
+    line-height: 1.25;
+    margin-bottom: 32px;
+  }
+
+  .pipe {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    margin-bottom: 36px;
+  }
+
+  .node {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 10px;
+    padding: 12px 18px;
+    font-size: 18px;
+    font-weight: 500;
+    color: #e7eeff;
+    white-space: nowrap;
+  }
+
+  .arrow {
+    color: #58e1c2;
+    font-size: 22px;
+    font-weight: 700;
+  }
+
+  .stats {
+    display: flex;
+    gap: 56px;
+    align-items: baseline;
+    margin-top: auto;
+  }
+
+  .stat-num {
+    font-size: 44px;
+    font-weight: 800;
+    color: #58e1c2;
+    line-height: 1;
+  }
+
+  .stat-label {
+    font-size: 16px;
+    color: #c9d6ff;
+    margin-top: 6px;
+  }
+
+  .footer {
+    position: absolute;
+    right: 72px;
+    bottom: 64px;
+    text-align: right;
+    font-size: 18px;
+    color: #c9d6ff;
+  }
+
+  .footer .repo { color: #9bbcff; font-weight: 600; }
+  .badge {
+    display: inline-block;
+    margin-top: 8px;
+    padding: 4px 10px;
+    border: 1px solid rgba(255,255,255,0.25);
+    border-radius: 6px;
+    font-size: 14px;
+    color: #e7eeff;
+  }
+</style>
+</head>
+<body>
+  <div class="grid"></div>
+  <main>
+    <div class="brand">Main<span class="dot">·</span>Rag</div>
+
+    <h1>Self-hosted context layer<br>for AI coding agents</h1>
+
+    <div class="tag">
+      Hybrid retrieval over private repositories, exposed to Codex,
+      Claude Code &amp; other agents through MCP — with citations and
+      tenant boundaries.
+    </div>
+
+    <div class="pipe">
+      <div class="node">PostgreSQL FTS</div>
+      <div class="arrow">+</div>
+      <div class="node">Qdrant&nbsp;HNSW&nbsp;INT8</div>
+      <div class="arrow">+</div>
+      <div class="node">GTE-ModernBERT</div>
+      <div class="arrow">+</div>
+      <div class="node">Cross-encoder rerank</div>
+      <div class="arrow">+</div>
+      <div class="node">Tree-sitter call-graph</div>
+    </div>
+
+    <div class="stats">
+      <div>
+        <div class="stat-num">132 ms</div>
+        <div class="stat-label">p50 search latency</div>
+      </div>
+      <div>
+        <div class="stat-num">187 ms</div>
+        <div class="stat-label">p95</div>
+      </div>
+      <div>
+        <div class="stat-num">70 %</div>
+        <div class="stat-label">GOOD relevance @ top-5</div>
+      </div>
+      <div>
+        <div class="stat-num">859 k</div>
+        <div class="stat-label">indexed chunks (eval)</div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div class="repo">github.com/silentspike/mainrag</div>
+      <div class="badge">Apache-2.0 · v0.1.0-alpha.1</div>
+    </div>
+  </main>
+</body>
+</html>
