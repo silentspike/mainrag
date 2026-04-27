@@ -3,26 +3,32 @@
 # Model: Alibaba-NLP/gte-modernbert-base (768d, 8192 tokens)
 # Chunks: 859k | Sources: 18
 
+> **Note on the corpus.** The `internal-java-corpus` label is anonymised
+> to keep this document IP-clean. The actual corpus was a private
+> 600k-LoC Java codebase indexed during evaluation. The relevance
+> ratings and recall numbers are real measurements; the corpus itself
+> is not redistributable.
+
 ## Test Queries & Results
 
 ### Query: "createClip delegation proxy"
-Source: bitwig6-decompiled
+Source: internal-java-corpus
 ```
 Found 100 results (showing 5).
 
-#1 [bitwig6-decompiled] com/bitwig/flt/control_surface/proxy/CursorTrackCursorClipProxy.java > publi... (0.71) com/bitwig/flt/control_surface/proxy/CursorTrackCursorClipProxy.java:42-45
+#1 [internal-java-corpus] com/bitwig/flt/control_surface/proxy/CursorTrackCursorClipProxy.java > publi... (0.71) com/bitwig/flt/control_surface/proxy/CursorTrackCursorClipProxy.java:42-45
   @Override
   public ClipProxy getDelegateProxy() {
   return (ClipProxy)super.getDelegateProxy();
   }
 
-#2 [bitwig6-decompiled] com/bitwig/flt/control_surface/proxy/DelegatingClipProxy.java > public abstr... (0.36) com/bitwig/flt/control_surface/proxy/DelegatingClipProxy.java:242-245
+#2 [internal-java-corpus] com/bitwig/flt/control_surface/proxy/DelegatingClipProxy.java > public abstr... (0.36) com/bitwig/flt/control_surface/proxy/DelegatingClipProxy.java:242-245
   @Override
   public void duplicate() {
   ((Clip)this.mDelegate).duplicate();
   }
 
-#3 [bitwig6-decompiled] com/bitwig/flt/control_surface/proxy/ClipProxy.java > public class ClipProxy (0.24) com/bitwig/flt/control_surface/proxy/ClipProxy.java:943-958
+#3 [internal-java-corpus] com/bitwig/flt/control_surface/proxy/ClipProxy.java > public class ClipProxy (0.24) com/bitwig/flt/control_surface/proxy/ClipProxy.java:943-958
   private k3o getClipEvent() {
   bhz bhz2 = (bhz)this.getTarget();
   if (bhz2 == null) {
@@ -36,14 +42,14 @@ Found 100 results (showing 5).
   assert (this.r3B(ajW2 != null));
   if (ajW2 == null) {
 
-#4 [bitwig6-decompiled] com/bitwig/flt/control_surface/proxy/ClipProxy.java > public class ClipProxy (0.19) com/bitwig/flt/control_surface/proxy/ClipProxy.java:1392-1396
+#4 [internal-java-corpus] com/bitwig/flt/control_surface/proxy/ClipProxy.java > public class ClipProxy (0.19) com/bitwig/flt/control_surface/proxy/ClipProxy.java:1392-1396
   @Override
   public void launch() {
   this.newSince(10);
   this.exec(this::doLaunch);
   }
 
-#5 [bitwig6-decompiled] com/bitwig/flt/control_surface/proxy/ClipProxy.java > public class ClipProxy (0.15) com/bitwig/flt/control_surface/proxy/ClipProxy.java:1290-1294
+#5 [internal-java-corpus] com/bitwig/flt/control_surface/proxy/ClipProxy.java > public class ClipProxy (0.15) com/bitwig/flt/control_surface/proxy/ClipProxy.java:1290-1294
   @Override
   protected void targetChanged() {
   super.targetChanged();
@@ -54,17 +60,17 @@ Found 100 results (showing 5).
 ```
 
 ### Query: "how to delete a clip from arranger"
-Source: bitwig6-decompiled
+Source: internal-java-corpus
 ```
 Found 100 results (showing 5).
 
-#1 [bitwig6-decompiled] com/bitwig/flt/document/core/iface/clipboard/clip/ArrangerClipInsertionPoint... (0.71) com/bitwig/flt/document/core/iface/clipboard/clip/ArrangerClipInsertionPoint.java:102-105
+#1 [internal-java-corpus] com/bitwig/flt/document/core/iface/clipboard/clip/ArrangerClipInsertionPoint... (0.71) com/bitwig/flt/document/core/iface/clipboard/clip/ArrangerClipInsertionPoint.java:102-105
   @Override
   protected String azd() {
   return "track=" + ((ciM)this.fiU.azd(ciM.class)).smt() + ",time=" + this.azd;
   }
 
-#2 [bitwig6-decompiled] com/bitwig/flt/control_surface/proxy/ClipLauncherSlotProxy.java > public cla... (0.36) com/bitwig/flt/control_surface/proxy/ClipLauncherSlotProxy.java:891-896
+#2 [internal-java-corpus] com/bitwig/flt/control_surface/proxy/ClipLauncherSlotProxy.java > public cla... (0.36) com/bitwig/flt/control_surface/proxy/ClipLauncherSlotProxy.java:891-896
   @Override
   public void deleteObject() {
   assert (this.r3B(this.isControlSurfaceThread()));
@@ -72,13 +78,13 @@ Found 100 results (showing 5).
   this.getHost().deleteObjects("Delete Clip from Controller", this);
   }
 
-#3 [bitwig6-decompiled] com/bitwig/flt/control_surface/proxy/ClipLauncherSlotProxy.java > public cla... (0.25) com/bitwig/flt/control_surface/proxy/ClipLauncherSlotProxy.java:550-553
+#3 [internal-java-corpus] com/bitwig/flt/control_surface/proxy/ClipLauncherSlotProxy.java > public cla... (0.25) com/bitwig/flt/control_surface/proxy/ClipLauncherSlotProxy.java:550-553
   public void deleteClip() {
   assert (this.SWC(this.isControlSurfaceThread()));
   this.exec(this::doDeleteClip);
   }
 
-#4 [bitwig6-decompiled] com/bitwig/flt/control_surface/proxy/ClipLauncherSlotProxy.java > public cla... (0.19) com/bitwig/flt/control_surface/proxy/ClipLauncherSlotProxy.java:555-561
+#4 [internal-java-corpus] com/bitwig/flt/control_surface/proxy/ClipLauncherSlotProxy.java > public cla... (0.19) com/bitwig/flt/control_surface/proxy/ClipLauncherSlotProxy.java:555-561
   private void doDeleteClip() {
   csi csi2;
   assert (this.SWC(this.isDocumentThread()));
@@ -87,7 +93,7 @@ Found 100 results (showing 5).
   }
   }
 
-#5 [bitwig6-decompiled] com/bitwig/flt/control_surface/proxy/ClipLauncherSlotBankProxy.java > public... (0.15) com/bitwig/flt/control_surface/proxy/ClipLauncherSlotBankProxy.java:218-225
+#5 [internal-java-corpus] com/bitwig/flt/control_surface/proxy/ClipLauncherSlotBankProxy.java > public... (0.15) com/bitwig/flt/control_surface/proxy/ClipLauncherSlotBankProxy.java:218-225
   @Override
   public void deleteClip(int n2) {
   assert (this.SWC(this.isControlSurfaceThread()));

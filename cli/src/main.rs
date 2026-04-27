@@ -129,7 +129,7 @@ enum Commands {
         #[arg(short, long, default_value = "both")]
         direction: String,
 
-        /// Filter by source name (e.g. bitwig6-decompiled)
+        /// Filter by source name (e.g. internal-java-corpus)
         #[arg(short, long)]
         source: Option<String>,
 

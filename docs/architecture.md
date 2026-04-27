@@ -177,9 +177,11 @@ Weights are configurable via `api/config/search.toml`.
 
 ## Trade-offs and known limits
 
-- **Qdrant auth is client-side only** in the default `docker-compose.yml`
-  (the server runs without `api_key` verification). Production deployments
-  should enable server-side auth in Qdrant config — see `operations.md`.
+- **Qdrant auth: server-side `api_key` is enabled** in
+  `docker-compose.yml` (`QDRANT__SERVICE__API_KEY`). Anonymous requests
+  to `/collections` return HTTP 401. The client-side `QDRANT_API_KEY`
+  in `mainrag.env` must match the server-side value. See `operations.md`
+  for env-var details and `SECURITY.md` for the threat model.
 - **Polyglot decision:** all runtime code is Rust. TypeScript and Python
   are explicitly not part of the runtime path; they are reserved for
   offline evaluation scripts (`scripts/`) and potential MCP sidecars.
