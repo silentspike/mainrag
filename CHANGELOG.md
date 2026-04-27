@@ -14,6 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an older draft that overclaimed unimplemented techniques and is no
   longer reconcilable with the running code.
 
+### Security
+
+- Dependabot security updates auto-PRs enabled
+  (`security_and_analysis.dependabot_security_updates.status = enabled`).
+- Branch protection on `main` now applies to admins
+  (`enforce_admins = true`); the maintainer can no longer bypass the
+  required `cargo fmt`, `cargo check`, and `docs link sanity` status
+  checks.
+
 ### Known limits
 
 - **Not for production multi-tenant use.** MainRag v0.1.0-alpha is a
