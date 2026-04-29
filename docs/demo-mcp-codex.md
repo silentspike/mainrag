@@ -202,6 +202,8 @@ agent will be able to use it. If you get `401`, re-check
 
 ## See also
 
+- [`../README.md#in-a-codex-rollout`](../README.md#in-a-codex-rollout)
+  — the customer-scenario framing that introduces this demo
 - [`api.md`](api.md) — full HTTP API reference (auth, rate limits,
   error shapes)
 - [`architecture.md`](architecture.md) — retrieval pipeline and ranking

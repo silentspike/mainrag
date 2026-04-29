@@ -8,9 +8,9 @@
 > Coding agents query the right files first time, with citations, on
 > the customer's own infrastructure.
 >
-> Under the hood: PostgreSQL FTS + Qdrant (HNSW + INT8) + GTE-ModernBERT
-> embeddings + cross-encoder reranking + code intelligence (symbols,
-> call-graph, N-hop traversal).
+> Under the hood (technical): PostgreSQL FTS + Qdrant (HNSW + INT8)
+> + GTE-ModernBERT embeddings + cross-encoder reranking + code
+> intelligence (symbols, call-graph, N-hop traversal).
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Recall@10: 70%](https://img.shields.io/badge/Recall%4010-70%25-brightgreen)](docs/search-baseline-gte-modernbert.md)
@@ -30,6 +30,37 @@ who need *grounded, citable, low-latency* answers over large private codebases
 - **Intelligence layer:** Tree-sitter symbol extraction, call-graph edges, N-hop BFS traversal
 
 > Last verified: 2026-04-24 via commit `2d597cb`
+
+## In a Codex rollout
+
+A typical customer scenario:
+
+- **Customer infrastructure:** mainrag runs on the customer's own
+  servers (PostgreSQL + Qdrant + TEI). No source code, retrieval
+  index, or query history leaves their network.
+- **Private repository ingestion:** the admin source endpoint
+  (`POST /api/v1/admin/sources` + `/sync`) indexes the customer's
+  monorepo, internal docs, prior agent conversations, and design
+  tickets.
+- **Codex via MCP:** Codex (or any MCP-aware coding agent) connects
+  to mainrag's MCP endpoint (`/api/v1/mcp/tools`). When the agent
+  needs context, it calls `search_code`, `find_callers`,
+  `get_symbol_card` — results come back with citations to specific
+  files and lines.
+- **Cited PR review:** the agent's proposed patch references the
+  same citations. Reviewers can re-open the retrieval results, see
+  what the agent saw, and verify whether the change is grounded in
+  the right context.
+
+> ▶ **3-minute MCP demo:** [`docs/demo-mcp-codex.md`](docs/demo-mcp-codex.md)
+>
+> What you see in the cast: `docker compose up` → 3 services healthy
+> → 13 MCP tools listed → `search_code` returns a cited result →
+> mainrag-CLI search hits the same backend → closing one-liner.
+
+Pairs with [noaide](https://github.com/silentspike/noaide) for the
+operator console: mainrag provides context; noaide provides
+supervision and audit.
 
 ## MCP for AI coding agents
 
@@ -75,6 +106,38 @@ layer — citable, tenant-bounded, fully self-hosted.
 Pairs with [noaide](https://github.com/silentspike/noaide) — context
 (mainrag) + control (noaide) for coding agents.
 
+## How it fits with the rest of the stack
+
+mainrag is the **context** layer in a four-pillar stack for AI coding
+agents in regulated environments:
+
+```mermaid
+flowchart LR
+  subgraph CONTEXT["Context"]
+    MR["mainrag<br/>private-code retrieval<br/>MCP, citations"]
+  end
+  subgraph CONTROL["Control"]
+    NO["noaide<br/>operator console<br/>JSONL transparency"]
+  end
+  subgraph RUNTIME["Runtime"]
+    PS["project-sentinel<br/>sandbox, audit<br/>control planes"]
+  end
+  subgraph TRUST["Trust"]
+    CO["complianceos<br/>regulated deployment<br/>on-prem evaluation"]
+  end
+
+  AG["Coding agent<br/>(Codex / Claude / Gemini)"]
+  AG -->|context query| MR
+  AG -->|observed by| NO
+  AG -.->|optionally sandboxed in| PS
+  CO -.->|frames customer evaluation| AG
+```
+
+- [mainrag](https://github.com/silentspike/mainrag) answers: *what context does the agent need?*
+- [noaide](https://github.com/silentspike/noaide) answers: *what is the agent doing right now?*
+- [project-sentinel](https://github.com/silentspike/project-sentinel) answers: *what runtime boundaries enforce safety?*
+- [complianceos](https://github.com/silentspike/complianceos) answers: *how does a regulated customer evaluate this?*
+
 ## Performance
 
 Measured on a single workstation (AMD Ryzen 9 5900HS, RTX 3050 Ti 4 GB, 16 GB RAM),
@@ -92,10 +155,13 @@ including CLI startup overhead ~30–50 ms).
 Evidence: [`data/benchmarks/search_latency_20260424T140514Z.json`](data/benchmarks/search_latency_20260424T140514Z.json),
 script: [`scripts/benchmark-search.py`](scripts/benchmark-search.py).
 
-### Quality baseline
+### Quality baseline (early public preview)
 
-Relevance is tracked through a 10-query reference set, manually rated GOOD /
-PARTIAL / WEAK by inspecting the top-5 results per query.
+Relevance is tracked through a small, manually curated 10-query
+reference set, with each top-5 result rated GOOD / PARTIAL / WEAK
+by hand. This is **not a production benchmark** — it is the
+internal regression set used during the alpha cycle. A larger,
+publicly reproducible eval is on the v0.2-beta roadmap.
 
 | Model                          | GOOD | PARTIAL | WEAK |
 | ------------------------------ | ---- | ------- | ---- |
