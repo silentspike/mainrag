@@ -106,7 +106,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             }
         }));
 
-    // Long-running admin routes with 10min timeout (sync/backfill are I/O-bound)
+    // Long-running admin routes. Large RE corpora can need hours for a full
+    // source sync; per-file timeouts still protect the actual indexing loop.
     let long_running_routes = Router::new()
         .route(
             "/api/v1/admin/sources/:id/sync",
@@ -134,7 +135,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         }))
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(600),
+            Duration::from_secs(12 * 3600),
         ));
 
     // Timed routes: everything except SSE and long-running, with 30s timeout
