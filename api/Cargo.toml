@@ -22,7 +22,7 @@ pdf-mupdf = ["dep:mupdf"]
 
 [dependencies]
 # Async Runtime
-tokio = { version = "1.42", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 
 # Web Framework
 axum = { version = "0.7", features = ["macros"] }
