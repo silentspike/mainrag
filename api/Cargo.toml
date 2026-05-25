@@ -22,7 +22,7 @@ pdf-mupdf = ["dep:mupdf"]
 
 [dependencies]
 # Async Runtime
-tokio = { version = "1.42", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 
 # Web Framework
 axum = { version = "0.7", features = ["macros"] }
@@ -38,7 +38,7 @@ pgvector = { version = "0.4", features = ["postgres"] }
 rust_decimal = { version = "1.36", features = ["db-tokio-postgres"] }
 
 # PostgreSQL TLS (Sprint 4.1)
-tokio-postgres-rustls = "0.13"
+tokio-postgres-rustls = "0.14"
 rustls = "0.23"
 rustls-native-certs = "0.8"
 
