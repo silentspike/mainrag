@@ -58,6 +58,13 @@ fn tokenizer_version() -> String {
     std::env::var("TOKENIZER_VERSION").unwrap_or_else(|_| "tiktoken-cl100k".to_string())
 }
 
+/// MAINRAG_CPU_MODE disables vector-side indexing work while preserving PG/FTS/intelligence.
+fn cpu_mode_enabled() -> bool {
+    std::env::var("MAINRAG_CPU_MODE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+}
+
 /// Sprint 8.3: Compute hex-encoded SHA256 hash of chunk content
 fn chunk_content_sha256(text: &str) -> String {
     let mut h = Sha256::new();
@@ -361,6 +368,7 @@ impl IndexService {
         // Sprint 8.4: Qdrant Consistency Tracking — write sync_ledger entry
         // Compare PG chunk count vs Qdrant point count for this source.
         // Detects drift between the two stores (e.g. from failed outbox processing).
+        let ledger_cpu_mode = cpu_mode_enabled();
         match self.record_sync_ledger(&client, source_id).await {
             Ok((pg_count, qdrant_count, drift)) => {
                 if drift > 0 {
@@ -369,6 +377,11 @@ impl IndexService {
                         source_id, pg_count, qdrant_count, drift
                     );
                     metrics::counter!("mainrag_sync_drift_detected").increment(1);
+                } else if ledger_cpu_mode {
+                    debug!(
+                        "Sprint 8.4: Sync ledger recorded CPU-mode source {}: PG={} chunks, Qdrant count intentionally not sampled",
+                        source_id, pg_count
+                    );
                 } else {
                     debug!(
                         "Sprint 8.4: Sync ledger OK for source {}: PG={}, Qdrant={}",
@@ -595,6 +608,68 @@ impl IndexService {
                         files.push(path);
                     }
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn analyze_intelligence_for_file(
+        &self,
+        file_id: i64,
+        rel_path: &str,
+        content: &str,
+    ) -> Result<()> {
+        let path = Path::new(rel_path);
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            return Ok(());
+        };
+
+        // Run intelligence for all code/data files supported by the parser.
+        // Matches parser.rs Lang::from_extension() - full CodeRag parity.
+        let code_extensions = [
+            // Rust
+            "rs", // Python (including Windows .pyw)
+            "py", "pyi", "pyw", // JavaScript (including JSX for React)
+            "js", "jsx", "mjs", "cjs", // TypeScript (including module variants)
+            "ts", "tsx", "mts", "cts", // Go
+            "go",  // C
+            "c",   // C++ (including all common extensions and headers)
+            "cpp", "cc", "cxx", "c++", "cp", "h", "hpp", "hh", "hxx", "h++",  // Java
+            "java", // JSON (including JSONL and JSONC)
+            "json", "jsonl", "jsonc", // TOML
+            "toml",  // YAML
+            "yaml", "yml", // Shell (including zsh)
+            "sh", "bash", "zsh", // Markdown
+            "md", "markdown", // C# (Feature Parity A.6)
+            "cs",       // Zig
+            "zig",      // Lua
+            "lua",      // Ruby
+            "rb", "rake", "gemspec", // PHP
+            "php", "phtml", // HTML
+            "html", "htm", // CSS (including preprocessors)
+            "css", "scss", "sass", // XML (including XSLT, SVG)
+            "xml", "xsl", "xslt", "svg", // Scheme/Racket
+            "scm", "ss", "rkt", // SQL
+            "sql",
+        ];
+
+        if !code_extensions.contains(&ext.to_lowercase().as_str()) {
+            return Ok(());
+        }
+
+        match self.intelligence.analyze_file(file_id, path, content).await {
+            Ok(parse_result) => {
+                info!(
+                    "Code Intelligence: extracted {} symbols and {} calls from {}",
+                    parse_result.symbols.len(),
+                    parse_result.calls.len(),
+                    rel_path
+                );
+            }
+            Err(e) => {
+                // Don't fail the entire indexing if intelligence extraction fails.
+                warn!("Code Intelligence failed for {}: {}", rel_path, e);
             }
         }
 
@@ -1289,139 +1364,151 @@ impl IndexService {
             }
         }
 
-        // EMBEDDING DEDUPLICATION: Check for existing embeddings by content_hash + model
-        // If identical content was embedded before, reuse that vector instead of calling TEI.
-        // Uses BATCH query with ANY($1) instead of N separate queries for performance.
-        // When CCH is enabled, append "+cch" to model name so old embeddings (without CCH)
-        // won't be reused — forces re-embedding with contextual prefix.
-        let base_model_name: String = self.tei.get_model_name().to_string();
-        let model_name = if std::env::var("EMBEDDING_WITH_CCH").unwrap_or_default() != "false" {
-            format!("{}+cch", base_model_name)
-        } else {
-            base_model_name
-        };
+        // Code Intelligence must run before embeddings so TEI/Qdrant failures cannot
+        // leave symbols/call-graph permanently missing behind a file-hash skip.
+        self.analyze_intelligence_for_file(file_id, &rel_path, content)
+            .await?;
+
         let mut embeddings_count = 0;
-        let mut reused_count = 0;
 
-        // Build map: chunk_idx -> Option<existing_embedding>
-        // Query existing embeddings by content_hash (BYTEA) + model
-        let mut existing_embeddings: Vec<Option<Vector>> = vec![None; chunk_ids.len()];
+        if cpu_mode_enabled() {
+            info!(
+                "CPU mode: skipped embeddings for {} chunks (backfill via admin backfill orphaned)",
+                chunk_ids.len()
+            );
+        } else {
+            // EMBEDDING DEDUPLICATION: Check for existing embeddings by content_hash + model
+            // If identical content was embedded before, reuse that vector instead of calling TEI.
+            // Uses BATCH query with ANY($1) instead of N separate queries for performance.
+            // When CCH is enabled, append "+cch" to model name so old embeddings (without CCH)
+            // won't be reused — forces re-embedding with contextual prefix.
+            let base_model_name: String = self.tei.get_model_name().to_string();
+            let model_name = if std::env::var("EMBEDDING_WITH_CCH").unwrap_or_default() != "false" {
+                format!("{}+cch", base_model_name)
+            } else {
+                base_model_name
+            };
+            let mut reused_count = 0;
 
-        // BATCH QUERY: One query for ALL content_hashes instead of N queries
-        // Returns distinct content_hash -> vector mappings for this model
-        let batch_existing = client
-            .query(
-                "SELECT DISTINCT ON (c.content_hash) c.content_hash, ce.vector
+            // Build map: chunk_idx -> Option<existing_embedding>
+            // Query existing embeddings by content_hash (BYTEA) + model
+            let mut existing_embeddings: Vec<Option<Vector>> = vec![None; chunk_ids.len()];
+
+            // BATCH QUERY: One query for ALL content_hashes instead of N queries
+            // Returns distinct content_hash -> vector mappings for this model
+            let batch_existing = client
+                .query(
+                    "SELECT DISTINCT ON (c.content_hash) c.content_hash, ce.vector
              FROM chunk_embeddings ce
              JOIN chunks c ON c.id = ce.chunk_id
              WHERE c.content_hash = ANY($1) AND ce.model = $2",
-                &[&chunk_hashes, &model_name],
-            )
-            .await?;
+                    &[&chunk_hashes, &model_name],
+                )
+                .await?;
 
-        // Build hashmap: content_hash -> embedding vector
-        let existing_map: std::collections::HashMap<Vec<u8>, Vector> = batch_existing
-            .into_iter()
-            .map(|row| {
-                let hash: Vec<u8> = row.get("content_hash");
-                let vec: Vector = row.get("vector");
-                (hash, vec)
-            })
-            .collect();
+            // Build hashmap: content_hash -> embedding vector
+            let existing_map: std::collections::HashMap<Vec<u8>, Vector> = batch_existing
+                .into_iter()
+                .map(|row| {
+                    let hash: Vec<u8> = row.get("content_hash");
+                    let vec: Vector = row.get("vector");
+                    (hash, vec)
+                })
+                .collect();
 
-        // Map existing embeddings to our chunks
-        for (idx, content_hash) in chunk_hashes.iter().enumerate() {
-            if let Some(embedding) = existing_map.get(content_hash) {
-                existing_embeddings[idx] = Some(embedding.clone());
-                reused_count += 1;
-                debug!("Reusing embedding for chunk {} (content_hash match)", idx);
+            // Map existing embeddings to our chunks
+            for (idx, content_hash) in chunk_hashes.iter().enumerate() {
+                if let Some(embedding) = existing_map.get(content_hash) {
+                    existing_embeddings[idx] = Some(embedding.clone());
+                    reused_count += 1;
+                    debug!("Reusing embedding for chunk {} (content_hash match)", idx);
+                }
             }
-        }
 
-        if reused_count > 0 {
-            info!("Embedding deduplication: {} of {} chunks can reuse existing embeddings (1 batch query)",
+            if reused_count > 0 {
+                info!("Embedding deduplication: {} of {} chunks can reuse existing embeddings (1 batch query)",
                   reused_count, chunk_ids.len());
-        }
+            }
 
-        // Collect indices that need new embeddings
-        let need_embedding_indices: Vec<usize> = (0..chunk_ids.len())
-            .filter(|&i| existing_embeddings[i].is_none())
-            .collect();
+            // Collect indices that need new embeddings
+            let need_embedding_indices: Vec<usize> = (0..chunk_ids.len())
+                .filter(|&i| existing_embeddings[i].is_none())
+                .collect();
 
-        // Generate embeddings in batches for chunks that need them
-        let batch_size = embedding_batch_size();
-        if !need_embedding_indices.is_empty() {
-            debug!(
+            // Generate embeddings in batches for chunks that need them
+            let batch_size = embedding_batch_size();
+            if !need_embedding_indices.is_empty() {
+                debug!(
                 "Sprint 8.2: Embedding {} chunks in batches of {} (configured via EMBEDDING_BATCH_SIZE)",
                 need_embedding_indices.len(), batch_size
             );
-            for batch_start in (0..need_embedding_indices.len()).step_by(batch_size) {
-                let batch_end = (batch_start + batch_size).min(need_embedding_indices.len());
-                let batch_indices = &need_embedding_indices[batch_start..batch_end];
+                for batch_start in (0..need_embedding_indices.len()).step_by(batch_size) {
+                    let batch_end = (batch_start + batch_size).min(need_embedding_indices.len());
+                    let batch_indices = &need_embedding_indices[batch_start..batch_end];
 
-                let batch_texts: Vec<&str> = batch_indices
-                    .iter()
-                    .map(|&idx| chunk_texts[idx].as_str())
-                    .collect();
+                    let batch_texts: Vec<&str> = batch_indices
+                        .iter()
+                        .map(|&idx| chunk_texts[idx].as_str())
+                        .collect();
 
-                debug!(
-                    "Sprint 8.2: TEI batch {}/{}: {} texts",
-                    batch_start / batch_size + 1,
-                    need_embedding_indices.len().div_ceil(batch_size),
-                    batch_texts.len()
-                );
+                    debug!(
+                        "Sprint 8.2: TEI batch {}/{}: {} texts",
+                        batch_start / batch_size + 1,
+                        need_embedding_indices.len().div_ceil(batch_size),
+                        batch_texts.len()
+                    );
 
-                let embeddings = self.tei.embed_batch(&batch_texts).await?;
+                    let embeddings = self.tei.embed_batch(&batch_texts).await?;
 
-                // Store new embeddings in our map
-                for (i, embedding) in embeddings.into_iter().enumerate() {
-                    let chunk_idx = batch_indices[i];
-                    existing_embeddings[chunk_idx] = Some(Vector::from(embedding));
+                    // Store new embeddings in our map
+                    for (i, embedding) in embeddings.into_iter().enumerate() {
+                        let chunk_idx = batch_indices[i];
+                        existing_embeddings[chunk_idx] = Some(Vector::from(embedding));
+                    }
                 }
             }
-        }
 
-        // Store all embeddings (both reused and new) in PostgreSQL + outbox
-        // BATCH INSERT via UNNEST — N embeddings in 2 DB roundtrips instead of 2*N
-        {
-            let mut b_chunk_ids: Vec<i64> = Vec::with_capacity(existing_embeddings.len());
-            let mut b_models: Vec<String> = Vec::with_capacity(existing_embeddings.len());
-            let mut b_vectors: Vec<Vector> = Vec::with_capacity(existing_embeddings.len());
+            // Store all embeddings (both reused and new) in PostgreSQL + outbox
+            // BATCH INSERT via UNNEST — N embeddings in 2 DB roundtrips instead of 2*N
+            {
+                let mut b_chunk_ids: Vec<i64> = Vec::with_capacity(existing_embeddings.len());
+                let mut b_models: Vec<String> = Vec::with_capacity(existing_embeddings.len());
+                let mut b_vectors: Vec<Vector> = Vec::with_capacity(existing_embeddings.len());
 
-            for (chunk_idx, embedding_opt) in existing_embeddings.into_iter().enumerate() {
-                let chunk_id = chunk_ids[chunk_idx];
-                let embedding_vec = embedding_opt.ok_or_else(|| {
-                    AppError::Internal(format!(
-                        "Chunk {} missing embedding after embed phase (idx {})",
-                        chunk_id, chunk_idx
-                    ))
-                })?;
+                for (chunk_idx, embedding_opt) in existing_embeddings.into_iter().enumerate() {
+                    let chunk_id = chunk_ids[chunk_idx];
+                    let embedding_vec = embedding_opt.ok_or_else(|| {
+                        AppError::Internal(format!(
+                            "Chunk {} missing embedding after embed phase (idx {})",
+                            chunk_id, chunk_idx
+                        ))
+                    })?;
 
-                b_chunk_ids.push(chunk_id);
-                b_models.push(model_name.clone());
-                b_vectors.push(embedding_vec);
-            }
+                    b_chunk_ids.push(chunk_id);
+                    b_models.push(model_name.clone());
+                    b_vectors.push(embedding_vec);
+                }
 
-            if !b_chunk_ids.is_empty() {
-                let tx = client.transaction().await.map_err(|e| {
-                    AppError::Internal(format!("Failed to start embedding transaction: {}", e))
-                })?;
+                if !b_chunk_ids.is_empty() {
+                    let tx = client.transaction().await.map_err(|e| {
+                        AppError::Internal(format!("Failed to start embedding transaction: {}", e))
+                    })?;
 
-                // Batch upsert embeddings (1 roundtrip instead of N)
-                tx.execute(
-                    "INSERT INTO chunk_embeddings (chunk_id, model, vector)
+                    // Batch upsert embeddings (1 roundtrip instead of N)
+                    tx.execute(
+                        "INSERT INTO chunk_embeddings (chunk_id, model, vector)
                      SELECT unnest($1::bigint[]), unnest($2::text[]), unnest($3::vector[])
                      ON CONFLICT (chunk_id) DO UPDATE SET
                      vector = EXCLUDED.vector, model = EXCLUDED.model, created_at = NOW()",
-                    &[&b_chunk_ids, &b_models, &b_vectors],
-                )
-                .await
-                .map_err(|e| {
-                    AppError::Internal(format!("Failed to batch-insert embeddings: {}", e))
-                })?;
+                        &[&b_chunk_ids, &b_models, &b_vectors],
+                    )
+                    .await
+                    .map_err(|e| {
+                        AppError::Internal(format!("Failed to batch-insert embeddings: {}", e))
+                    })?;
 
-                // Batch upsert outbox entries (1 roundtrip instead of N)
-                tx.execute(
+                    // Batch upsert outbox entries (1 roundtrip instead of N)
+                    tx.execute(
                     "INSERT INTO indexing_outbox (action, chunk_id, file_id, source_id, payload)
                      SELECT 'upsert', unnest($1::bigint[]), $2, $3, '{}'::jsonb",
                     &[&b_chunk_ids, &file_id, &source_id],
@@ -1431,70 +1518,21 @@ impl IndexService {
                     AppError::Internal(format!("Failed to batch-insert outbox entries: {}", e))
                 })?;
 
-                tx.commit().await.map_err(|e| {
-                    AppError::Internal(format!("Failed to commit embedding transaction: {}", e))
-                })?;
+                    tx.commit().await.map_err(|e| {
+                        AppError::Internal(format!("Failed to commit embedding transaction: {}", e))
+                    })?;
 
-                embeddings_count = b_chunk_ids.len();
-            }
-        }
-
-        // NOTE: Direct Qdrant upsert removed - Worker processes outbox entries asynchronously
-        // This provides transactional guarantees: PostgreSQL commit = Qdrant sync will happen
-        if embeddings_count > 0 {
-            info!(
-                "Queued {} embeddings to outbox for Qdrant sync",
-                embeddings_count
-            );
-        }
-
-        // Code Intelligence: Extract symbols and call graph for supported languages
-        let path = Path::new(&rel_path);
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            // Run intelligence for all code files supported by tree-sitter parser
-            // Matches parser.rs Lang::from_extension() - full CodeRag parity
-            let code_extensions = [
-                // Rust
-                "rs", // Python (including Windows .pyw)
-                "py", "pyi", "pyw", // JavaScript (including JSX for React)
-                "js", "jsx", "mjs", "cjs", // TypeScript (including module variants)
-                "ts", "tsx", "mts", "cts", // Go
-                "go",  // C
-                "c",   // C++ (including all common extensions and headers)
-                "cpp", "cc", "cxx", "c++", "cp", "h", "hpp", "hh", "hxx", "h++",
-                // Java
-                "java", // JSON (including JSONL and JSONC)
-                "json", "jsonl", "jsonc", // TOML
-                "toml",  // YAML
-                "yaml", "yml", // Shell (including zsh)
-                "sh", "bash", "zsh", // Markdown
-                "md", "markdown", // C# (Feature Parity A.6)
-                "cs",       // Zig
-                "zig",      // Lua
-                "lua",      // Ruby
-                "rb", "rake", "gemspec", // PHP
-                "php", "phtml", // HTML
-                "html", "htm", // CSS (including preprocessors)
-                "css", "scss", "sass", // XML (including XSLT, SVG)
-                "xml", "xsl", "xslt", "svg", // Scheme/Racket
-                "scm", "ss", "rkt", // SQL
-                "sql",
-            ];
-            if code_extensions.contains(&ext.to_lowercase().as_str()) {
-                match self.intelligence.analyze_file(file_id, path, content).await {
-                    Ok(parse_result) => {
-                        info!(
-                            "Code Intelligence: extracted {} symbols and {} calls from {}",
-                            parse_result.symbols.len(),
-                            parse_result.calls.len(),
-                            rel_path
-                        );
-                    }
-                    Err(e) => {
-                        // Don't fail the entire indexing if intelligence extraction fails
-                        warn!("Code Intelligence failed for {}: {}", rel_path, e);
-                    }
+                    embeddings_count = b_chunk_ids.len();
                 }
+            }
+
+            // NOTE: Direct Qdrant upsert removed - Worker processes outbox entries asynchronously
+            // This provides transactional guarantees: PostgreSQL commit = Qdrant sync will happen
+            if embeddings_count > 0 {
+                info!(
+                    "Queued {} embeddings to outbox for Qdrant sync",
+                    embeddings_count
+                );
             }
         }
 
@@ -1522,6 +1560,33 @@ impl IndexService {
             )
             .await?;
         let pg_count: i64 = pg_row.get(0);
+
+        if cpu_mode_enabled() {
+            let qdrant_count = 0_i64;
+            let drift = 0_i64;
+            let status = "cpu_mode";
+            let details = Some(format!(
+                "CPU mode: Qdrant point count intentionally not sampled; PG has {} chunks",
+                pg_count
+            ));
+
+            client
+                .execute(
+                    "INSERT INTO sync_ledger (source_id, pg_chunk_count, qdrant_point_count, drift_count, status, details) \
+                     VALUES ($1, $2, $3, $4, $5, $6)",
+                    &[
+                        &source_id,
+                        &pg_count,
+                        &qdrant_count,
+                        &drift,
+                        &status,
+                        &details,
+                    ],
+                )
+                .await?;
+
+            return Ok((pg_count, qdrant_count, drift));
+        }
 
         // Count points in Qdrant for this source
         let qdrant_count = self.qdrant.count_by_source(source_id).await.unwrap_or(0) as i64;
@@ -1864,6 +1929,14 @@ impl IndexService {
             chunk_ids.len(),
             file_id
         );
+
+        if cpu_mode_enabled() {
+            info!(
+                "CPU mode: skipped streaming embeddings for {} chunks (backfill via admin backfill orphaned)",
+                chunk_ids.len()
+            );
+            return Ok((chunk_ids.len(), 0));
+        }
 
         // Generate embeddings in batches — batch-insert to DB (2 roundtrips per TEI batch, not 2*N)
         let batch_sz = embedding_batch_size();
