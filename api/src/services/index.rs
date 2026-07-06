@@ -1179,7 +1179,7 @@ impl IndexService {
             rel_path,
             content_to_chunk.len()
         );
-        let mut semantic_chunks = self.chunker.chunk(&content_to_chunk, language.as_deref());
+        let mut semantic_chunks = self.chunker.chunk(content_to_chunk, language.as_deref());
 
         // Enterprise guard: MAX_CHUNKS_PER_FILE prevents any single file from
         // generating unbounded chunks (e.g., 41MB JSON → 3000+ chunks → hours of TEI calls).
