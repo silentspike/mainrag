@@ -52,6 +52,9 @@ CREATE TABLE IF NOT EXISTS files (
     last_modified TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    intelligence_analyzed_at TIMESTAMPTZ,
+    intelligence_symbols_count INTEGER NOT NULL DEFAULT 0,
+    intelligence_calls_count INTEGER NOT NULL DEFAULT 0,
 
     -- Full-text search vector (auto-updated by trigger)
     fts_vector TSVECTOR GENERATED ALWAYS AS (
@@ -67,6 +70,8 @@ CREATE INDEX idx_files_source ON files(source_id);
 CREATE INDEX idx_files_language ON files(language);
 CREATE INDEX idx_files_modified ON files(last_modified);
 CREATE INDEX idx_files_source_path ON files(source_id, path);
+CREATE INDEX idx_files_intelligence_pending ON files(source_id, updated_at, id)
+    WHERE intelligence_analyzed_at IS NULL;
 
 -- GIN index for full-text search (fastupdate=off for read performance)
 CREATE INDEX idx_files_fts ON files USING GIN (fts_vector) WITH (fastupdate = off);

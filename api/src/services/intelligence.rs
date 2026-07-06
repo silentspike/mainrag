@@ -36,6 +36,25 @@ impl IntelligenceService {
         Ok(client)
     }
 
+    async fn record_analysis_result(
+        client: &deadpool_postgres::Client,
+        file_id: i64,
+        symbols_count: usize,
+        calls_count: usize,
+    ) -> Result<()> {
+        client
+            .execute(
+                "UPDATE files
+                 SET intelligence_analyzed_at = NOW(),
+                     intelligence_symbols_count = $2,
+                     intelligence_calls_count = $3
+                 WHERE id = $1",
+                &[&file_id, &(symbols_count as i32), &(calls_count as i32)],
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Parse a file and store symbols + call graph in database.
     /// Thread-safe: CodeParser uses per-language Mutex internally.
     ///
@@ -77,6 +96,7 @@ impl IntelligenceService {
         }
 
         if result.symbols.is_empty() && result.calls.is_empty() {
+            Self::record_analysis_result(&client, file_id, 0, 0).await?;
             return Ok(result);
         }
 
@@ -184,6 +204,9 @@ impl IntelligenceService {
                 &[&caller_ids, &callee_names, &callee_ids, &call_types, &call_lines],
             ).await?;
         }
+
+        Self::record_analysis_result(&client, file_id, result.symbols.len(), result.calls.len())
+            .await?;
 
         Ok(result)
     }

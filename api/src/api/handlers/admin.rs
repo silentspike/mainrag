@@ -880,9 +880,7 @@ pub async fn admin_backfill_intelligence(
                         FROM files f
                         JOIN sources s ON s.id = f.source_id
                         WHERE ($1::BIGINT IS NULL OR f.source_id = $1)
-                          AND ($2::BOOL OR NOT EXISTS (
-                              SELECT 1 FROM symbols sym WHERE sym.file_id = f.id
-                          ))
+                          AND ($2::BOOL OR f.intelligence_analyzed_at IS NULL)
                         ORDER BY f.updated_at ASC, f.id ASC
                         LIMIT $3
                         "#,
