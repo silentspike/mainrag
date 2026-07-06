@@ -4,6 +4,7 @@ use axum::{
     Extension, Json,
 };
 use serde::{Deserialize, Serialize};
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
 use crate::api::JsonBody;
@@ -534,6 +535,43 @@ pub struct BackfillResult {
     pub message: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct IntelligenceBackfillRequest {
+    pub source_id: Option<i64>,
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntelligenceBackfillFileResult {
+    pub file_id: i64,
+    pub path: String,
+    pub status: String,
+    pub symbols: usize,
+    pub calls: usize,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntelligenceBackfillResult {
+    pub processed: usize,
+    pub skipped: usize,
+    pub errors: usize,
+    pub candidates: usize,
+    pub files: Vec<IntelligenceBackfillFileResult>,
+    pub message: String,
+}
+
+struct IntelligenceBackfillCandidate {
+    file_id: i64,
+    file_path: String,
+    source_path: String,
+    content: Vec<u8>,
+    content_text: Option<String>,
+    size_original: i32,
+}
+
 /// Request for incremental file sync (watch mode)
 #[derive(Debug, Deserialize)]
 pub struct SyncFilesRequest {
@@ -750,6 +788,188 @@ pub async fn admin_backfill_orphaned(
             "Backfilled {} orphaned chunks in {} batches",
             total_processed, batch_count
         ),
+    }))
+}
+
+fn is_large_json_like(candidate: &IntelligenceBackfillCandidate) -> bool {
+    const LARGE_FILE_THRESHOLD: i32 = 5 * 1024 * 1024;
+    let path = candidate.file_path.to_ascii_lowercase();
+    candidate.size_original > LARGE_FILE_THRESHOLD
+        && (path.ends_with(".json") || path.ends_with(".jsonl"))
+}
+
+fn source_backed_path(candidate: &IntelligenceBackfillCandidate) -> PathBuf {
+    let file_path = PathBuf::from(&candidate.file_path);
+    if file_path.is_absolute() {
+        file_path
+    } else {
+        PathBuf::from(&candidate.source_path).join(file_path)
+    }
+}
+
+async fn load_intelligence_backfill_content(
+    candidate: &IntelligenceBackfillCandidate,
+) -> std::result::Result<String, String> {
+    if let Some(content_text) = candidate.content_text.as_deref() {
+        if !content_text.trim().is_empty() {
+            return Ok(content_text.to_string());
+        }
+    }
+
+    if is_large_json_like(candidate) {
+        return Err(
+            "large JSON/JSONL file has no DB content; skipped to avoid full conversation re-read"
+                .to_string(),
+        );
+    }
+
+    match zstd::decode_all(candidate.content.as_slice()) {
+        Ok(decoded) if !decoded.is_empty() => {
+            return String::from_utf8(decoded)
+                .map_err(|e| format!("stored content is not valid UTF-8: {}", e));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(
+                file_id = candidate.file_id,
+                path = %candidate.file_path,
+                error = %e,
+                "Could not decode stored file content, trying source-backed file"
+            );
+        }
+    }
+
+    let disk_path = source_backed_path(candidate);
+    match tokio::fs::read_to_string(&disk_path).await {
+        Ok(text) if !text.trim().is_empty() => Ok(text),
+        Ok(_) => Err(format!(
+            "source-backed file is empty: {}",
+            disk_path.display()
+        )),
+        Err(e) => Err(format!(
+            "content unavailable; stored content is empty and source-backed file is not readable: {} ({})",
+            disk_path.display(),
+            e
+        )),
+    }
+}
+
+/// Backfill code intelligence for files that were hash-skipped before symbols existed.
+///
+/// This endpoint deliberately does not create embeddings or Qdrant outbox rows.
+/// It reuses IntelligenceService::analyze_file(), whose re-analysis semantics
+/// delete stale per-file symbols/call_graph rows before inserting current ones.
+pub async fn admin_backfill_intelligence(
+    State(state): State<Arc<AppState>>,
+    Extension(_claims): Extension<Arc<crate::auth::Claims>>,
+    JsonBody(req): JsonBody<IntelligenceBackfillRequest>,
+) -> Result<Json<IntelligenceBackfillResult>> {
+    let limit = req.limit.unwrap_or(100).clamp(1, 1000);
+    let force = req.force;
+    let source_id = req.source_id;
+
+    let candidates: Vec<IntelligenceBackfillCandidate> = state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                let rows = txn
+                    .query(
+                        r#"
+                        SELECT f.id, f.path, s.path AS source_path, f.content,
+                               f.content_text, f.size_original
+                        FROM files f
+                        JOIN sources s ON s.id = f.source_id
+                        WHERE ($1::BIGINT IS NULL OR f.source_id = $1)
+                          AND ($2::BOOL OR NOT EXISTS (
+                              SELECT 1 FROM symbols sym WHERE sym.file_id = f.id
+                          ))
+                        ORDER BY f.updated_at ASC, f.id ASC
+                        LIMIT $3
+                        "#,
+                        &[&source_id, &force, &limit],
+                    )
+                    .await?;
+
+                Ok(rows
+                    .iter()
+                    .map(|row| IntelligenceBackfillCandidate {
+                        file_id: row.get("id"),
+                        file_path: row.get("path"),
+                        source_path: row.get("source_path"),
+                        content: row.get("content"),
+                        content_text: row.get("content_text"),
+                        size_original: row.get("size_original"),
+                    })
+                    .collect())
+            })
+        })
+        .await?;
+
+    let candidates_count = candidates.len();
+    let mut processed = 0usize;
+    let mut skipped = 0usize;
+    let mut errors = 0usize;
+    let mut files = Vec::with_capacity(candidates_count);
+
+    for candidate in candidates {
+        let path = candidate.file_path.clone();
+        match load_intelligence_backfill_content(&candidate).await {
+            Ok(content) => {
+                match state
+                    .intelligence
+                    .analyze_file(candidate.file_id, FsPath::new(&path), &content)
+                    .await
+                {
+                    Ok(parse_result) => {
+                        processed += 1;
+                        files.push(IntelligenceBackfillFileResult {
+                            file_id: candidate.file_id,
+                            path,
+                            status: "processed".to_string(),
+                            symbols: parse_result.symbols.len(),
+                            calls: parse_result.calls.len(),
+                            reason: None,
+                        });
+                    }
+                    Err(e) => {
+                        errors += 1;
+                        files.push(IntelligenceBackfillFileResult {
+                            file_id: candidate.file_id,
+                            path,
+                            status: "error".to_string(),
+                            symbols: 0,
+                            calls: 0,
+                            reason: Some(e.to_string()),
+                        });
+                    }
+                }
+            }
+            Err(reason) => {
+                skipped += 1;
+                files.push(IntelligenceBackfillFileResult {
+                    file_id: candidate.file_id,
+                    path,
+                    status: "skipped".to_string(),
+                    symbols: 0,
+                    calls: 0,
+                    reason: Some(reason),
+                });
+            }
+        }
+    }
+
+    let message = format!(
+        "Backfilled intelligence for {} files ({} skipped, {} errors, {} candidates)",
+        processed, skipped, errors, candidates_count
+    );
+
+    Ok(Json(IntelligenceBackfillResult {
+        processed,
+        skipped,
+        errors,
+        candidates: candidates_count,
+        files,
+        message,
     }))
 }
 
