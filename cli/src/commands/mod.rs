@@ -9,6 +9,7 @@ pub mod explain;
 pub mod explore;
 pub mod health;
 pub mod layers;
+pub mod lifecycle;
 pub mod ownership;
 pub mod search;
 pub mod source;
