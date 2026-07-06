@@ -2,7 +2,7 @@
 //!
 //! Enterprise-grade watch with:
 //! - In-flight tracking (prevents re-queuing files during processing)
-//! - Per-file rate limiting (15s cooldown)
+//! - Per-file rate limiting (configurable cooldown)
 //! - Signature cache (mtime + size check)
 //! - Adaptive debounce (flush on idle OR max wait)
 //! - Incremental sync (only changed files, not full source)
@@ -16,8 +16,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
-/// Minimum interval between syncs for the same file (rate limiting)
-const MIN_SYNC_INTERVAL: Duration = Duration::from_secs(15);
+/// Minimum interval between syncs for the same file (rate limiting), in seconds.
+const DEFAULT_MIN_SYNC_INTERVAL_SECS: u64 = 15;
+
+/// Primary env var for watcher per-file sync cooldown.
+const MIN_SYNC_INTERVAL_ENV: &str = "MAINRAG_WATCH_MIN_SYNC_INTERVAL_S";
+
+/// Older env var used by the API-side watch service; kept as a compatibility fallback.
+const LEGACY_MIN_SYNC_INTERVAL_ENV: &str = "MAINRAG_WATCH_MIN_SYNC_SECS";
 
 /// Flush pending files after this idle duration
 const IDLE_FLUSH: Duration = Duration::from_millis(300);
@@ -36,6 +42,23 @@ const SUPPORTED_EXTENSIONS: &[&str] = &[
     "xml", "xsl", "xsd", "svg", "yaml", "yml", "json", "jsonc", "jsonl", "toml", "sql", "md",
     "markdown", "scm", "ss", "rkt", "txt", "pdf",
 ];
+
+fn parse_min_sync_interval_secs(primary: Option<&str>, legacy: Option<&str>) -> u64 {
+    primary
+        .or(legacy)
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_MIN_SYNC_INTERVAL_SECS)
+}
+
+fn min_sync_interval() -> Duration {
+    let primary = std::env::var(MIN_SYNC_INTERVAL_ENV).ok();
+    let legacy = std::env::var(LEGACY_MIN_SYNC_INTERVAL_ENV).ok();
+    Duration::from_secs(parse_min_sync_interval_secs(
+        primary.as_deref(),
+        legacy.as_deref(),
+    ))
+}
 
 /// Directories to ignore
 const IGNORE_DIRS: &[&str] = &[
@@ -88,6 +111,8 @@ impl FileSignature {
 
 /// Watch sources for changes and trigger incremental re-sync
 pub async fn watch(client: &ApiClient, source_name: Option<&str>, daemon: bool) -> Result<()> {
+    let min_sync_interval = min_sync_interval();
+
     // Get sources to watch
     let response = client.list_sources().await?;
     let sources = &response.sources;
@@ -135,6 +160,10 @@ pub async fn watch(client: &ApiClient, source_name: Option<&str>, daemon: bool) 
     } else {
         println!("{}", "Watching for changes (Ctrl+C to stop)...".dimmed());
     }
+    println!(
+        "{}",
+        format!("Per-file sync interval: {}s", min_sync_interval.as_secs()).dimmed()
+    );
 
     // Set up debounced watcher
     let (tx, rx) = std::sync::mpsc::channel();
@@ -208,7 +237,7 @@ pub async fn watch(client: &ApiClient, source_name: Option<&str>, daemon: bool) 
                     if let Some((_id, name, _base_path)) = source {
                         // Rate limiting: skip if synced recently
                         if let Some(last_time) = last_sync_time.get(path) {
-                            if now.duration_since(*last_time) < MIN_SYNC_INTERVAL {
+                            if now.duration_since(*last_time) < min_sync_interval {
                                 continue;
                             }
                         }
@@ -349,4 +378,30 @@ fn is_supported_file(path: &std::path::Path) -> bool {
         .and_then(|ext| ext.to_str())
         .map(|ext| SUPPORTED_EXTENSIONS.contains(&ext))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn min_sync_interval_defaults_to_fifteen_seconds() {
+        assert_eq!(parse_min_sync_interval_secs(None, None), 15);
+    }
+
+    #[test]
+    fn min_sync_interval_uses_primary_env_value_first() {
+        assert_eq!(parse_min_sync_interval_secs(Some("600"), Some("30")), 600);
+    }
+
+    #[test]
+    fn min_sync_interval_accepts_legacy_fallback() {
+        assert_eq!(parse_min_sync_interval_secs(None, Some("45")), 45);
+    }
+
+    #[test]
+    fn min_sync_interval_rejects_zero_and_invalid_values() {
+        assert_eq!(parse_min_sync_interval_secs(Some("0"), Some("45")), 15);
+        assert_eq!(parse_min_sync_interval_secs(Some("not-a-number"), None), 15);
+    }
 }
