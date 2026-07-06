@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::db::models::SearchResult;
 use crate::db::PostgresPool;
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use crate::services::circuit_breaker::CircuitBreaker;
 use crate::services::gpu_semaphore::GpuSemaphores;
 pub use crate::services::qdrant::TenantContext;
@@ -272,6 +272,10 @@ fn fts_weight_for_query(query_type: QueryType) -> f32 {
 pub struct SearchResults {
     pub results: Vec<SearchResult>,
     pub total: usize,
+    /// Effective search mode used for this request.
+    pub search_mode: SearchMode,
+    /// Whether reranking was actually applied.
+    pub reranked: bool,
     /// Expanded FTS query (if query expansion was applied)
     pub expanded_query: Option<String>,
     /// Expansion terms (if query expansion was applied)
@@ -345,6 +349,8 @@ pub struct SearchService {
     backfill_active: bool,
     /// K4: Oversampling factor for post-filter (fetch N*factor from Qdrant, then trim)
     backfill_oversampling_factor: u64,
+    /// CPU-only mode forces FTS-only behavior without TEI/Qdrant calls.
+    cpu_mode: bool,
     /// Domain-scoped ranking: source names that have enriched symbol cards.
     /// Populated from DomainProfileRegistry at startup. Empty = no domain boost.
     domain_source_names: std::collections::HashSet<String>,
@@ -361,6 +367,7 @@ impl SearchService {
         query_expander: Arc<QueryExpander>,
         backfill_active: bool,
         backfill_oversampling_factor: u64,
+        cpu_mode: bool,
         domain_source_names: std::collections::HashSet<String>,
     ) -> Self {
         let cb_threshold: u32 = std::env::var("CB_FAILURE_THRESHOLD")
@@ -392,12 +399,17 @@ impl SearchService {
             semaphores: Arc::new(GpuSemaphores::from_env()),
             backfill_active,
             backfill_oversampling_factor,
+            cpu_mode,
             domain_source_names,
         }
     }
 
     /// Sprint 7.6: Determine current search mode based on circuit breaker states
     fn current_search_mode(&self) -> SearchMode {
+        if self.cpu_mode {
+            return SearchMode::DegradedFtsOnly;
+        }
+
         let embed_ok = self.cb_tei_embed.should_allow();
         let qdrant_ok = self.cb_qdrant.should_allow();
         let rerank_ok = self.cb_tei_rerank.should_allow();
@@ -413,6 +425,15 @@ impl SearchService {
     /// Get current search mode (for response header)
     pub fn search_mode(&self) -> SearchMode {
         self.current_search_mode()
+    }
+
+    fn record_expansion_failure(&self, error: &AppError) {
+        let err = error.to_string();
+        if err.contains("Qdrant") || err.contains("qdrant") {
+            self.cb_qdrant.record_failure();
+        } else {
+            self.cb_tei_embed.record_failure();
+        }
     }
 
     /// True hybrid search using RRF (Reciprocal Rank Fusion)
@@ -448,7 +469,7 @@ impl SearchService {
 
         // Sprint 7.6: Determine search mode FIRST — before any TEI calls
         // This prevents 500 errors when TEI is down (expand() needs TEI embed)
-        let search_mode = self.current_search_mode();
+        let mut search_mode = self.current_search_mode();
         if search_mode != SearchMode::Full {
             tracing::info!(mode = ?search_mode, "Search operating in degraded mode");
             metrics::counter!("mainrag_search_mode", "mode" => search_mode.header_value())
@@ -462,19 +483,36 @@ impl SearchService {
             let _embed_permit = self.semaphores.embed.acquire().await.map_err(|_| {
                 crate::error::AppError::Internal("Embed semaphore closed".to_string())
             })?;
-            let result = self.query_expander.expand(&clean_query, agent_id).await?;
+            let result = self.query_expander.expand(&clean_query, agent_id).await;
             drop(_embed_permit);
 
-            // Log expansion for debugging
-            if !result.synonyms.is_empty() {
-                tracing::debug!(
-                    "Query expansion: '{}' -> FTS: '{}', {} synonyms found",
-                    clean_query,
-                    result.fts_query,
-                    result.synonyms.len()
-                );
+            match result {
+                Ok(result) => {
+                    // Log expansion for debugging
+                    if !result.synonyms.is_empty() {
+                        tracing::debug!(
+                            "Query expansion: '{}' -> FTS: '{}', {} synonyms found",
+                            clean_query,
+                            result.fts_query,
+                            result.synonyms.len()
+                        );
+                    }
+                    result
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Query expansion/embedding failed, degrading to FTS-only: {}",
+                        e
+                    );
+                    self.record_expansion_failure(&e);
+                    search_mode = if self.cb_tei_rerank.should_allow() {
+                        SearchMode::DegradedNoVectors
+                    } else {
+                        SearchMode::DegradedFtsOnly
+                    };
+                    self.query_expander.expand_fts_only(&clean_query).await
+                }
             }
-            result
         } else {
             // TEI down — skip expansion, use plain query with empty embedding
             tracing::debug!(
@@ -498,7 +536,8 @@ impl SearchService {
 
         // Sprint 7.6: Conditional search paths based on service availability
         let can_do_semantic =
-            matches!(search_mode, SearchMode::Full | SearchMode::DegradedNoRerank);
+            matches!(search_mode, SearchMode::Full | SearchMode::DegradedNoRerank)
+                && !expanded.embedding.is_empty();
 
         // Wave 2a: Wire expanded FTS query instead of clean_query
         // Phrase queries bypass expansion (they need exact sequence matching)
@@ -615,6 +654,8 @@ impl SearchService {
             return Ok(SearchResults {
                 results: vec![],
                 total: 0,
+                search_mode,
+                reranked: false,
                 expanded_query,
                 expansion_terms,
             });
@@ -911,6 +952,8 @@ impl SearchService {
                     return Ok(SearchResults {
                         results: reranked,
                         total: total_found,
+                        search_mode,
+                        reranked: true,
                         expanded_query: expanded_query.clone(),
                         expansion_terms: expansion_terms.clone(),
                     });
@@ -931,6 +974,8 @@ impl SearchService {
         Ok(SearchResults {
             results,
             total: total_found,
+            search_mode,
+            reranked: false,
             expanded_query,
             expansion_terms,
         })
@@ -1249,6 +1294,13 @@ impl SearchService {
         limit: u32,
         tenant: &TenantContext,
     ) -> Result<SearchResults> {
+        if self.cpu_mode {
+            return Err(AppError::BadRequest(
+                "semantic search unavailable in CPU mode".to_string(),
+            ));
+        }
+
+        let search_mode = self.current_search_mode();
         let embedding = self.tei.embed(query).await?;
 
         // K4: Use tenant-aware search
@@ -1261,6 +1313,8 @@ impl SearchService {
             return Ok(SearchResults {
                 results: vec![],
                 total: 0,
+                search_mode,
+                reranked: false,
                 expanded_query: None,
                 expansion_terms: vec![],
             });
@@ -1331,6 +1385,8 @@ impl SearchService {
         Ok(SearchResults {
             results,
             total,
+            search_mode,
+            reranked: false,
             expanded_query: None,
             expansion_terms: vec![],
         })
@@ -1439,6 +1495,8 @@ impl SearchService {
         Ok(SearchResults {
             results,
             total,
+            search_mode: self.current_search_mode(),
+            reranked: false,
             expanded_query: None,
             expansion_terms: vec![],
         })
