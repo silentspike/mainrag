@@ -341,13 +341,7 @@ fn assert_postgres_dedicated() -> Result<()> {
     let dbs = parse_psql_database_names(&String::from_utf8_lossy(&output.stdout));
     let unknown: Vec<String> = dbs
         .into_iter()
-        .filter(|name| {
-            !(name == "mainrag"
-                || name == "postgres"
-                || name == "template0"
-                || name == "template1"
-                || name.starts_with("finanzioso"))
-        })
+        .filter(|name| !is_allowed_local_database(name))
         .collect();
 
     if !unknown.is_empty() {
@@ -357,6 +351,13 @@ fn assert_postgres_dedicated() -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn is_allowed_local_database(name: &str) -> bool {
+    matches!(
+        name,
+        "mainrag" | "coderag" | "multillm" | "postgres" | "template0" | "template1"
+    ) || name.starts_with("finanzioso")
 }
 
 fn parse_psql_database_names(output: &str) -> Vec<String> {
@@ -915,6 +916,26 @@ mod tests {
             " mainrag | postgres | UTF8\n template0 | postgres | UTF8\n finanzioso | postgres | UTF8\n",
         );
         assert_eq!(names, vec!["mainrag", "template0", "finanzioso"]);
+    }
+
+    #[test]
+    fn local_database_allowlist_is_explicit() {
+        for name in [
+            "mainrag",
+            "coderag",
+            "multillm",
+            "postgres",
+            "template0",
+            "template1",
+            "finanzioso",
+            "finanzioso_test",
+        ] {
+            assert!(is_allowed_local_database(name), "{name}");
+        }
+
+        for name in ["production", "customer_app", "mainrag_backup", "codex"] {
+            assert!(!is_allowed_local_database(name), "{name}");
+        }
     }
 
     #[test]
