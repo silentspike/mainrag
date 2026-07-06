@@ -758,6 +758,12 @@ pub async fn admin_backfill_qdrant_user_ids(
     State(state): State<Arc<AppState>>,
     Extension(_claims): Extension<Arc<crate::auth::Claims>>,
 ) -> Result<Json<BackfillResult>> {
+    if state.config.server.cpu_mode {
+        return Err(AppError::BadRequest(
+            "requires Qdrant - not available in CPU mode".to_string(),
+        ));
+    }
+
     // 1. Create payload index for user_id (idempotent)
     tracing::info!("K4 Backfill: Creating user_id payload index on Qdrant...");
     state
