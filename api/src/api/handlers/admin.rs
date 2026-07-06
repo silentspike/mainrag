@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::api::JsonBody;
 use crate::error::{AppError, Result};
 use crate::plugins;
+use crate::services::index::{embedding_document_text, embedding_storage_model_name};
 use crate::AppState;
 
 #[derive(Debug, Serialize)]
@@ -605,7 +606,7 @@ pub async fn admin_backfill_orphaned(
 ) -> Result<Json<BackfillResult>> {
     use pgvector::Vector;
 
-    let model_name = state.tei.get_model_name().to_string();
+    let model_name = embedding_storage_model_name(state.tei.get_model_name());
     let mut total_processed = 0;
     let mut batch_count = 0;
 
@@ -613,13 +614,13 @@ pub async fn admin_backfill_orphaned(
     loop {
         // 1. Find orphaned chunks (BATCH with LIMIT) in one transaction
         // Returns owned data so the transaction can be committed immediately
-        let orphans: Vec<(i64, String, i64, i64)> = state
+        let orphans: Vec<(i64, String, Option<String>, i64, i64)> = state
             .rls_client
             .with_system(|txn| {
                 Box::pin(async move {
                     let rows = txn
                         .query(
-                            "SELECT c.id, c.content_text, c.file_id, f.source_id
+                            "SELECT c.id, c.content_text, c.context_prefix, c.file_id, f.source_id
                  FROM chunks c
                  JOIN files f ON f.id = c.file_id
                  LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.id
@@ -629,12 +630,13 @@ pub async fn admin_backfill_orphaned(
                         )
                         .await?;
 
-                    let data: Vec<(i64, String, i64, i64)> = rows
+                    let data: Vec<(i64, String, Option<String>, i64, i64)> = rows
                         .iter()
                         .map(|r| {
                             (
                                 r.get("id"),
                                 r.get("content_text"),
+                                r.get("context_prefix"),
                                 r.get("file_id"),
                                 r.get("source_id"),
                             )
@@ -658,15 +660,18 @@ pub async fn admin_backfill_orphaned(
         );
 
         // 2. Collect texts for batch embedding (outside DB transaction)
-        let texts: Vec<&str> = orphans
+        let texts: Vec<String> = orphans
             .iter()
-            .map(|(_, text, _, _)| text.as_str())
+            .map(|(_, text, context_prefix, _, _)| {
+                embedding_document_text(context_prefix.as_deref(), text)
+            })
             .collect();
+        let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
 
         // 3. Batch-embed via TEI (CRITICAL: batch call, not per-chunk!)
         let embeddings = state
             .tei
-            .embed_batch(&texts)
+            .embed_batch(&text_refs)
             .await
             .map_err(|e| AppError::Internal(format!("TEI batch embedding failed: {}", e)))?;
 
@@ -686,8 +691,8 @@ pub async fn admin_backfill_orphaned(
                 Box::pin(async move {
                     for (orphan, embedding) in orphans.iter().zip(embeddings.iter()) {
                         let chunk_id = orphan.0;
-                        let file_id = orphan.2;
-                        let source_id = orphan.3;
+                        let file_id = orphan.3;
+                        let source_id = orphan.4;
                         let embedding_vec = Vector::from(embedding.clone());
 
                         // Insert embedding

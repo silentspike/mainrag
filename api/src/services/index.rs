@@ -53,6 +53,79 @@ fn embedding_model_id() -> String {
     std::env::var("EMBEDDING_MODEL_ID").unwrap_or_else(|_| "BAAI/bge-base-en-v1.5".to_string())
 }
 
+fn embedding_with_cch_enabled() -> bool {
+    std::env::var("EMBEDDING_WITH_CCH").unwrap_or_default() != "false"
+}
+
+fn embedding_storage_model_name_for(base_model_name: &str, cch_enabled: bool) -> String {
+    if cch_enabled {
+        format!("{}+cch", base_model_name)
+    } else {
+        base_model_name.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedding_storage_model_name_tracks_cch_suffix() {
+        assert_eq!(
+            embedding_storage_model_name_for("Alibaba-NLP/gte-modernbert-base", true),
+            "Alibaba-NLP/gte-modernbert-base+cch"
+        );
+        assert_eq!(
+            embedding_storage_model_name_for("Alibaba-NLP/gte-modernbert-base", false),
+            "Alibaba-NLP/gte-modernbert-base"
+        );
+    }
+
+    #[test]
+    fn embedding_document_text_prepends_context_only_when_enabled_and_present() {
+        assert_eq!(
+            embedding_document_text_for(Some("[mainrag] src/lib.rs"), "fn run() {}", true),
+            "[mainrag] src/lib.rs\n\nfn run() {}"
+        );
+        assert_eq!(
+            embedding_document_text_for(Some("[mainrag] src/lib.rs"), "fn run() {}", false),
+            "fn run() {}"
+        );
+        assert_eq!(
+            embedding_document_text_for(Some(""), "fn run() {}", true),
+            "fn run() {}"
+        );
+        assert_eq!(
+            embedding_document_text_for(None, "fn run() {}", true),
+            "fn run() {}"
+        );
+    }
+}
+
+/// Model name stored in chunk_embeddings for the actual embedded document text.
+pub fn embedding_storage_model_name(base_model_name: &str) -> String {
+    embedding_storage_model_name_for(base_model_name, embedding_with_cch_enabled())
+}
+
+fn embedding_document_text_for(
+    context_prefix: Option<&str>,
+    content_text: &str,
+    cch_enabled: bool,
+) -> String {
+    if cch_enabled {
+        if let Some(prefix) = context_prefix.filter(|prefix| !prefix.is_empty()) {
+            return format!("{}\n\n{}", prefix, content_text);
+        }
+    }
+
+    content_text.to_string()
+}
+
+/// Text sent to the embedder for stored document chunks.
+pub fn embedding_document_text(context_prefix: Option<&str>, content_text: &str) -> String {
+    embedding_document_text_for(context_prefix, content_text, embedding_with_cch_enabled())
+}
+
 /// Sprint 8.3: Tokenizer version for versioned chunk tracking
 fn tokenizer_version() -> String {
     std::env::var("TOKENIZER_VERSION").unwrap_or_else(|_| "tiktoken-cl100k".to_string())
@@ -1259,16 +1332,8 @@ impl IndexService {
             b_start_lines.push(start_line as i32);
             b_end_lines.push(end_line as i32);
             b_levels.push(chunk.level as i16);
-            // CCH-enriched text for embedding (Anthropic Contextual Retrieval technique):
-            // Prepend context_prefix to chunk text so the embedding encodes file path,
-            // source name, and parent scope. Query embeddings do NOT get CCH — the
-            // asymmetry is intentional: documents get context, queries stay natural.
-            let embedding_text =
-                if std::env::var("EMBEDDING_WITH_CCH").unwrap_or_default() != "false" {
-                    format!("{}\n\n{}", &context_prefix, chunk_text)
-                } else {
-                    chunk_text.clone()
-                };
+            // Query embeddings do not get CCH; documents do when configured.
+            let embedding_text = embedding_document_text(Some(&context_prefix), chunk_text);
 
             b_context_prefixes.push(context_prefix);
             b_content_hash_hexes.push(chunk_content_hash_hex);
@@ -1380,14 +1445,9 @@ impl IndexService {
             // EMBEDDING DEDUPLICATION: Check for existing embeddings by content_hash + model
             // If identical content was embedded before, reuse that vector instead of calling TEI.
             // Uses BATCH query with ANY($1) instead of N separate queries for performance.
-            // When CCH is enabled, append "+cch" to model name so old embeddings (without CCH)
-            // won't be reused — forces re-embedding with contextual prefix.
-            let base_model_name: String = self.tei.get_model_name().to_string();
-            let model_name = if std::env::var("EMBEDDING_WITH_CCH").unwrap_or_default() != "false" {
-                format!("{}+cch", base_model_name)
-            } else {
-                base_model_name
-            };
+            // When CCH is enabled, append "+cch" so old embeddings without
+            // contextual prefixes are not reused.
+            let model_name = embedding_storage_model_name(self.tei.get_model_name());
             let mut reused_count = 0;
 
             // Build map: chunk_idx -> Option<existing_embedding>
@@ -1631,7 +1691,7 @@ impl IndexService {
     async fn process_large_conversation_file(
         &self,
         source_id: i64,
-        _source_name: &str,
+        source_name: &str,
         raw_file: RawFile,
     ) -> Result<ProcessResult> {
         use std::io::{BufRead, BufReader};
@@ -1769,7 +1829,16 @@ impl IndexService {
                 let batch = &chunks[batch_start..batch_end];
 
                 let (c, e) = self
-                    .flush_chunk_batch(&client, file_id, source_id, batch, &language, global_line)
+                    .flush_chunk_batch(
+                        &client,
+                        file_id,
+                        source_id,
+                        source_name,
+                        rel_path,
+                        batch,
+                        &language,
+                        global_line,
+                    )
                     .await?;
                 total_chunks += c;
                 total_embeddings += e;
@@ -1808,6 +1877,8 @@ impl IndexService {
                                 &client,
                                 file_id,
                                 source_id,
+                                source_name,
+                                rel_path,
                                 &accumulated_chunks,
                                 &language,
                                 0,
@@ -1831,6 +1902,8 @@ impl IndexService {
                         &client,
                         file_id,
                         source_id,
+                        source_name,
+                        rel_path,
                         &accumulated_chunks,
                         &language,
                         0,
@@ -1857,6 +1930,8 @@ impl IndexService {
         client: &deadpool_postgres::Client,
         file_id: i64,
         source_id: i64,
+        source_name: &str,
+        rel_path: &str,
         chunks: &[crate::services::chunker::Chunk],
         _language: &Option<String>,
         _line_offset: u32,
@@ -1868,6 +1943,7 @@ impl IndexService {
         let cv = chunker_version();
         let mid = embedding_model_id();
         let tv = tokenizer_version();
+        let model_name = embedding_storage_model_name(self.tei.get_model_name());
 
         // Batch-insert chunks
         let mut b_chunk_types = Vec::with_capacity(chunks.len());
@@ -1898,13 +1974,20 @@ impl IndexService {
             b_start_lines.push(chunk.start_line as i32);
             b_end_lines.push(chunk.end_line as i32);
             b_levels.push(chunk.level as i16);
-            b_context_prefixes.push(chunk.context_prefix.clone().unwrap_or_default());
+            let context_prefix = chunk
+                .context_prefix
+                .clone()
+                .unwrap_or_else(|| build_cch(source_name, rel_path, None));
+            b_context_prefixes.push(context_prefix.clone());
             b_content_hash_hexes.push(chunk_content_sha256(&chunk.text));
             b_chunker_versions.push(cv.clone());
             b_model_ids.push(mid.clone());
             b_tokenizer_versions.push(tv.clone());
 
-            chunk_texts.push(chunk.text.clone());
+            chunk_texts.push(embedding_document_text(
+                Some(&context_prefix),
+                chunk.text.as_str(),
+            ));
             chunk_hashes.push(hash);
         }
 
@@ -1958,7 +2041,7 @@ impl IndexService {
                     for (i, embedding) in embeddings.iter().enumerate() {
                         let chunk_idx = batch_start + i;
                         b_ids.push(chunk_ids[chunk_idx]);
-                        b_models.push(mid.clone());
+                        b_models.push(model_name.clone());
                         b_vecs.push(Vector::from(embedding.clone()));
                     }
 
