@@ -333,6 +333,22 @@ impl SearchMode {
     }
 }
 
+fn mode_after_vector_failure(current: SearchMode) -> SearchMode {
+    match current {
+        SearchMode::Full => SearchMode::DegradedNoVectors,
+        SearchMode::DegradedNoRerank => SearchMode::DegradedFtsOnly,
+        SearchMode::DegradedNoVectors | SearchMode::DegradedFtsOnly => current,
+    }
+}
+
+fn mode_after_rerank_failure(current: SearchMode) -> SearchMode {
+    match current {
+        SearchMode::Full => SearchMode::DegradedNoRerank,
+        SearchMode::DegradedNoVectors => SearchMode::DegradedFtsOnly,
+        SearchMode::DegradedNoRerank | SearchMode::DegradedFtsOnly => current,
+    }
+}
+
 pub struct SearchService {
     db: PostgresPool,
     tei: Arc<TeiClient>,
@@ -505,11 +521,7 @@ impl SearchService {
                         e
                     );
                     self.record_expansion_failure(&e);
-                    search_mode = if self.cb_tei_rerank.should_allow() {
-                        SearchMode::DegradedNoVectors
-                    } else {
-                        SearchMode::DegradedFtsOnly
-                    };
+                    search_mode = mode_after_vector_failure(search_mode);
                     self.query_expander.expand_fts_only(&clean_query).await
                 }
             }
@@ -569,6 +581,7 @@ impl SearchService {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!("Semantic search failed (degrading to FTS-only): {}", e);
+                    search_mode = mode_after_vector_failure(search_mode);
                     vec![]
                 }
             };
@@ -961,6 +974,7 @@ impl SearchService {
                 Err(e) => {
                     // Log error but don't fail - fall back to RRF results
                     tracing::warn!("Reranking failed, using RRF results: {}", e);
+                    search_mode = mode_after_rerank_failure(search_mode);
                 }
             }
         }
@@ -1798,4 +1812,49 @@ fn deduplicate_results(
     }
 
     kept.into_iter().map(|i| results[i].clone()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vector_failure_updates_effective_search_mode() {
+        assert_eq!(
+            mode_after_vector_failure(SearchMode::Full),
+            SearchMode::DegradedNoVectors
+        );
+        assert_eq!(
+            mode_after_vector_failure(SearchMode::DegradedNoRerank),
+            SearchMode::DegradedFtsOnly
+        );
+        assert_eq!(
+            mode_after_vector_failure(SearchMode::DegradedNoVectors),
+            SearchMode::DegradedNoVectors
+        );
+        assert_eq!(
+            mode_after_vector_failure(SearchMode::DegradedFtsOnly),
+            SearchMode::DegradedFtsOnly
+        );
+    }
+
+    #[test]
+    fn rerank_failure_updates_effective_search_mode() {
+        assert_eq!(
+            mode_after_rerank_failure(SearchMode::Full),
+            SearchMode::DegradedNoRerank
+        );
+        assert_eq!(
+            mode_after_rerank_failure(SearchMode::DegradedNoVectors),
+            SearchMode::DegradedFtsOnly
+        );
+        assert_eq!(
+            mode_after_rerank_failure(SearchMode::DegradedNoRerank),
+            SearchMode::DegradedNoRerank
+        );
+        assert_eq!(
+            mode_after_rerank_failure(SearchMode::DegradedFtsOnly),
+            SearchMode::DegradedFtsOnly
+        );
+    }
 }
