@@ -10,10 +10,11 @@
 use crate::client::ApiClient;
 use anyhow::Result;
 use colored::Colorize;
-use notify::RecursiveMode;
+use notify::{RecursiveMode, Watcher};
 use notify_debouncer_mini::new_debouncer;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Minimum interval between syncs for the same file (rate limiting), in seconds.
@@ -172,19 +173,8 @@ pub async fn watch(client: &ApiClient, source_name: Option<&str>, daemon: bool) 
     // Watch all paths (gracefully skip sources with permission errors)
     let mut watched_count = 0;
     for (_, name, path) in &sources_to_watch {
-        match debouncer.watcher().watch(path, RecursiveMode::Recursive) {
-            Ok(()) => {
-                watched_count += 1;
-            }
-            Err(e) => {
-                eprintln!(
-                    "  {} Skipping source '{}': {} ({})",
-                    "⚠".yellow(),
-                    name,
-                    e,
-                    path.display()
-                );
-            }
+        if watch_source(debouncer.watcher(), name, path) {
+            watched_count += 1;
         }
     }
 
@@ -365,6 +355,89 @@ fn should_ignore(path: &std::path::Path) -> bool {
     })
 }
 
+fn watch_source<W: Watcher + ?Sized>(watcher: &mut W, name: &str, path: &Path) -> bool {
+    match watcher.watch(path, RecursiveMode::Recursive) {
+        Ok(()) => true,
+        Err(recursive_error) => {
+            let mut dirs = Vec::new();
+            let mut skipped_dirs = 0usize;
+            collect_watchable_directories(path, &mut dirs, &mut skipped_dirs);
+
+            let mut watched_dirs = 0usize;
+            let mut failed_dirs = 0usize;
+            for dir in &dirs {
+                match watcher.watch(dir, RecursiveMode::NonRecursive) {
+                    Ok(()) => watched_dirs += 1,
+                    Err(_) => failed_dirs += 1,
+                }
+            }
+
+            if watched_dirs > 0 {
+                eprintln!(
+                    "  {} Recursive watch failed for source '{}': {}; using non-recursive fallback on {} readable dirs ({} unreadable/skipped, {} watch failures)",
+                    "⚠".yellow(),
+                    name,
+                    recursive_error,
+                    watched_dirs,
+                    skipped_dirs,
+                    failed_dirs
+                );
+                true
+            } else {
+                eprintln!(
+                    "  {} Skipping source '{}': {} ({})",
+                    "⚠".yellow(),
+                    name,
+                    recursive_error,
+                    path.display()
+                );
+                false
+            }
+        }
+    }
+}
+
+fn collect_watchable_directories(path: &Path, dirs: &mut Vec<PathBuf>, skipped_dirs: &mut usize) {
+    if should_ignore(path) {
+        return;
+    }
+
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => {
+            *skipped_dirs += 1;
+            return;
+        }
+    };
+
+    dirs.push(path.to_path_buf());
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                *skipped_dirs += 1;
+                continue;
+            }
+        };
+        let child_path = entry.path();
+        if should_ignore(&child_path) {
+            continue;
+        }
+
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => {
+                *skipped_dirs += 1;
+                continue;
+            }
+        };
+        if file_type.is_dir() {
+            collect_watchable_directories(&child_path, dirs, skipped_dirs);
+        }
+    }
+}
+
 /// Check if file has a supported extension
 fn is_supported_file(path: &std::path::Path) -> bool {
     // Special case: Dockerfile
@@ -403,5 +476,34 @@ mod tests {
     fn min_sync_interval_rejects_zero_and_invalid_values() {
         assert_eq!(parse_min_sync_interval_secs(Some("0"), Some("45")), 15);
         assert_eq!(parse_min_sync_interval_secs(Some("not-a-number"), None), 15);
+    }
+
+    #[test]
+    fn collect_watchable_directories_skips_ignored_subtrees() {
+        let root = std::env::temp_dir().join(format!(
+            "mainrag-watch-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+
+        fs::create_dir_all(root.join("src/nested")).unwrap();
+        fs::create_dir_all(root.join(".git/objects")).unwrap();
+
+        let mut dirs = Vec::new();
+        let mut skipped_dirs = 0usize;
+        collect_watchable_directories(&root, &mut dirs, &mut skipped_dirs);
+
+        assert_eq!(skipped_dirs, 0);
+        assert!(dirs.contains(&root));
+        assert!(dirs.contains(&root.join("src")));
+        assert!(dirs.contains(&root.join("src/nested")));
+        assert!(!dirs.iter().any(|dir| dir.ends_with(".git")));
+        assert!(!dirs.iter().any(|dir| dir.ends_with(".git/objects")));
+
+        fs::remove_dir_all(root).unwrap();
     }
 }
