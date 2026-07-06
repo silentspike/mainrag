@@ -122,6 +122,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             post(handlers::admin_backfill_orphaned),
         )
         .route(
+            "/api/v1/admin/backfill/intelligence",
+            post(handlers::admin_backfill_intelligence),
+        )
+        .route(
             "/api/v1/admin/backfill/qdrant-user-ids",
             post(handlers::admin_backfill_qdrant_user_ids),
         )

@@ -326,6 +326,21 @@ enum AdminAction {
 enum BackfillAction {
     /// Find and embed orphaned chunks (chunks without embeddings)
     Orphaned,
+
+    /// Rebuild code intelligence for files missing symbols/call graph rows
+    Intelligence {
+        /// Restrict backfill to one source id
+        #[arg(long)]
+        source_id: Option<i64>,
+
+        /// Maximum files to process in this run
+        #[arg(long, default_value = "100")]
+        limit: i64,
+
+        /// Re-analyze matching files even if symbols already exist
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
@@ -499,6 +514,20 @@ async fn main() -> anyhow::Result<()> {
             } => match backfill_action {
                 BackfillAction::Orphaned => {
                     commands::backfill::run_orphaned(&client, cli.json).await
+                }
+                BackfillAction::Intelligence {
+                    source_id,
+                    limit,
+                    force,
+                } => {
+                    commands::backfill::run_intelligence(
+                        &client,
+                        source_id,
+                        Some(limit),
+                        force,
+                        cli.json,
+                    )
+                    .await
                 }
             },
         },
