@@ -44,12 +44,58 @@ const GPU_CONTAINERS: &[&str] = &[
     "qdrant-mainrag",
 ];
 
-const PG_TIMERS: &[&str] = &["pgbackrest-mainrag.timer", "pgbackrest-mainrag-full.timer"];
+const CPU_TIMERS: &[&str] = &[
+    "pgbackrest-mainrag.timer",
+    "pgbackrest-mainrag-full.timer",
+    "mainrag-pbs-backup.timer",
+];
+
+const GPU_TIMERS: &[&str] = &[
+    "mainrag-qdrant-snapshot.timer",
+    "pgbackrest-mainrag.timer",
+    "pgbackrest-mainrag-full.timer",
+    "mainrag-pbs-backup.timer",
+];
 
 const STOP_TIMERS: &[&str] = &[
     "mainrag-qdrant-snapshot.timer",
     "pgbackrest-mainrag.timer",
     "pgbackrest-mainrag-full.timer",
+    "mainrag-pbs-backup.timer",
+    "finanzioso-collector.timer",
+    "finanzioso-finalizer.timer",
+    "finanzioso-retention.timer",
+];
+
+const CPU_INACTIVE_TIMERS: &[&str] = &[
+    "mainrag-qdrant-snapshot.timer",
+    "finanzioso-collector.timer",
+    "finanzioso-finalizer.timer",
+    "finanzioso-retention.timer",
+];
+
+const FAILED_RESET_UNITS: &[&str] = &[
+    "postgresql.service",
+    "mainrag-api.service",
+    "mainrag-svelte.service",
+    "mainrag-watcher.service",
+    "mainrag-watcher-codex.service",
+    "mainrag-watcher-gemini.service",
+    "mainrag-tei.service",
+    "mainrag-tei-gte.service",
+    "mainrag-tei-reranker.service",
+    "qdrant.service",
+    "finanzioso-collector.service",
+    "finanzioso-finalizer.service",
+    "finanzioso-retention.service",
+    "mainrag-qdrant-snapshot.service",
+    "mainrag-pbs-backup.service",
+    "pgbackrest-mainrag.service",
+    "pgbackrest-mainrag-full.service",
+    "mainrag-qdrant-snapshot.timer",
+    "pgbackrest-mainrag.timer",
+    "pgbackrest-mainrag-full.timer",
+    "mainrag-pbs-backup.timer",
     "finanzioso-collector.timer",
     "finanzioso-finalizer.timer",
     "finanzioso-retention.timer",
@@ -131,7 +177,9 @@ enum AuthProbe<T> {
 }
 
 pub async fn stop(json_output: bool) -> Result<()> {
-    println!("{}", "Stopping MainRAG lifecycle services...".bold());
+    if !json_output {
+        println!("{}", "Stopping MainRAG lifecycle services...".bold());
+    }
 
     systemctl_tolerant("stop", APP_UNITS);
     systemctl_tolerant("stop", LEGACY_GPU_UNITS);
@@ -143,13 +191,16 @@ pub async fn stop(json_output: bool) -> Result<()> {
 
     systemctl_tolerant("stop", STOP_TIMERS);
     stop_postgres_if_dedicated()?;
+    reset_failed_units();
     let checks = verify_stopped();
     print_checks("mainrag --stop", &checks, json_output)?;
     Ok(())
 }
 
 pub async fn start_cpu(api_url: &str, json_output: bool) -> Result<()> {
-    println!("{}", "Starting MainRAG in CPU-only mode...".bold());
+    if !json_output {
+        println!("{}", "Starting MainRAG in CPU-only mode...".bold());
+    }
 
     let mut checks = cpu_preflight_checks();
     if checks.iter().any(Check::failed) {
@@ -157,6 +208,7 @@ pub async fn start_cpu(api_url: &str, json_output: bool) -> Result<()> {
     }
 
     systemctl_tolerant("stop", APP_UNITS);
+    systemctl_tolerant("stop", STOP_TIMERS);
     write_cpu_dropins()?;
     run_checked("sudo", &["systemctl", "daemon-reload"])?;
 
@@ -182,6 +234,10 @@ pub async fn start_cpu(api_url: &str, json_output: bool) -> Result<()> {
         "MAINRAG CPU MODE",
     ));
     checks.extend(authenticated_health_checks(api_url, "cpu").await?);
+    checks.push(watcher_token_check(api_url).await);
+    if checks.iter().any(Check::failed) {
+        print_checks("mainrag --cpu", &checks, json_output)?;
+    }
 
     systemctl_checked(
         "start",
@@ -192,9 +248,11 @@ pub async fn start_cpu(api_url: &str, json_output: bool) -> Result<()> {
             "mainrag-watcher-gemini.service",
         ],
     )?;
-    systemctl_checked("start", PG_TIMERS)?;
+    systemctl_checked("start", CPU_TIMERS)?;
 
     checks.extend(active_unit_checks(CPU_ACTIVE_UNITS));
+    checks.extend(active_unit_checks(CPU_TIMERS));
+    checks.extend(inactive_unit_checks(CPU_INACTIVE_TIMERS));
     checks.extend(no_gpu_container_checks());
     checks.extend(authenticated_search_checks(api_url, SearchExpectation::Cpu).await?);
 
@@ -203,10 +261,13 @@ pub async fn start_cpu(api_url: &str, json_output: bool) -> Result<()> {
 }
 
 pub async fn start_gpu(api_url: &str, json_output: bool) -> Result<()> {
-    println!("{}", "Starting MainRAG in full GPU mode...".bold());
+    if !json_output {
+        println!("{}", "Starting MainRAG in full GPU mode...".bold());
+    }
 
     run_checked("nvidia-smi", &["-L"]).context("nvidia-smi did not list a GPU")?;
     systemctl_tolerant("stop", APP_UNITS);
+    systemctl_tolerant("stop", STOP_TIMERS);
 
     remove_cpu_dropins()?;
     run_checked("sudo", &["systemctl", "daemon-reload"])?;
@@ -215,7 +276,7 @@ pub async fn start_gpu(api_url: &str, json_output: bool) -> Result<()> {
     wait_for_pg()?;
 
     if let Err(err) = compose_up_and_wait().await {
-        compose_tolerant(&["down"]);
+        rollback_gpu_start_failure();
         bail!(
             "GPU stack did not become healthy: {}. Use `mainrag --cpu` while the GPU stack is unavailable.",
             err
@@ -230,6 +291,10 @@ pub async fn start_gpu(api_url: &str, json_output: bool) -> Result<()> {
     .await?;
 
     let mut checks = authenticated_health_checks(api_url, "full").await?;
+    checks.push(watcher_token_check(api_url).await);
+    if checks.iter().any(Check::failed) {
+        print_checks("mainrag --gpu", &checks, json_output)?;
+    }
 
     systemctl_checked(
         "start",
@@ -240,16 +305,10 @@ pub async fn start_gpu(api_url: &str, json_output: bool) -> Result<()> {
             "mainrag-watcher-gemini.service",
         ],
     )?;
-    systemctl_checked(
-        "start",
-        &[
-            "mainrag-qdrant-snapshot.timer",
-            "pgbackrest-mainrag.timer",
-            "pgbackrest-mainrag-full.timer",
-        ],
-    )?;
+    systemctl_checked("start", GPU_TIMERS)?;
 
     checks.extend(active_unit_checks(CPU_ACTIVE_UNITS));
+    checks.extend(active_unit_checks(GPU_TIMERS));
     checks.extend(container_health_checks());
     checks.extend(authenticated_search_checks(api_url, SearchExpectation::Full).await?);
 
@@ -380,6 +439,17 @@ fn verify_stopped() -> Vec<Check> {
             checks.push(Check::pass(format!("{unit} inactive"), status));
         }
     }
+    checks.extend(failed_state_checks(
+        STOP_VERIFY_UNITS
+            .iter()
+            .chain(STOP_TIMERS.iter())
+            .copied()
+            .chain([
+                "finanzioso-collector.service",
+                "finanzioso-finalizer.service",
+                "finanzioso-retention.service",
+            ]),
+    ));
 
     checks.extend(no_gpu_container_checks());
 
@@ -404,6 +474,28 @@ fn verify_stopped() -> Vec<Check> {
     checks
 }
 
+fn reset_failed_units() {
+    let args: Vec<&str> = std::iter::once("systemctl")
+        .chain(std::iter::once("reset-failed"))
+        .chain(FAILED_RESET_UNITS.iter().copied())
+        .collect();
+    run_tolerant("sudo", &args);
+}
+
+fn failed_state_checks<'a>(units: impl IntoIterator<Item = &'a str>) -> Vec<Check> {
+    units
+        .into_iter()
+        .map(|unit| {
+            let status = systemctl_is_failed(unit);
+            if status == "failed" {
+                Check::fail(format!("{unit} not failed"), status)
+            } else {
+                Check::pass(format!("{unit} not failed"), status)
+            }
+        })
+        .collect()
+}
+
 fn active_unit_checks(units: &[&str]) -> Vec<Check> {
     units
         .iter()
@@ -413,6 +505,20 @@ fn active_unit_checks(units: &[&str]) -> Vec<Check> {
                 Check::pass(format!("{unit} active"), status)
             } else {
                 Check::fail(format!("{unit} active"), status)
+            }
+        })
+        .collect()
+}
+
+fn inactive_unit_checks(units: &[&str]) -> Vec<Check> {
+    units
+        .iter()
+        .map(|unit| {
+            let status = systemctl_is_active(unit);
+            if status == "active" || status == "activating" {
+                Check::fail(format!("{unit} inactive"), status)
+            } else {
+                Check::pass(format!("{unit} inactive"), status)
             }
         })
         .collect()
@@ -505,6 +611,62 @@ async fn authenticated_health(api_url: &str) -> Result<AuthProbe<HealthResponse>
             "stored token was rejected; run `mainrag auth login`".to_string(),
         )),
         Err(err) => Err(err),
+    }
+}
+
+async fn watcher_token_check(api_url: &str) -> Check {
+    let token_output = run_tolerant(
+        "sudo",
+        &[
+            "-u",
+            "mainrag",
+            "cat",
+            "/var/lib/mainrag/.config/mainrag/token",
+        ],
+    );
+    if !token_output.status.success() {
+        return Check::fail(
+            "watcher token /var/lib/mainrag",
+            format!(
+                "{}; run `sudo -u mainrag HOME=/var/lib/mainrag /opt/mainrag/bin/mainrag auth login`",
+                output_text(&token_output)
+            ),
+        );
+    }
+
+    let token = String::from_utf8_lossy(&token_output.stdout)
+        .trim()
+        .to_string();
+    if token.is_empty() {
+        return Check::fail(
+            "watcher token /var/lib/mainrag",
+            "token file is empty; run `sudo -u mainrag HOME=/var/lib/mainrag /opt/mainrag/bin/mainrag auth login`",
+        );
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => return Check::fail("watcher token /api/v1/sources", err.to_string()),
+    };
+
+    let url = format!("{}/api/v1/sources", trim_url(api_url));
+    match client.get(url).bearer_auth(token).send().await {
+        Ok(response) if response.status().is_success() => Check::pass(
+            "watcher token /api/v1/sources",
+            "valid for HOME=/var/lib/mainrag",
+        ),
+        Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => Check::fail(
+            "watcher token /api/v1/sources",
+            "stored watcher token was rejected; run `sudo -u mainrag HOME=/var/lib/mainrag /opt/mainrag/bin/mainrag auth login`",
+        ),
+        Ok(response) => Check::fail(
+            "watcher token /api/v1/sources",
+            format!("HTTP {}", response.status()),
+        ),
+        Err(err) => Check::fail("watcher token /api/v1/sources", err.to_string()),
     }
 }
 
@@ -652,6 +814,14 @@ async fn compose_up_and_wait() -> Result<()> {
         }
         thread::sleep(Duration::from_secs(5));
     }
+}
+
+fn rollback_gpu_start_failure() {
+    compose_tolerant(&["down"]);
+    systemctl_tolerant("stop", APP_UNITS);
+    systemctl_tolerant("stop", GPU_TIMERS);
+    let _ = stop_postgres_if_dedicated();
+    reset_failed_units();
 }
 
 async fn wait_for_http_ok(url: &str, timeout: Duration) -> Result<()> {
@@ -809,6 +979,11 @@ fn systemctl_is_enabled(unit: &str) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+fn systemctl_is_failed(unit: &str) -> String {
+    let output = run_tolerant("systemctl", &["is-failed", unit]);
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 fn write_root_file(path: &str, contents: &str) -> Result<()> {
     if let Some(parent) = Path::new(path).parent() {
         let parent = parent
@@ -944,5 +1119,29 @@ mod tests {
             watcher_dropin_path("mainrag-watcher.service"),
             "/etc/systemd/system/mainrag-watcher.service.d/cpu-watch-interval.conf"
         );
+    }
+
+    #[test]
+    fn lifecycle_timers_cover_pbs_and_snapshot_modes() {
+        assert!(CPU_TIMERS.contains(&"mainrag-pbs-backup.timer"));
+        assert!(!CPU_TIMERS.contains(&"mainrag-qdrant-snapshot.timer"));
+        assert!(GPU_TIMERS.contains(&"mainrag-pbs-backup.timer"));
+        assert!(GPU_TIMERS.contains(&"mainrag-qdrant-snapshot.timer"));
+        assert!(STOP_TIMERS.contains(&"mainrag-pbs-backup.timer"));
+        assert!(STOP_TIMERS.contains(&"finanzioso-finalizer.timer"));
+        assert!(CPU_INACTIVE_TIMERS.contains(&"mainrag-qdrant-snapshot.timer"));
+    }
+
+    #[test]
+    fn failed_reset_covers_mainrag_and_zombie_units() {
+        for unit in [
+            "qdrant.service",
+            "finanzioso-finalizer.service",
+            "mainrag-api.service",
+            "postgresql.service",
+            "mainrag-pbs-backup.timer",
+        ] {
+            assert!(FAILED_RESET_UNITS.contains(&unit), "{unit}");
+        }
     }
 }
