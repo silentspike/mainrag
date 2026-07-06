@@ -42,6 +42,9 @@ pub struct ServerConfig {
     /// K4: Qdrant backfill active — enables PG-RLS post-filter + oversampling
     /// (env: QDRANT_BACKFILL_ACTIVE, default: false)
     pub qdrant_backfill_active: bool,
+    /// CPU-only mode disables GPU/vector dependencies while keeping PG-backed features online
+    /// (env: MAINRAG_CPU_MODE, default: false)
+    pub cpu_mode: bool,
     /// K4: Oversampling factor when backfill post-filter is active (default: 3)
     pub backfill_oversampling_factor: u64,
     /// Service user UUID for background jobs/migrations (env: SERVICE_USER_ID)
@@ -143,9 +146,8 @@ impl Config {
                 db_pool_wait_timeout_secs: env::var("DB_POOL_WAIT_TIMEOUT_S")
                     .unwrap_or_else(|_| "5".to_string())
                     .parse()?,
-                qdrant_backfill_active: env::var("QDRANT_BACKFILL_ACTIVE")
-                    .map(|v| v == "true" || v == "1")
-                    .unwrap_or(false),
+                qdrant_backfill_active: env_flag("QDRANT_BACKFILL_ACTIVE"),
+                cpu_mode: env_flag("MAINRAG_CPU_MODE"),
                 backfill_oversampling_factor: {
                     let factor: u64 = env::var("BACKFILL_OVERSAMPLING_FACTOR")
                         .unwrap_or_else(|_| "3".to_string())
@@ -265,5 +267,33 @@ impl Config {
             "host={} port={} user={} password=*** dbname={}",
             self.database.host, self.database.port, self.database.user, self.database.name
         )
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    env::var(name).map(|v| parse_env_flag(&v)).unwrap_or(false)
+}
+
+fn parse_env_flag(value: &str) -> bool {
+    value == "true" || value == "1"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_flag_defaults_false_when_missing() {
+        let var_name = format!("MAINRAG_TEST_MISSING_FLAG_{}", std::process::id());
+
+        assert!(!env_flag(&var_name));
+    }
+
+    #[test]
+    fn mainrag_cpu_mode_true_values_are_parsed() {
+        assert!(parse_env_flag("true"));
+        assert!(parse_env_flag("1"));
+        assert!(!parse_env_flag("false"));
+        assert!(!parse_env_flag("0"));
     }
 }
