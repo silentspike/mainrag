@@ -1925,6 +1925,7 @@ impl IndexService {
     }
 
     /// Flush a batch of chunks to DB + embedding pipeline. Returns (chunks_inserted, embeddings_created).
+    #[allow(clippy::too_many_arguments)]
     async fn flush_chunk_batch(
         &self,
         client: &deadpool_postgres::Client,
