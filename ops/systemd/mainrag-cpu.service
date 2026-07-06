@@ -1,0 +1,20 @@
+[Unit]
+Description=Start MainRAG in CPU-only mode
+Documentation=https://github.com/silentspike/mainrag
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/work/mainrag
+Environment=HOME=/root
+Environment=XDG_CONFIG_HOME=/root/.config
+ExecStart=/usr/local/bin/mainrag --cpu
+RemainAfterExit=yes
+TimeoutStartSec=15min
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mainrag-cpu
+
+[Install]
+WantedBy=multi-user.target

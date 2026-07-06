@@ -85,9 +85,6 @@ pub async fn hybrid_search(
         TenantContext::Agent { user_id }
     };
 
-    // Sprint 7.6: Get current search mode for response header
-    let search_mode = state.search.search_mode();
-
     let start = Instant::now();
     let default_limit = state.config.server.search_default_limit.unwrap_or(20);
     let max_limit = state.config.server.search_max_limit.unwrap_or(100);
@@ -133,7 +130,7 @@ pub async fn hybrid_search(
     let mut headers = HeaderMap::new();
     headers.insert(
         "X-Search-Mode",
-        HeaderValue::from_static(search_mode.header_value()),
+        HeaderValue::from_static(search_results.search_mode.header_value()),
     );
 
     Ok((
@@ -144,7 +141,7 @@ pub async fn hybrid_search(
             total: search_results.total,
             took_ms,
             quality_tier: Some(tier.as_str().to_string()),
-            reranked: Some(should_rerank),
+            reranked: Some(search_results.reranked),
             compression_ratio,
             expanded_query: search_results.expanded_query,
             expansion_terms: search_results.expansion_terms,
@@ -171,9 +168,6 @@ pub async fn keyword_search(
             .map_err(|_| AppError::Internal("Invalid user_id in claims".to_string()))?;
         TenantContext::Agent { user_id }
     };
-
-    // Sprint 7.6: Get current search mode for response header
-    let search_mode = state.search.search_mode();
 
     let start = Instant::now();
     let default_limit = state.config.server.search_default_limit.unwrap_or(20);
@@ -208,7 +202,7 @@ pub async fn keyword_search(
     let mut headers = HeaderMap::new();
     headers.insert(
         "X-Search-Mode",
-        HeaderValue::from_static(search_mode.header_value()),
+        HeaderValue::from_static(search_results.search_mode.header_value()),
     );
 
     Ok((

@@ -105,24 +105,43 @@ async fn main() -> anyhow::Result<()> {
 
 /// Full API server with background event processor
 async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Result<()> {
+    let cpu_mode = config.server.cpu_mode;
+    if cpu_mode {
+        tracing::warn!(
+            "MAINRAG CPU MODE — vector search/rerank/expansion disabled, FTS + intelligence only"
+        );
+    }
+
     // Create Qdrant client
     let qdrant = Arc::new(QdrantClient::new(&config.qdrant));
-    qdrant.health_check().await?;
-    tracing::info!("Qdrant connection established (on_disk mode)");
+    if cpu_mode {
+        tracing::warn!("CPU mode: skipping Qdrant startup health check");
+    } else {
+        qdrant.health_check().await?;
+        tracing::info!("Qdrant connection established (on_disk mode)");
+    }
 
     // K4-FIX4: Auto-create user_id payload index for tenant isolation (idempotent)
-    match qdrant.create_payload_index("user_id", "keyword").await {
-        Ok(()) => tracing::info!("Qdrant user_id payload index ensured"),
-        Err(e) => tracing::warn!(
-            "Could not create Qdrant user_id index (may already exist): {}",
-            e
-        ),
+    if cpu_mode {
+        tracing::warn!("CPU mode: skipping Qdrant user_id payload index creation");
+    } else {
+        match qdrant.create_payload_index("user_id", "keyword").await {
+            Ok(()) => tracing::info!("Qdrant user_id payload index ensured"),
+            Err(e) => tracing::warn!(
+                "Could not create Qdrant user_id index (may already exist): {}",
+                e
+            ),
+        }
     }
 
     // Create TEI client
     let tei = Arc::new(TeiClient::new(&config.tei));
-    tei.health_check().await?;
-    tracing::info!("TEI connection established");
+    if cpu_mode {
+        tracing::warn!("CPU mode: skipping TEI startup health check");
+    } else {
+        tei.health_check().await?;
+        tracing::info!("TEI connection established");
+    }
 
     // Create Reranker service (BGE reranker-base on port 8082)
     let reranker = Arc::new(RerankerService::new(config.tei.reranker_url.clone()));
@@ -136,15 +155,18 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
 
     // Create QueryExpander for synonym-based query expansion
     // Feature flag: QUERY_EXPANSION_ENABLED (default: true)
-    let query_expansion_enabled = std::env::var("QUERY_EXPANSION_ENABLED")
+    let query_expansion_enabled_from_env = std::env::var("QUERY_EXPANSION_ENABLED")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(true);
+    let query_expansion_enabled = !cpu_mode && query_expansion_enabled_from_env;
     let query_expander = Arc::new(services::QueryExpander::new(
         &config.qdrant,
         tei.clone(),
         query_expansion_enabled,
     ));
-    if query_expansion_enabled {
+    if cpu_mode {
+        tracing::warn!("CPU mode: query expansion forced disabled");
+    } else if query_expansion_enabled {
         tracing::info!("Query expansion enabled (synonyms_v1 collection)");
     } else {
         tracing::info!("Query expansion disabled");
@@ -191,6 +213,7 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
         query_expander,
         config.server.qdrant_backfill_active,
         config.server.backfill_oversampling_factor,
+        config.server.cpu_mode,
         domain_source_names,
     );
 
@@ -268,72 +291,79 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
     });
     tracing::info!("App state initialized with quality tiers (fast/balanced)");
 
-    // Start outbox worker for async Qdrant synchronization
-    let outbox_db = state.db.clone();
-    let outbox_qdrant = state.qdrant.clone();
-    let outbox_worker = Arc::new(OutboxWorker::new(outbox_db, outbox_qdrant));
+    if cpu_mode {
+        tracing::warn!(
+            "CPU mode: outbox worker, outbox purge task, and Qdrant health task disabled"
+        );
+        ::metrics::gauge!("qdrant_health_status").set(0.0);
+    } else {
+        // Start outbox worker for async Qdrant synchronization
+        let outbox_db = state.db.clone();
+        let outbox_qdrant = state.qdrant.clone();
+        let outbox_worker = Arc::new(OutboxWorker::new(outbox_db, outbox_qdrant));
 
-    // Spawn main processing loop
-    let worker_main = outbox_worker.clone();
-    tokio::spawn(async move {
-        worker_main.run().await;
-    });
+        // Spawn main processing loop
+        let worker_main = outbox_worker.clone();
+        tokio::spawn(async move {
+            worker_main.run().await;
+        });
 
-    // Spawn purge task (cleanup old done/failed entries every 1h)
-    let worker_purge = outbox_worker.clone();
-    tokio::spawn(async move {
-        worker_purge.run_purge_task().await;
-    });
+        // Spawn purge task (cleanup old done/failed entries every 1h)
+        let worker_purge = outbox_worker.clone();
+        tokio::spawn(async move {
+            worker_purge.run_purge_task().await;
+        });
 
-    // Spawn Qdrant health check task (updates qdrant_health_status gauge every 1min)
-    let qdrant_health = state.qdrant.clone();
-    tokio::spawn(async move {
-        use tokio::time::{interval, Duration};
-        let mut ticker = interval(Duration::from_secs(60)); // 1min
-        let mut consecutive_failures: u32 = 0;
+        // Spawn Qdrant health check task (updates qdrant_health_status gauge every 1min)
+        let qdrant_health = state.qdrant.clone();
+        tokio::spawn(async move {
+            use tokio::time::{interval, Duration};
+            let mut ticker = interval(Duration::from_secs(60)); // 1min
+            let mut consecutive_failures: u32 = 0;
 
-        // Set initial health status
-        ::metrics::gauge!("qdrant_health_status").set(1.0);
+            // Set initial health status
+            ::metrics::gauge!("qdrant_health_status").set(1.0);
 
-        loop {
-            ticker.tick().await;
-            match qdrant_health.health_check().await {
-                Ok(true) => {
-                    ::metrics::gauge!("qdrant_health_status").set(1.0);
-                    if consecutive_failures > 0 {
-                        tracing::info!(
-                            "Qdrant health recovered after {} failures",
-                            consecutive_failures
-                        );
-                        consecutive_failures = 0;
+            loop {
+                ticker.tick().await;
+                match qdrant_health.health_check().await {
+                    Ok(true) => {
+                        ::metrics::gauge!("qdrant_health_status").set(1.0);
+                        if consecutive_failures > 0 {
+                            tracing::info!(
+                                "Qdrant health recovered after {} failures",
+                                consecutive_failures
+                            );
+                            consecutive_failures = 0;
+                        }
                     }
-                }
-                Ok(false) => {
-                    // Qdrant returned non-success HTTP status
-                    ::metrics::gauge!("qdrant_health_status").set(0.0);
-                    consecutive_failures += 1;
-                    if consecutive_failures == 1 || consecutive_failures.is_multiple_of(10) {
-                        tracing::warn!(
-                            "Qdrant unhealthy (HTTP non-success, {} consecutive)",
-                            consecutive_failures
-                        );
+                    Ok(false) => {
+                        // Qdrant returned non-success HTTP status
+                        ::metrics::gauge!("qdrant_health_status").set(0.0);
+                        consecutive_failures += 1;
+                        if consecutive_failures == 1 || consecutive_failures.is_multiple_of(10) {
+                            tracing::warn!(
+                                "Qdrant unhealthy (HTTP non-success, {} consecutive)",
+                                consecutive_failures
+                            );
+                        }
                     }
-                }
-                Err(e) => {
-                    ::metrics::gauge!("qdrant_health_status").set(0.0);
-                    consecutive_failures += 1;
-                    // Log every Nth failure to avoid spam
-                    if consecutive_failures == 1 || consecutive_failures.is_multiple_of(10) {
-                        tracing::warn!(
-                            "Qdrant health check failed ({} consecutive): {}",
-                            consecutive_failures,
-                            e
-                        );
+                    Err(e) => {
+                        ::metrics::gauge!("qdrant_health_status").set(0.0);
+                        consecutive_failures += 1;
+                        // Log every Nth failure to avoid spam
+                        if consecutive_failures == 1 || consecutive_failures.is_multiple_of(10) {
+                            tracing::warn!(
+                                "Qdrant health check failed ({} consecutive): {}",
+                                consecutive_failures,
+                                e
+                            );
+                        }
                     }
                 }
             }
-        }
-    });
+        });
+    }
 
     // Create router
     let app = api::create_router(state);

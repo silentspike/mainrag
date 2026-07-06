@@ -17,21 +17,34 @@ jobs:
   analyze:
     name: Analyze ${{ matrix.language }}
     runs-on: ubuntu-latest
-    # CodeQL Rust support is still GA-limited to GitHub Advanced Security
-    # subscribers and public repos. On a private repo without GHAS this
-    # job will error with "Advanced Security must be enabled" — that is
-    # expected and non-blocking (continue-on-error).
-    continue-on-error: true
+    # GitHub Default CodeQL setup is enabled for this repository. Running this
+    # advanced workflow at the same time causes SARIF uploads to be rejected.
+    # Keep the historical check names green by default, and only run the
+    # advanced workflow when CODEQL_ADVANCED_ENABLED=true is set after default
+    # setup has been disabled in repository settings.
     strategy:
       fail-fast: false
       matrix:
         language: [rust, actions]
     steps:
+      - name: Skip advanced CodeQL
+        if: ${{ vars.CODEQL_ADVANCED_ENABLED != 'true' }}
+        run: |
+          echo "Advanced CodeQL workflow is disabled because GitHub Default CodeQL setup is enabled."
+          echo "Set repository variable CODEQL_ADVANCED_ENABLED=true only after disabling Default CodeQL setup."
+
       - uses: actions/checkout@v4
+        if: ${{ vars.CODEQL_ADVANCED_ENABLED == 'true' }}
+
       - uses: github/codeql-action/init@v3
+        if: ${{ vars.CODEQL_ADVANCED_ENABLED == 'true' }}
         with:
           languages: ${{ matrix.language }}
+
       - uses: github/codeql-action/autobuild@v3
+        if: ${{ vars.CODEQL_ADVANCED_ENABLED == 'true' }}
+
       - uses: github/codeql-action/analyze@v3
+        if: ${{ vars.CODEQL_ADVANCED_ENABLED == 'true' }}
         with:
           category: "/language:${{ matrix.language }}"

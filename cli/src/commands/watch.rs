@@ -2,7 +2,7 @@
 //!
 //! Enterprise-grade watch with:
 //! - In-flight tracking (prevents re-queuing files during processing)
-//! - Per-file rate limiting (15s cooldown)
+//! - Per-file rate limiting (configurable cooldown)
 //! - Signature cache (mtime + size check)
 //! - Adaptive debounce (flush on idle OR max wait)
 //! - Incremental sync (only changed files, not full source)
@@ -10,14 +10,21 @@
 use crate::client::ApiClient;
 use anyhow::Result;
 use colored::Colorize;
-use notify::RecursiveMode;
+use notify::{RecursiveMode, Watcher};
 use notify_debouncer_mini::new_debouncer;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-/// Minimum interval between syncs for the same file (rate limiting)
-const MIN_SYNC_INTERVAL: Duration = Duration::from_secs(15);
+/// Minimum interval between syncs for the same file (rate limiting), in seconds.
+const DEFAULT_MIN_SYNC_INTERVAL_SECS: u64 = 15;
+
+/// Primary env var for watcher per-file sync cooldown.
+const MIN_SYNC_INTERVAL_ENV: &str = "MAINRAG_WATCH_MIN_SYNC_SECS";
+
+/// Older spelling kept as a compatibility fallback.
+const LEGACY_MIN_SYNC_INTERVAL_ENV: &str = "MAINRAG_WATCH_MIN_SYNC_INTERVAL_S";
 
 /// Flush pending files after this idle duration
 const IDLE_FLUSH: Duration = Duration::from_millis(300);
@@ -36,6 +43,23 @@ const SUPPORTED_EXTENSIONS: &[&str] = &[
     "xml", "xsl", "xsd", "svg", "yaml", "yml", "json", "jsonc", "jsonl", "toml", "sql", "md",
     "markdown", "scm", "ss", "rkt", "txt", "pdf",
 ];
+
+fn parse_min_sync_interval_secs(primary: Option<&str>, legacy: Option<&str>) -> u64 {
+    primary
+        .or(legacy)
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_MIN_SYNC_INTERVAL_SECS)
+}
+
+fn min_sync_interval() -> Duration {
+    let primary = std::env::var(MIN_SYNC_INTERVAL_ENV).ok();
+    let legacy = std::env::var(LEGACY_MIN_SYNC_INTERVAL_ENV).ok();
+    Duration::from_secs(parse_min_sync_interval_secs(
+        primary.as_deref(),
+        legacy.as_deref(),
+    ))
+}
 
 /// Directories to ignore
 const IGNORE_DIRS: &[&str] = &[
@@ -88,6 +112,8 @@ impl FileSignature {
 
 /// Watch sources for changes and trigger incremental re-sync
 pub async fn watch(client: &ApiClient, source_name: Option<&str>, daemon: bool) -> Result<()> {
+    let min_sync_interval = min_sync_interval();
+
     // Get sources to watch
     let response = client.list_sources().await?;
     let sources = &response.sources;
@@ -135,6 +161,10 @@ pub async fn watch(client: &ApiClient, source_name: Option<&str>, daemon: bool) 
     } else {
         println!("{}", "Watching for changes (Ctrl+C to stop)...".dimmed());
     }
+    println!(
+        "{}",
+        format!("Per-file sync interval: {}s", min_sync_interval.as_secs()).dimmed()
+    );
 
     // Set up debounced watcher
     let (tx, rx) = std::sync::mpsc::channel();
@@ -143,19 +173,8 @@ pub async fn watch(client: &ApiClient, source_name: Option<&str>, daemon: bool) 
     // Watch all paths (gracefully skip sources with permission errors)
     let mut watched_count = 0;
     for (_, name, path) in &sources_to_watch {
-        match debouncer.watcher().watch(path, RecursiveMode::Recursive) {
-            Ok(()) => {
-                watched_count += 1;
-            }
-            Err(e) => {
-                eprintln!(
-                    "  {} Skipping source '{}': {} ({})",
-                    "⚠".yellow(),
-                    name,
-                    e,
-                    path.display()
-                );
-            }
+        if watch_source(debouncer.watcher(), name, path) {
+            watched_count += 1;
         }
     }
 
@@ -208,7 +227,7 @@ pub async fn watch(client: &ApiClient, source_name: Option<&str>, daemon: bool) 
                     if let Some((_id, name, _base_path)) = source {
                         // Rate limiting: skip if synced recently
                         if let Some(last_time) = last_sync_time.get(path) {
-                            if now.duration_since(*last_time) < MIN_SYNC_INTERVAL {
+                            if now.duration_since(*last_time) < min_sync_interval {
                                 continue;
                             }
                         }
@@ -336,6 +355,89 @@ fn should_ignore(path: &std::path::Path) -> bool {
     })
 }
 
+fn watch_source<W: Watcher + ?Sized>(watcher: &mut W, name: &str, path: &Path) -> bool {
+    match watcher.watch(path, RecursiveMode::Recursive) {
+        Ok(()) => true,
+        Err(recursive_error) => {
+            let mut dirs = Vec::new();
+            let mut skipped_dirs = 0usize;
+            collect_watchable_directories(path, &mut dirs, &mut skipped_dirs);
+
+            let mut watched_dirs = 0usize;
+            let mut failed_dirs = 0usize;
+            for dir in &dirs {
+                match watcher.watch(dir, RecursiveMode::NonRecursive) {
+                    Ok(()) => watched_dirs += 1,
+                    Err(_) => failed_dirs += 1,
+                }
+            }
+
+            if watched_dirs > 0 {
+                eprintln!(
+                    "  {} Recursive watch failed for source '{}': {}; using non-recursive fallback on {} readable dirs ({} unreadable/skipped, {} watch failures)",
+                    "⚠".yellow(),
+                    name,
+                    recursive_error,
+                    watched_dirs,
+                    skipped_dirs,
+                    failed_dirs
+                );
+                true
+            } else {
+                eprintln!(
+                    "  {} Skipping source '{}': {} ({})",
+                    "⚠".yellow(),
+                    name,
+                    recursive_error,
+                    path.display()
+                );
+                false
+            }
+        }
+    }
+}
+
+fn collect_watchable_directories(path: &Path, dirs: &mut Vec<PathBuf>, skipped_dirs: &mut usize) {
+    if should_ignore(path) {
+        return;
+    }
+
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => {
+            *skipped_dirs += 1;
+            return;
+        }
+    };
+
+    dirs.push(path.to_path_buf());
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                *skipped_dirs += 1;
+                continue;
+            }
+        };
+        let child_path = entry.path();
+        if should_ignore(&child_path) {
+            continue;
+        }
+
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => {
+                *skipped_dirs += 1;
+                continue;
+            }
+        };
+        if file_type.is_dir() {
+            collect_watchable_directories(&child_path, dirs, skipped_dirs);
+        }
+    }
+}
+
 /// Check if file has a supported extension
 fn is_supported_file(path: &std::path::Path) -> bool {
     // Special case: Dockerfile
@@ -349,4 +451,59 @@ fn is_supported_file(path: &std::path::Path) -> bool {
         .and_then(|ext| ext.to_str())
         .map(|ext| SUPPORTED_EXTENSIONS.contains(&ext))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn min_sync_interval_defaults_to_fifteen_seconds() {
+        assert_eq!(parse_min_sync_interval_secs(None, None), 15);
+    }
+
+    #[test]
+    fn min_sync_interval_uses_primary_env_value_first() {
+        assert_eq!(parse_min_sync_interval_secs(Some("600"), Some("30")), 600);
+    }
+
+    #[test]
+    fn min_sync_interval_accepts_legacy_fallback() {
+        assert_eq!(parse_min_sync_interval_secs(None, Some("45")), 45);
+    }
+
+    #[test]
+    fn min_sync_interval_rejects_zero_and_invalid_values() {
+        assert_eq!(parse_min_sync_interval_secs(Some("0"), Some("45")), 15);
+        assert_eq!(parse_min_sync_interval_secs(Some("not-a-number"), None), 15);
+    }
+
+    #[test]
+    fn collect_watchable_directories_skips_ignored_subtrees() {
+        let root = std::env::temp_dir().join(format!(
+            "mainrag-watch-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+
+        fs::create_dir_all(root.join("src/nested")).unwrap();
+        fs::create_dir_all(root.join(".git/objects")).unwrap();
+
+        let mut dirs = Vec::new();
+        let mut skipped_dirs = 0usize;
+        collect_watchable_directories(&root, &mut dirs, &mut skipped_dirs);
+
+        assert_eq!(skipped_dirs, 0);
+        assert!(dirs.contains(&root));
+        assert!(dirs.contains(&root.join("src")));
+        assert!(dirs.contains(&root.join("src/nested")));
+        assert!(!dirs.iter().any(|dir| dir.ends_with(".git")));
+        assert!(!dirs.iter().any(|dir| dir.ends_with(".git/objects")));
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }
