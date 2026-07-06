@@ -320,7 +320,7 @@ impl IntelligenceService {
         source_id: Option<i64>,
     ) -> Result<Vec<CallChainEntry>> {
         let client = self.get_rls_client().await?;
-        let max_depth = max_depth.min(10).max(1) as usize;
+        let max_depth = max_depth.clamp(1, 10) as usize;
 
         let mut results: Vec<CallChainEntry> = Vec::new();
         let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();

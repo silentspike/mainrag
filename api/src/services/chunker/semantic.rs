@@ -374,18 +374,17 @@ impl Chunker for SemanticChunker {
 
         // Conversation files get special conversation-aware chunking
         // Handles: Claude Code JSONL, Codex JSONL, Gemini JSON
-        if lang == "jsonl" || lang == "json" {
-            if content.contains(r#""type":"user""#)
+        if (lang == "jsonl" || lang == "json")
+            && (content.contains(r#""type":"user""#)
                 || content.contains(r#""type":"assistant""#)
                 || content.contains(r#""type":"gemini""#)
                 || content.contains(r#""type": "gemini""#)
                 || content.contains(r#""session_id""#)
                 || content.contains(r#""type":"response_item""#)
-                || content.contains(r#""type": "response_item""#)
-            {
-                info!("Using conversation chunker for file (lang={})", lang);
-                return super::jsonl::JsonlChunker::default().chunk(content, language);
-            }
+                || content.contains(r#""type": "response_item""#))
+        {
+            info!("Using conversation chunker for file (lang={})", lang);
+            return super::jsonl::JsonlChunker::default().chunk(content, language);
         }
 
         // Normalize language extension to parser key (e.g., "py" → "python")

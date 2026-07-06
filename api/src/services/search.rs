@@ -1154,6 +1154,13 @@ impl SearchService {
         // The GIN index scan + ts_rank_cd is the expensive part — we limit to top 500
         // candidates per channel BEFORE joining to files/sources for tenant filtering.
         const FTS_CHANNEL_LIMIT: i64 = 500;
+        let tsquery_en = if is_expanded {
+            "to_tsquery('english', $1)"
+        } else if is_phrase {
+            "phraseto_tsquery('english', $1)"
+        } else {
+            "websearch_to_tsquery('english', $1)"
+        };
         let base_query = format!(
             r#"
             SELECT dual.chunk_id, MAX(dual.score)::real as score,
@@ -1178,13 +1185,7 @@ impl SearchService {
             "#,
             channel_limit = FTS_CHANNEL_LIMIT,
             tsquery = tsquery,
-            tsquery_en = if is_expanded {
-                "to_tsquery('english', $1)".to_string()
-            } else if is_phrase {
-                "phraseto_tsquery('english', $1)".to_string()
-            } else {
-                "websearch_to_tsquery('english', $1)".to_string()
-            }
+            tsquery_en = tsquery_en
         );
 
         // Source-diversity: limit results per source to prevent one large repo from
@@ -1196,6 +1197,16 @@ impl SearchService {
         // - Still allows 100 results from the queried codebase (enough for recall)
         // - Caps mega-repos (kubernetes 391K chunks) from drowning other sources
         const FTS_PER_SOURCE_LIMIT: i64 = 100;
+        let diversity_inner_query = format!(
+            "(SELECT c.id as chunk_id, ts_rank_cd(c.fts_vector, {tsquery}, 1)::real as score, c.file_id \
+             FROM chunks c WHERE c.fts_vector @@ {tsquery} ORDER BY score DESC LIMIT {cl}) \
+             UNION ALL \
+             (SELECT c.id as chunk_id, (ts_rank_cd(c.fts_vector_english, {tsquery_en}, 1) * 0.8)::real as score, c.file_id \
+             FROM chunks c WHERE c.fts_vector_english @@ {tsquery_en} ORDER BY score DESC LIMIT {cl})",
+            tsquery = tsquery,
+            tsquery_en = tsquery_en,
+            cl = FTS_CHANNEL_LIMIT
+        );
 
         // Tenant/source filters applied on the outer wrapper after JOINs.
         let rows = match tenant {
@@ -1217,22 +1228,7 @@ impl SearchService {
                             JOIN sources s ON s.id = f.source_id \
                             WHERE s.user_id = $2 GROUP BY dual.chunk_id, f.source_id\
                         ) sub WHERE rn <= $3 ORDER BY score DESC LIMIT $4",
-                        inner = format!(
-                            "(SELECT c.id as chunk_id, ts_rank_cd(c.fts_vector, {tsquery}, 1)::real as score, c.file_id \
-                             FROM chunks c WHERE c.fts_vector @@ {tsquery} ORDER BY score DESC LIMIT {cl}) \
-                             UNION ALL \
-                             (SELECT c.id as chunk_id, (ts_rank_cd(c.fts_vector_english, {tsquery_en}, 1) * 0.8)::real as score, c.file_id \
-                             FROM chunks c WHERE c.fts_vector_english @@ {tsquery_en} ORDER BY score DESC LIMIT {cl})",
-                            tsquery = tsquery,
-                            tsquery_en = if is_expanded {
-                                "to_tsquery('english', $1)".to_string()
-                            } else if is_phrase {
-                                "phraseto_tsquery('english', $1)".to_string()
-                            } else {
-                                "websearch_to_tsquery('english', $1)".to_string()
-                            },
-                            cl = FTS_CHANNEL_LIMIT
-                        )
+                        inner = diversity_inner_query
                     );
                     client
                         .query(
@@ -1260,22 +1256,7 @@ impl SearchService {
                             JOIN sources s ON s.id = f.source_id \
                             GROUP BY dual.chunk_id, f.source_id\
                         ) sub WHERE rn <= $2 ORDER BY score DESC LIMIT $3",
-                        inner = format!(
-                            "(SELECT c.id as chunk_id, ts_rank_cd(c.fts_vector, {tsquery}, 1)::real as score, c.file_id \
-                             FROM chunks c WHERE c.fts_vector @@ {tsquery} ORDER BY score DESC LIMIT {cl}) \
-                             UNION ALL \
-                             (SELECT c.id as chunk_id, (ts_rank_cd(c.fts_vector_english, {tsquery_en}, 1) * 0.8)::real as score, c.file_id \
-                             FROM chunks c WHERE c.fts_vector_english @@ {tsquery_en} ORDER BY score DESC LIMIT {cl})",
-                            tsquery = tsquery,
-                            tsquery_en = if is_expanded {
-                                "to_tsquery('english', $1)".to_string()
-                            } else if is_phrase {
-                                "phraseto_tsquery('english', $1)".to_string()
-                            } else {
-                                "websearch_to_tsquery('english', $1)".to_string()
-                            },
-                            cl = FTS_CHANNEL_LIMIT
-                        )
+                        inner = diversity_inner_query
                     );
                     client
                         .query(
