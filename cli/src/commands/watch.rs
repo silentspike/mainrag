@@ -21,10 +21,10 @@ use std::time::{Duration, Instant, SystemTime};
 const DEFAULT_MIN_SYNC_INTERVAL_SECS: u64 = 15;
 
 /// Primary env var for watcher per-file sync cooldown.
-const MIN_SYNC_INTERVAL_ENV: &str = "MAINRAG_WATCH_MIN_SYNC_INTERVAL_S";
+const MIN_SYNC_INTERVAL_ENV: &str = "MAINRAG_WATCH_MIN_SYNC_SECS";
 
-/// Older env var used by the API-side watch service; kept as a compatibility fallback.
-const LEGACY_MIN_SYNC_INTERVAL_ENV: &str = "MAINRAG_WATCH_MIN_SYNC_SECS";
+/// Older spelling kept as a compatibility fallback.
+const LEGACY_MIN_SYNC_INTERVAL_ENV: &str = "MAINRAG_WATCH_MIN_SYNC_INTERVAL_S";
 
 /// Flush pending files after this idle duration
 const IDLE_FLUSH: Duration = Duration::from_millis(300);

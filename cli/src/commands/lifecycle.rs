@@ -303,7 +303,7 @@ fn write_cpu_dropins() -> Result<()> {
     for unit in WATCHER_UNITS {
         write_root_file(
             &watcher_dropin_path(unit),
-            "[Service]\nEnvironment=MAINRAG_WATCH_MIN_SYNC_INTERVAL_S=600\n",
+            "[Service]\nEnvironment=MAINRAG_WATCH_MIN_SYNC_SECS=600\n",
         )?;
     }
     Ok(())
