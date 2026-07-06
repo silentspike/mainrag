@@ -213,6 +213,7 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
         query_expander,
         config.server.qdrant_backfill_active,
         config.server.backfill_oversampling_factor,
+        config.server.cpu_mode,
         domain_source_names,
     );
 
