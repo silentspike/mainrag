@@ -535,14 +535,37 @@ impl IndexService {
                 continue;
             }
 
-            // Read file content
-            let content = match fs::read_to_string(file_path).await {
-                Ok(c) => c,
-                Err(e) => {
-                    let err_msg = format!("Failed to read {}: {}", file_path.display(), e);
-                    warn!("{}", err_msg);
-                    stats.errors.push(err_msg);
-                    continue;
+            // MEMORY GUARD: large conversation files are streamed from disk instead of
+            // being loaded whole. Without this the watcher path pulled entire files into
+            // memory (a 3 GB session meant a >3 GB spike) because process_raw_file only
+            // takes the streaming route when content is empty AND source_path is set —
+            // a condition this path could never satisfy. Mirrors plugins/fs.rs:239-252.
+            let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0) as usize;
+            let is_conversation_ext = file_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("jsonl") || e.eq_ignore_ascii_case("json"))
+                .unwrap_or(false);
+            let stream_from_disk =
+                is_conversation_ext && file_size > crate::plugins::LARGE_FILE_THRESHOLD;
+
+            // Read file content (skipped entirely when streaming)
+            let content = if stream_from_disk {
+                info!(
+                    "Large conversation file ({} MB): streaming from disk instead of loading: {}",
+                    file_size / (1024 * 1024),
+                    file_path.display()
+                );
+                String::new()
+            } else {
+                match fs::read_to_string(file_path).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let err_msg = format!("Failed to read {}: {}", file_path.display(), e);
+                        warn!("{}", err_msg);
+                        stats.errors.push(err_msg);
+                        continue;
+                    }
                 }
             };
 
@@ -584,11 +607,20 @@ impl IndexService {
 
             let raw_file = RawFile {
                 path: rel_path,
-                content: content.clone(),
-                size: content.len(),
+                // `size` is read before `content` is moved in — field order matters here.
+                size: if stream_from_disk {
+                    file_size
+                } else {
+                    content.len()
+                },
+                content,
                 language,
                 last_modified: None,
-                source_path: None,
+                source_path: if stream_from_disk {
+                    Some(file_path.clone())
+                } else {
+                    None
+                },
             };
 
             match self
@@ -861,9 +893,17 @@ impl IndexService {
                                         .await?
                                         .get(0);
 
-                                    // Expect at least 1 chunk per 10KB of old content
+                                    // Sanity guard against a half-finished previous sync.
+                                    // The threshold is derived from measurement, not guessed:
+                                    // conversation JSONL produce roughly 87-400 KB per chunk
+                                    // (4 MB file -> 48 chunks, 121 MB file -> 301 chunks).
+                                    // The former 1-chunk-per-10KB assumption was 9-40x too
+                                    // optimistic and therefore rejected *every* file, forcing a
+                                    // full re-chunk on each sync. 1 chunk per 1 MB stays safely
+                                    // below the real rate while still catching truncated indexes
+                                    // (e.g. 1.4 GB capped at 500 chunks -> expects 1400 -> rejected).
                                     let expected_min_chunks =
-                                        ((existing_size as i64) / 10_000).max(1);
+                                        ((existing_size as i64) / 1_000_000).max(1);
 
                                     if chunk_count >= expected_min_chunks {
                                         is_append_only = true;
