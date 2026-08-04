@@ -1368,7 +1368,8 @@ impl IndexService {
             b_chunk_types.push(chunk_type.to_string());
             b_content_hashes.push(chunk_hash.clone());
             b_content_compressed.push(chunk_compressed);
-            b_content_texts.push(chunk_text.clone());
+            // PostgreSQL rejects NUL bytes in text columns and would abort the whole batch.
+            b_content_texts.push(crate::utils::text::strip_nul_bytes(chunk_text));
             b_start_lines.push(start_line as i32);
             b_end_lines.push(end_line as i32);
             b_levels.push(chunk.level as i16);
@@ -2096,7 +2097,8 @@ impl IndexService {
             b_chunk_types.push(format!("{:?}", chunk.chunk_type).to_lowercase());
             b_content_hashes.push(hash.clone());
             b_content_compressed.push(compressed);
-            b_content_texts.push(chunk.text.clone());
+            // PostgreSQL rejects NUL bytes in text columns and would abort the whole batch.
+            b_content_texts.push(crate::utils::text::strip_nul_bytes(&chunk.text));
             b_start_lines.push(chunk.start_line as i32);
             b_end_lines.push(chunk.end_line as i32);
             b_levels.push(chunk.level as i16);
