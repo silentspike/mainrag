@@ -1957,6 +1957,13 @@ impl IndexService {
             let chunker = crate::services::chunker::jsonl::JsonlChunker::default();
             let mut line_buffer = String::with_capacity(256 * 1024); // 256KB message accumulator
             let mut accumulated_chunks = Vec::new();
+            // The chunker only ever sees the current 256 KB window, so the line numbers it
+            // returns are relative to that window. Without shifting them every window would
+            // restart at line 1 and the stored positions would be wrong (a 4000-line file
+            // ended up with max(end_line)=171). Track how many lines preceded the current
+            // window and rebase each chunk onto absolute file lines.
+            let mut lines_before_window: usize = resume_line as usize;
+            let mut lines_in_window: usize = 0;
 
             for line_result in reader.lines() {
                 let line =
@@ -1968,11 +1975,18 @@ impl IndexService {
                 }
                 line_buffer.push_str(&line);
                 line_buffer.push('\n');
+                lines_in_window += 1;
 
                 // When buffer exceeds 256KB, chunk what we have and flush
                 if line_buffer.len() > 256 * 1024 {
-                    let batch_chunks = chunker.chunk(&line_buffer, language.as_deref());
+                    let mut batch_chunks = chunker.chunk(&line_buffer, language.as_deref());
+                    for ch in &mut batch_chunks {
+                        ch.start_line += lines_before_window;
+                        ch.end_line += lines_before_window;
+                    }
                     accumulated_chunks.extend(batch_chunks);
+                    lines_before_window += lines_in_window;
+                    lines_in_window = 0;
                     line_buffer.clear();
 
                     // Flush when we have enough chunks
@@ -1998,7 +2012,11 @@ impl IndexService {
 
             // Flush remaining
             if !line_buffer.is_empty() {
-                let batch_chunks = chunker.chunk(&line_buffer, language.as_deref());
+                let mut batch_chunks = chunker.chunk(&line_buffer, language.as_deref());
+                for ch in &mut batch_chunks {
+                    ch.start_line += lines_before_window;
+                    ch.end_line += lines_before_window;
+                }
                 accumulated_chunks.extend(batch_chunks);
             }
             if !accumulated_chunks.is_empty() {
@@ -2011,7 +2029,9 @@ impl IndexService {
                         rel_path,
                         &accumulated_chunks,
                         &language,
-                        resume_line,
+                        // 0: chunk line numbers were already rebased to absolute
+                        // file lines above (including the append resume offset).
+                        0,
                     )
                     .await?;
                 total_chunks += c;
