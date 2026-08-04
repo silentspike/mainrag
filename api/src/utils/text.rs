@@ -76,3 +76,26 @@ mod tests {
         assert_eq!(slugify("v1.2.3"), "v1-2-3");
     }
 }
+
+/// Strip NUL bytes so a string can be stored in a PostgreSQL `text` column.
+///
+/// PostgreSQL rejects `0x00` inside text values with
+/// `invalid byte sequence for encoding "UTF8": 0x00`, which aborts the whole
+/// batch insert. Conversation transcripts occasionally carry NUL bytes (binary
+/// blobs pasted into tool output, truncated writes), so chunk text is cleaned
+/// before it reaches the database. Everything else is left untouched.
+///
+/// # Examples
+///
+/// ```
+/// use mainrag_api::utils::text::strip_nul_bytes;
+/// assert_eq!(strip_nul_bytes("ab\0cd"), "abcd");
+/// assert_eq!(strip_nul_bytes("clean"), "clean");
+/// ```
+pub fn strip_nul_bytes(input: &str) -> String {
+    if input.contains('\0') {
+        input.replace('\0', "")
+    } else {
+        input.to_string()
+    }
+}
