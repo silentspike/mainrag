@@ -57,6 +57,7 @@ configure_flags=(
     ./configure --prefix="$install_prefix" "${configure_flags[@]}"
     make -j"$(getconf _NPROCESSORS_ONLN)"
     make install
+    make -C contrib/pg_trgm install
 )
 
 curl --fail --location --silent --show-error "$vector_url" --output "$work_dir/pgvector.tar.gz"
