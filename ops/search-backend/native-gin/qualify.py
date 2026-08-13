@@ -54,7 +54,7 @@ def run(
     if check and result.returncode != 0:
         command = Path(arguments[0]).name
         detail = result.stderr.strip().splitlines()
-        suffix = f": {detail[-1]}" if detail else ""
+        suffix = f": {' | '.join(detail[-12:])}" if detail else ""
         raise RuntimeError(
             f"{command} failed with exit code {result.returncode}{suffix}"
         )
