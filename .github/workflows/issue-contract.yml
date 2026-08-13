@@ -1,0 +1,32 @@
+name: Issue contract
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: issue-contract-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: issue-contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out the exact trusted base revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Validate PR and primary issue contracts
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const validate = require('./.github/scripts/validate-pr-contract.cjs');
+            await validate({ github, context, core });

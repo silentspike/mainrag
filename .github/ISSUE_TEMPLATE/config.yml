@@ -3,3 +3,6 @@ contact_links:
   - name: Search existing issues
     url: https://github.com/silentspike/mainrag/issues?q=is%3Aissue
     about: Please search before filing a new issue.
+  - name: Report a security vulnerability privately
+    url: https://github.com/silentspike/mainrag/security/advisories/new
+    about: Do not disclose credentials, vulnerabilities, or private evidence in a public issue.
