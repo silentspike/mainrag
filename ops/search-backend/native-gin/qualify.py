@@ -226,7 +226,7 @@ CREATE TABLE qualification_interrupt(
 );
 INSERT INTO qualification_interrupt(id, body)
 SELECT value, 'alpha ' || md5(value::TEXT) || ' beta ' || md5((value + 1)::TEXT)
-  FROM generate_series(1, 250000) AS value;
+  FROM generate_series(1, 2000000) AS value;
 """
             )
             interrupt = subprocess.Popen(
