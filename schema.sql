@@ -558,3 +558,4 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag;
 -- this psql-relative include keeps the historical bootstrap in sync.
 \ir migrations/029_storage_v2_generations.sql
 \ir migrations/030_storage_v2_content_bodies.sql
+\ir migrations/031_storage_v2_content_graph.sql
