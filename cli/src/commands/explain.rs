@@ -8,6 +8,7 @@ pub async fn run(
     client: &ApiClient,
     symbol: &str,
     source: Option<&str>,
+    generation: Option<&str>,
     depth: Option<u32>,
     json_output: bool,
 ) -> Result<()> {
@@ -15,6 +16,14 @@ pub async fn run(
         eprint!("{}", "Tracing delegation chain...".cyan());
     }
 
+    if let Some(generation) = generation {
+        let source = source.ok_or_else(|| anyhow::anyhow!("--generation requires --source"))?;
+        let result = client
+            .shadow_intelligence("explain", source, generation, &[("name", Some(symbol))])
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
     let chains = client.explain_path(symbol, source, depth).await?;
 
     if json_output {

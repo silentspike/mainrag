@@ -74,7 +74,9 @@ INSERT INTO users VALUES
 INSERT INTO sources(id, name, type, path) VALUES
     (1, 'synthetic-one', 'fixture', 'synthetic-one'),
     (2, 'synthetic-two', 'fixture', 'synthetic-two'),
-    (3, 'synthetic-writer', 'fixture', 'synthetic-writer');
+    (3, 'synthetic-writer', 'fixture', 'synthetic-writer'),
+    (4, 'synthetic-intelligence-export', 'fixture', 'synthetic-intelligence-export'),
+    (5, 'synthetic-intelligence-import', 'fixture', 'synthetic-intelligence-import');
 INSERT INTO fixture_source_access VALUES
     ('{WRITER_ID}', 1, TRUE, TRUE), ('{WRITER_ID}', 3, TRUE, TRUE),
     ('{OTHER_ID}', 2, TRUE, TRUE);
@@ -525,6 +527,447 @@ SELECT storage_v2_update_append_frontier(
             ),
             "0",
             "global analysis cache must not be readable through source authority",
+        )
+
+    def test_intelligence_provenance_retry_and_round_trip(self) -> None:
+        node_id, view_id, digest_hex = self.make_projection("fn alpha() {}")
+        run_export = self.begin(4, "1" * 63 + "4", "2" * 63 + "4")
+        self.stage(
+            run_export,
+            "src/lib.rs",
+            "fn alpha() {}",
+            node_id,
+            view_id,
+            digest_hex,
+        )
+        self.complete_analysis(digest_hex)
+        self.commit(run_export, 1)
+        run_import = self.begin(5, "1" * 63 + "5", "2" * 63 + "5")
+        self.stage(
+            run_import,
+            "src/lib.rs",
+            "fn alpha() {}",
+            node_id,
+            view_id,
+            digest_hex,
+        )
+        self.commit(run_import, 1)
+
+        artifact_id, occurrence_id = map(
+            int,
+            self.sql(
+                f"SELECT artifact_version_id || ':' || occurrence_id "
+                f"FROM storage_v2_ingest_run_item WHERE run_id = {run_export};"
+            ).split(":"),
+        )
+        symbol_occurrence_id, symbol_id = map(
+            int,
+            self.sql(
+                self.admin(
+                    f"""
+WITH occurrence_row AS (
+    SELECT storage_v2_put_symbol_occurrence(
+        4, {artifact_id}, {occurrence_id}, 'rust:src/lib.rs:alpha:function',
+        'rust', 'function', 'crate::alpha', 'fn alpha()', 'synthetic docs',
+        'public', '{{"kind":"function","calls":["crate::beta"]}}'::JSONB,
+        '{{"line_start":1,"line_end":1}}'::JSONB
+    ) AS value
+)
+SELECT (value).id || ':' || (value).symbol_id FROM occurrence_row;
+"""
+                )
+            ).split(":"),
+        )
+        beta_occurrence_id, beta_symbol_id = map(
+            int,
+            self.sql(
+                self.admin(
+                    f"""
+WITH occurrence_row AS (
+    SELECT storage_v2_put_symbol_occurrence(
+        4, {artifact_id}, {occurrence_id}, 'rust:src/lib.rs:beta:function',
+        'rust', 'function', 'crate::beta', 'fn beta()', NULL,
+        'private', '{{"kind":"function"}}'::JSONB,
+        '{{"line_start":2,"line_end":2}}'::JSONB
+    ) AS value
+)
+SELECT (value).id || ':' || (value).symbol_id FROM occurrence_row;
+"""
+                )
+            ).split(":"),
+        )
+
+        self.sql(
+            self.admin(
+                "SELECT storage_v2_put_intelligence_profile("
+                "4, 'fixture-domain', 1, "
+                "'{\"fields\":{\"layer\":{\"rule\":\"public-api\"}}}'::JSONB);"
+            )
+        )
+        provenance = (
+            '{"layer":{"profile_id":"fixture-domain","profile_version":1,'
+            '"rule_id":"public-api","evidence":"visibility=public"}}'
+        )
+        card_sql = self.admin(
+            f"""
+SELECT encode(output_sha256, 'hex') FROM storage_v2_put_symbol_card(
+    {symbol_occurrence_id}, 'structural-v1/domain-fixture@1',
+    '{{"name":"alpha","kind":"function","signature":"fn alpha()",'
+    '"documentation":"synthetic docs","structure":{{"calls":1}}}}'::JSONB,
+    '{{"layer":"api","side_effect":"unknown","resource":"unknown",'
+    '"delegation_target":"unknown"}}'::JSONB,
+    '{provenance}'::JSONB, 'fixture-domain', 1
+);
+"""
+        )
+        first_hash = self.sql(card_sql)
+        self.assertEqual(self.sql(card_sql), first_hash, "normalized card output must be byte-stable")
+        self.assert_sql_fails(
+            self.admin(
+                f"SELECT storage_v2_put_symbol_card({symbol_occurrence_id}, "
+                "'structural-v1/domain-fixture@1', "
+                "'{\"name\":\"alpha\",\"kind\":\"function\",\"structure\":{\"calls\":99}}'::JSONB, "
+                "'{\"layer\":\"api\",\"side_effect\":\"unknown\","
+                "\"resource\":\"unknown\",\"delegation_target\":\"unknown\"}'::JSONB, "
+                f"'{provenance}'::JSONB, 'fixture-domain', 1);"
+            ),
+            "analysis profile output collision",
+        )
+        self.sql(
+            self.admin(
+                f"SELECT storage_v2_put_symbol_card({beta_occurrence_id}, 'structural-v1', "
+                "'{\"name\":\"beta\",\"kind\":\"function\",\"signature\":\"fn beta()\","
+                "\"documentation\":null,\"structure\":{}}'::JSONB, "
+                "'{\"layer\":\"unknown\",\"side_effect\":\"unknown\","
+                "\"resource\":\"unknown\",\"delegation_target\":\"unknown\"}'::JSONB, "
+                "'{}'::JSONB, NULL, NULL);"
+            )
+        )
+        bodies_before_profile_change = self.sql("SELECT COUNT(*) FROM content_body;")
+        self.sql(
+            self.admin(
+                "SELECT storage_v2_put_intelligence_profile("
+                "4, 'fixture-domain', 2, "
+                "'{\"fields\":{\"layer\":{\"rule\":\"internal-api-v2\"}}}'::JSONB);"
+            )
+        )
+        provenance_v2 = (
+            '{"layer":{"profile_id":"fixture-domain","profile_version":2,'
+            '"rule_id":"internal-api-v2","evidence":"fixture profile v2"}}'
+        )
+        second_profile_hash = self.sql(
+            self.admin(
+                f"SELECT encode(output_sha256, 'hex') FROM storage_v2_put_symbol_card("
+                f"{symbol_occurrence_id}, 'structural-v1/domain-fixture@2', "
+                "'{\"name\":\"alpha\",\"kind\":\"function\",\"signature\":\"fn alpha()\","
+                "\"documentation\":\"synthetic docs\",\"structure\":{\"calls\":1}}'::JSONB, "
+                "'{\"layer\":\"internal\",\"side_effect\":\"unknown\","
+                "\"resource\":\"unknown\",\"delegation_target\":\"unknown\"}'::JSONB, "
+                f"'{provenance_v2}'::JSONB, 'fixture-domain', 2);"
+            )
+        )
+        self.assertNotEqual(first_hash, second_profile_hash)
+        self.assertEqual(self.sql("SELECT COUNT(*) FROM content_body;"), bodies_before_profile_change)
+        self.assert_sql_fails(
+            self.admin(
+                f"SELECT storage_v2_put_symbol_card({beta_occurrence_id}, 'invalid', "
+                "'{\"name\":\"beta\"}'::JSONB, '{\"layer\":\"guessed\"}'::JSONB, "
+                "'{}'::JSONB, NULL, NULL);"
+            ),
+            "requires matching profile provenance",
+        )
+        self.assert_sql_fails(
+            self.admin(
+                f"SELECT storage_v2_put_symbol_card({beta_occurrence_id}, 'invented', "
+                "'{\"name\":\"beta\"}'::JSONB, "
+                "'{\"layer\":\"unknown\",\"invented\":\"guess\"}'::JSONB, "
+                "'{}'::JSONB, NULL, NULL);"
+            ),
+            "unsupported domain field or provenance",
+        )
+
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    f"SELECT status FROM storage_v2_begin_intelligence_analysis("
+                    f"{symbol_occurrence_id}, 'structural-v1/domain-fixture@1');"
+                )
+            ),
+            "pending",
+        )
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    f"SELECT status FROM storage_v2_finish_intelligence_analysis("
+                    f"{symbol_occurrence_id}, 'structural-v1/domain-fixture@1', NULL, 'fixture-failure');"
+                )
+            ),
+            "failed",
+        )
+        self.sql(
+            self.admin(
+                f"SELECT storage_v2_begin_intelligence_analysis("
+                f"{symbol_occurrence_id}, 'structural-v1/domain-fixture@1'); "
+                f"SELECT storage_v2_finish_intelligence_analysis("
+                f"{symbol_occurrence_id}, 'structural-v1/domain-fixture@1', "
+                f"decode('{first_hash}', 'hex'), NULL);"
+            )
+        )
+        self.assertEqual(
+            self.sql(
+                f"SELECT attempt_count || ':' || status FROM storage_v2_intelligence_analysis "
+                f"WHERE symbol_occurrence_id = {symbol_occurrence_id};"
+            ),
+            "2:complete",
+        )
+
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    f"SELECT storage_v2_record_call({symbol_occurrence_id}, {beta_symbol_id}, "
+                    "'crate::beta', 'direct', "
+                    "'{\"resolution_kind\":\"parser_symbol_id\",\"line\":1}'::JSONB);"
+                )
+            ),
+            "proven",
+        )
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    f"SELECT storage_v2_record_call({symbol_occurrence_id}, NULL, "
+                    "'ambiguous', 'direct', '{\"resolution_kind\":\"ambiguous\",\"line\":1}'::JSONB, "
+                    "'[\"candidate-a\",\"candidate-b\"]'::JSONB);"
+                )
+            ),
+            "unresolved",
+        )
+        self.sql(
+            self.admin(
+                f"""
+SELECT storage_v2_put_symbol_annotation(
+    4, {symbol_id}, {symbol_occurrence_id}, 'review-note',
+    '{{"text":"keep stable"}}'::JSONB, '{{"evidence":"user"}}'::JSONB,
+    'user', NULL, NULL, 'synthetic-user'
+);
+WITH source_entity AS (
+    SELECT storage_v2_put_intelligence_entity(
+        4, 'entity:alpha', {symbol_id}, 'alpha', 'function', '{{"synthetic":true}}'::JSONB
+    ) AS value
+), target_entity AS (
+    SELECT storage_v2_put_intelligence_entity(
+        4, 'entity:beta', {beta_symbol_id}, 'beta', 'function', '{{"synthetic":true}}'::JSONB
+    ) AS value
+)
+SELECT storage_v2_put_intelligence_relation(
+    4, (source_entity.value).id, (target_entity.value).id, 'calls',
+    '{{"resolution_kind":"parser_symbol_id","line":1}}'::JSONB
+) FROM source_entity, target_entity;
+SELECT storage_v2_put_negative_evidence(
+    4, 'negative:no-gamma', 'gamma path', 'alpha -> gamma', 'no resolved target',
+    '["rust:src/lib.rs:alpha:function"]'::JSONB, 'warning', 'synthetic-user'
+);
+"""
+            )
+        )
+
+        changed_node, changed_view, changed_digest = self.make_projection(
+            "fn alpha() { beta(); }"
+        )
+        changed_run = self.begin(4, "3" * 63 + "4", "4" * 63 + "4")
+        self.stage(
+            changed_run,
+            "src/lib.rs",
+            "fn alpha() { beta(); }",
+            changed_node,
+            changed_view,
+            changed_digest,
+        )
+        self.complete_analysis(changed_digest)
+        self.commit(changed_run, 1)
+        changed_artifact_id, changed_occurrence_id = map(
+            int,
+            self.sql(
+                f"SELECT artifact_version_id || ':' || occurrence_id "
+                f"FROM storage_v2_ingest_run_item WHERE run_id = {changed_run};"
+            ).split(":"),
+        )
+        changed_symbol_id = self.sql(
+            self.admin(
+                f"""
+SELECT symbol_id FROM storage_v2_put_symbol_occurrence(
+    4, {changed_artifact_id}, {changed_occurrence_id},
+    'rust:src/lib.rs:alpha:function', 'rust', 'function', 'crate::alpha',
+    'fn alpha()', 'synthetic docs', 'public',
+    '{{"kind":"function","calls":["crate::beta"]}}'::JSONB,
+    '{{"line_start":1,"line_end":1}}'::JSONB
+);
+"""
+            )
+        )
+        self.assertEqual(changed_symbol_id, str(symbol_id))
+
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    "SELECT jsonb_array_length(storage_v2_intelligence_command("
+                    "4, '1', 'card', '{\"name\":\"alpha\"}'::JSONB));"
+                )
+            ),
+            "2",
+        )
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    "SELECT storage_v2_intelligence_command("
+                    "4, '1', 'card', '{\"name\":\"beta\"}'::JSONB) "
+                    "-> 0 -> 'domain_fields' ->> 'layer';"
+                )
+            ),
+            "unknown",
+        )
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    "SELECT jsonb_array_length(storage_v2_intelligence_command("
+                    "4, '1', 'layers', '{\"layer\":\"api\"}'::JSONB));"
+                )
+            ),
+            "1",
+        )
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    "SELECT jsonb_array_length(storage_v2_intelligence_command("
+                    "4, '1', 'explain', '{\"name\":\"alpha\"}'::JSONB) -> 'proven');"
+                )
+            ),
+            "1",
+        )
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    "SELECT jsonb_array_length(storage_v2_export_intelligence("
+                    "4, '2', 'protected') -> 'payload' -> 'call_edges');"
+                )
+            ),
+            "0",
+            "call evidence from an older occurrence must not leak into a changed generation",
+        )
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    "SELECT jsonb_array_length(storage_v2_intelligence_command("
+                    "4, '1', 'ownership', '{\"name\":\"alpha\"}'::JSONB));"
+                )
+            ),
+            "1",
+        )
+        self.assert_sql_fails(
+            self.actor(
+                WRITER_ID,
+                "SELECT storage_v2_intelligence_command("
+                "4, '1', 'card', '{\"name\":\"alpha\"}'::JSONB);",
+            ),
+            "authorized generation selector required",
+        )
+
+        public_bundle = self.sql(
+            self.admin("SELECT storage_v2_export_intelligence(4, '1', 'public')::TEXT;")
+        )
+        self.assertEqual(
+            self.sql(self.admin("SELECT storage_v2_export_intelligence(4, '1', 'public')::TEXT;")),
+            public_bundle,
+        )
+        self.assertNotIn("synthetic-user", public_bundle, "public export must redact authors")
+        self.assertNotIn("synthetic docs", public_bundle, "public export must omit record content")
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    "SELECT (storage_v2_export_intelligence(4, '1', 'public') "
+                    "-> 'payload' ->> 'protected_payload_sha256') = "
+                    "(storage_v2_export_intelligence(4, '1', 'protected') "
+                    "->> 'payload_sha256');"
+                )
+            ),
+            "t",
+            "public evidence must identify the exact protected payload without exposing it",
+        )
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    "SELECT storage_v2_export_intelligence(4, '1', 'public') "
+                    "-> 'payload' -> 'record_counts' ->> 'cards';"
+                )
+            ),
+            "3",
+        )
+        escaped_public_bundle = public_bundle.replace("'", "''")
+        self.assert_sql_fails(
+            self.admin(
+                f"SELECT storage_v2_import_intelligence(5, '1', "
+                f"'{escaped_public_bundle}'::JSONB);"
+            ),
+            "authorized versioned intelligence bundle required",
+        )
+        protected_bundle = self.sql(
+            self.admin("SELECT storage_v2_export_intelligence(4, '1', 'protected')::TEXT;")
+        )
+        self.assertIn("synthetic-user", protected_bundle)
+        escaped_bundle = protected_bundle.replace("'", "''")
+        import_counts = self.sql(
+            self.admin(
+                f"WITH imported AS (SELECT storage_v2_import_intelligence("
+                f"5, '1', '{escaped_bundle}'::JSONB) AS value) "
+                "SELECT (value ->> 'cards') || ':' || (value ->> 'negative_evidence') "
+                "FROM imported;"
+            )
+        )
+        self.assertEqual(import_counts, "3:1")
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    f"SELECT storage_v2_import_intelligence(5, '1', "
+                    f"'{escaped_bundle}'::JSONB) ->> 'payload_sha256';"
+                )
+            ),
+            self.sql(
+                self.admin(
+                    "SELECT storage_v2_export_intelligence(4, '1', 'protected') "
+                    "->> 'payload_sha256';"
+                )
+            ),
+            "reimporting the same bundle must be idempotent",
+        )
+        imported_payload = self.sql(
+            self.admin(
+                "SELECT storage_v2_export_intelligence(5, '1', 'protected') -> 'payload';"
+            )
+        )
+        exported_payload = self.sql(
+            self.admin(
+                "SELECT storage_v2_export_intelligence(4, '1', 'protected') -> 'payload';"
+            )
+        )
+        self.assertEqual(imported_payload, exported_payload)
+        self.assertEqual(
+            self.sql(
+                "SELECT COUNT(*) FROM storage_v2_symbol_annotation "
+                "WHERE source_id = 5 AND symbol_occurrence_id IS NOT NULL;"
+            ),
+            "1",
+            "occurrence-bound annotations must remain occurrence-bound after import",
+        )
+        self.assertEqual(
+            self.sql(
+                self.actor(
+                    WRITER_ID,
+                    "SELECT COUNT(*) FROM storage_v2_symbol_card card "
+                    "JOIN storage_v2_symbol_occurrence occurrence_row "
+                    "ON occurrence_row.id = card.symbol_occurrence_id "
+                    "WHERE occurrence_row.source_id = 4;",
+                )
+            ),
+            "0",
         )
 
 

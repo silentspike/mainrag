@@ -4,6 +4,8 @@ use crate::db::models::{
     DelegationChain, ExploreResponse, NegativeEvidence, OwnershipInfo, SymbolCard,
 };
 use crate::AppState;
+#[cfg(feature = "storage-v2-intelligence")]
+use axum::Extension;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -12,6 +14,78 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
+#[cfg(feature = "storage-v2-intelligence")]
+use uuid::Uuid;
+
+#[cfg(feature = "storage-v2-intelligence")]
+#[derive(Debug, Deserialize)]
+pub struct ShadowIntelligenceQuery {
+    pub source_id: i64,
+    pub generation: String,
+    pub command: String,
+    pub name: Option<String>,
+    pub layer: Option<String>,
+    pub resource: Option<String>,
+    pub side_effect: Option<String>,
+}
+
+#[cfg(feature = "storage-v2-intelligence")]
+pub async fn shadow_intelligence_command(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
+    Query(req): Query<ShadowIntelligenceQuery>,
+) -> crate::error::Result<Json<Value>> {
+    if !matches!(
+        req.command.as_str(),
+        "card" | "layers" | "explain" | "ownership"
+    ) {
+        return Err(crate::error::AppError::BadRequest(
+            "unsupported shadow intelligence command".to_string(),
+        ));
+    }
+    if req.generation.is_empty() {
+        return Err(crate::error::AppError::BadRequest(
+            "an explicit generation selector is required".to_string(),
+        ));
+    }
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| crate::error::AppError::Unauthorized("invalid user id".to_string()))?;
+    let source_id = req.source_id;
+    let generation = req.generation;
+    let command = req.command;
+    let query = serde_json::json!({
+        "name": req.name,
+        "layer": req.layer,
+        "resource": req.resource,
+        "side_effect": req.side_effect,
+    });
+    let result = state
+        .rls_client
+        .with_rls(user_id, claims.is_admin, move |transaction| {
+            Box::pin(async move {
+                let row = transaction
+                    .query_one(
+                        "SELECT storage_v2_intelligence_command($1, $2, $3, $4)",
+                        &[&source_id, &generation, &command, &query],
+                    )
+                    .await
+                    .map_err(|error| {
+                        if error.code()
+                            == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+                        {
+                            crate::error::AppError::Forbidden(
+                                "shadow generation is not authorized".to_string(),
+                            )
+                        } else {
+                            crate::error::AppError::Database(error)
+                        }
+                    })?;
+                Ok(row.get::<_, Value>(0))
+            })
+        })
+        .await?;
+    Ok(Json(result))
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SymbolSearchRequest {

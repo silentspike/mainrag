@@ -8,12 +8,21 @@ pub async fn run(
     client: &ApiClient,
     symbol: &str,
     source: Option<&str>,
+    generation: Option<&str>,
     json_output: bool,
 ) -> Result<()> {
     if !json_output {
         eprint!("{}", "Loading symbol card...".cyan());
     }
 
+    if let Some(generation) = generation {
+        let source = source.ok_or_else(|| anyhow::anyhow!("--generation requires --source"))?;
+        let cards = client
+            .shadow_intelligence("card", source, generation, &[("name", Some(symbol))])
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&cards)?);
+        return Ok(());
+    }
     let cards = client.get_symbol_cards(symbol, source).await?;
 
     if json_output {

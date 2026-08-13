@@ -13,6 +13,9 @@ pub mod generation_ingest;
 pub mod gpu_semaphore;
 pub mod index;
 pub mod intelligence;
+#[cfg(feature = "storage-v2-intelligence")]
+#[allow(dead_code)]
+pub mod intelligence_v2;
 pub mod outbox_worker;
 pub mod parser;
 pub mod qdrant;

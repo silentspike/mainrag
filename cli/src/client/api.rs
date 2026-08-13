@@ -863,6 +863,51 @@ impl ApiClient {
         response.json().await.context("parse symbol cards")
     }
 
+    pub async fn shadow_intelligence(
+        &self,
+        command: &str,
+        source: &str,
+        generation: &str,
+        query: &[(&str, Option<&str>)],
+    ) -> Result<serde_json::Value> {
+        let sources = self.list_sources().await?;
+        let source_id = sources
+            .sources
+            .iter()
+            .find(|candidate| candidate.name == source)
+            .map(|candidate| candidate.id)
+            .ok_or_else(|| anyhow!("source '{}' not found", source))?;
+        let mut url = format!(
+            "{}/api/v1/intelligence/shadow?source_id={}&generation={}&command={}",
+            self.base_url,
+            source_id,
+            urlencoding::encode(generation),
+            urlencoding::encode(command)
+        );
+        for (key, value) in query {
+            if let Some(value) = value {
+                url.push('&');
+                url.push_str(key);
+                url.push('=');
+                url.push_str(&urlencoding::encode(value));
+            }
+        }
+        let response = self
+            .client
+            .get(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .send()
+            .await
+            .context("shadow intelligence request failed")?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "shadow intelligence request failed: {}",
+                response.status()
+            ));
+        }
+        response.json().await.context("parse shadow intelligence")
+    }
+
     pub async fn explain_path(
         &self,
         symbol_name: &str,
