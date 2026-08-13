@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use postgres_types::{FromSql, ToSql};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -200,6 +201,99 @@ fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
         .as_bytes()
         .windows(needle_len)
         .position(|window| window.eq_ignore_ascii_case(needle_bytes))
+}
+
+// =============================================================================
+// Storage v2 models
+// =============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, FromSql, ToSql)]
+#[postgres(name = "storage_v2_generation_status")]
+pub enum StorageV2GenerationStatus {
+    #[postgres(name = "building")]
+    Building,
+    #[postgres(name = "sealed")]
+    Sealed,
+    #[postgres(name = "verified")]
+    Verified,
+    #[postgres(name = "release_candidate")]
+    ReleaseCandidate,
+    #[postgres(name = "active")]
+    Active,
+    #[postgres(name = "superseded")]
+    Superseded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogicalSource {
+    pub id: i64,
+    pub active_generation_id: Option<i64>,
+    pub next_generation_seq: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceGeneration {
+    pub id: i64,
+    pub source_id: i64,
+    pub generation_seq: i64,
+    pub status: StorageV2GenerationStatus,
+    pub witness_type: String,
+    pub witness: serde_json::Value,
+    pub verification_manifest_sha256: Option<String>,
+    pub item_count: i64,
+    pub created_at: DateTime<Utc>,
+    pub sealed_at: Option<DateTime<Utc>>,
+    pub verified_at: Option<DateTime<Utc>>,
+    pub activated_at: Option<DateTime<Utc>>,
+    pub superseded_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceItem {
+    pub id: i64,
+    pub source_id: i64,
+    pub item_key: String,
+    pub item_kind: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactVersion {
+    pub id: i64,
+    pub item_id: i64,
+    pub source_id: i64,
+    pub witness_type: String,
+    pub witness: serde_json::Value,
+    pub adapter_profile_id: String,
+    pub content_root_node_id: Option<i64>,
+    pub raw_body_id: Option<i64>,
+    pub expected_content_hash: String,
+    pub byte_length: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerationItemVersion {
+    pub source_id: i64,
+    pub source_item_id: i64,
+    pub artifact_version_id: i64,
+    pub valid_from_seq: i64,
+    pub valid_to_seq: Option<i64>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageV2GcEpoch {
+    pub id: i64,
+    pub source_id: i64,
+    pub status: String,
+    pub root_manifest_sha256: String,
+    pub code_sha: String,
+    pub created_at: DateTime<Utc>,
+    pub verified_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 // =============================================================================
