@@ -1,0 +1,11 @@
+{"id":"and-generation","query":"immutable generation","tenant":"tenant-a","source":"source-alpha","required":["hit-generation"],"forbidden":["hit-other-source"]}
+{"id":"or-storage-generation","query":"pack OR active_generation_id","tenant":"tenant-a","source":"source-alpha","required":["hit-generation","hit-storage"],"forbidden":[]}
+{"id":"not-mutable","query":"generation -mutable","tenant":"tenant-a","source":"source-alpha","required":["hit-generation"],"forbidden":["hit-mutable"]}
+{"id":"phrase-activation","query":"\"atomic pointer\"","tenant":"tenant-a","source":"source-alpha","required":["hit-generation"],"forbidden":["hit-phrase-decoy"]}
+{"id":"grouped-storage","query":"(pack OR body) AND integrity","tenant":"tenant-a","source":"source-alpha","required":["hit-storage","hit-group"],"forbidden":[]}
+{"id":"exact-identifier","query":"id:active_generation_id","tenant":"tenant-a","source":"source-alpha","required":["hit-generation"],"forbidden":[]}
+{"id":"mixed-expression","query":"(occurrence OR generation) AND -mutable","tenant":"tenant-a","source":"source-alpha","required":["hit-auth-a","hit-generation","hit-legacy"],"forbidden":["hit-auth-b","hit-mutable","hit-other-source"]}
+{"id":"distributed-terms","query":"deploy checksum","tenant":"tenant-a","source":"source-alpha","required":["hit-distributed"],"forbidden":[]}
+{"id":"adverse-fallback","query":"complete fallback arbitrary limit","tenant":"tenant-a","source":"source-alpha","required":["hit-search"],"forbidden":[]}
+{"id":"common-term","query":"source","tenant":"tenant-a","source":"source-alpha","required":["hit-common-a","hit-common-b"],"forbidden":["hit-other-source"]}
+{"id":"tenant-isolation","query":"occurrence authorization","tenant":"tenant-a","source":"source-alpha","required":["hit-auth-a"],"forbidden":["hit-auth-b"]}
