@@ -2,10 +2,20 @@
 
 > Last verified: 2026-04-24 via commit `2d597cb`
 
+> **Architecture status:** This document describes the current chunk-based
+> PostgreSQL/Qdrant system. [Storage v2](storage-v2.md) is a planned additive
+> architecture and is not active. Its contracts must not be read as current
+> runtime, migration, deployment, or release evidence.
+
 MainRag is a hybrid retrieval system optimized for source code, technical
 documentation, and long-context conversations. This document describes the
 system components, their responsibilities, and the data/request flow through
 the retrieval pipeline.
+
+The target storage-v2 identity, generation, reconstruction, retrieval,
+compatibility, and activation contracts are specified separately in
+[`storage-v2.md`](storage-v2.md). Until its controlled activation is accepted,
+the tables and flows below remain the supported architecture.
 
 ## High-level components
 
@@ -114,7 +124,7 @@ Phase 1 Embed   │  query ──▶ TEI GTE (dim=768, truncated 8192) │
                                │
                 ┌──────────────▼───────────────────────────────┐
 Phase 2 Hybrid  │  parallel:                                   │
-                │    FTS  (UNION ALL simple+english, ts_rank)  │
+                │    FTS  (UNION ALL simple+english, ts_rank_cd)│
                 │    Qdrant (HNSW, ef_search tunable)          │
                 └──────────────┬───────────────────────────────┘
                                │
@@ -155,8 +165,8 @@ to 70 % GOOD on the reference set, ahead of the embedder upgrade.
 
 | Signal             | Source                          | Weight (default) |
 | ------------------ | ------------------------------- | ---------------- |
-| BM25 (simple)      | `ts_rank` on `tsvector_simple`  | RRF k=60         |
-| BM25 (english)     | `ts_rank` on `tsvector_english` | RRF k=60         |
+| FTS rank (simple)  | `ts_rank_cd` on `tsvector_simple`  | RRF k=60      |
+| FTS rank (english) | `ts_rank_cd` on `tsvector_english` | RRF k=60      |
 | Vector similarity  | Qdrant cosine                   | RRF k=60         |
 | Call-graph popularity | In-edges on caller's symbol  | log-damped bonus |
 | Symbol-name match  | Exact/prefix match on extracted symbol | additive      |
