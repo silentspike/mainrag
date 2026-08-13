@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from eval_common import path_matches
+
 try:
     import requests
 except ImportError:
@@ -86,18 +88,12 @@ def check_hit(result_files: list[str], expect_files: list[str]) -> bool:
     For negative cases (expect_files=[]), returns True only if no results.
     """
     if not expect_files:
-        # Negative case: should return no relevant results
         return len(result_files) == 0
-
-    for expected in expect_files:
-        for actual in result_files:
-            if expected.endswith("/"):
-                # Directory match: check if file is inside directory
-                if f"/{expected}" in f"/{actual}" or actual.startswith(expected):
-                    return True
-            elif actual.endswith(expected):
-                return True
-    return False
+    return any(
+        path_matches(actual, expected)
+        for expected in expect_files
+        for actual in result_files
+    )
 
 
 def resolve_source_id(api_url: str, token: str, source_name: str, cache: dict) -> Optional[int]:
