@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -13,24 +20,31 @@ env:
 jobs:
   fmt:
     name: cargo fmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: stable
           components: rustfmt
       - run: cargo fmt --all --check
 
   clippy:
     name: cargo clippy
-    runs-on: ubuntu-latest
-    continue-on-error: true   # style/perf lints inform but do not gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # tree-sitter grammars need a C toolchain; runners already ship it.
       # Deny only the correctness group — style/complexity/pedantic groups
       # report as warnings so we keep the signal without blocking the green bar.
@@ -46,18 +60,26 @@ jobs:
 
   check:
     name: cargo check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo check --workspace --all-targets
 
   docs-links:
     name: docs link sanity
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Verify every relative link in README resolves
         run: |
           python3 - <<'PY'
@@ -78,8 +100,8 @@ jobs:
   # compile/link is verified but the retrieval round-trip is not.
   integration:
     name: integration services smoke
-    runs-on: ubuntu-latest
-    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:18
@@ -105,7 +127,9 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Verify PostgreSQL reachable
         run: |
           PGPASSWORD=ci_only_secret psql -h localhost -U mainrag -d mainrag_ci -c 'SELECT version();'
@@ -113,3 +137,30 @@ jobs:
         run: |
           curl -sf http://localhost:6333/readyz
           curl -sf http://localhost:6333/collections | python3 -m json.tool
+
+  required:
+    name: ci-required
+    if: always()
+    needs: [fmt, clippy, check, docs-links, integration]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every CI job to succeed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          results = {
+              name: result["result"]
+              for name, result in json.loads(os.environ["NEEDS_JSON"]).items()
+          }
+          print(results)
+          failed = {name: result for name, result in results.items() if result != "success"}
+          if failed:
+              print(f"Required CI jobs did not succeed: {failed}", file=sys.stderr)
+              sys.exit(1)
+          PY

@@ -17,6 +17,7 @@ target/
 Cargo.lock.bak
 
 # ─── Local state ─────────────────────────────────────────────────────
+/AGENTS.md
 *.db
 *.db-journal
 *.db-wal
