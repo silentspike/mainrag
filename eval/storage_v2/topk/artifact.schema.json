@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/silentspike/mainrag/eval/storage_v2/topk/artifact.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status", "recorded_at", "commit_sha", "backend", "inputs", "execution", "aggregate", "queries", "decision", "cleanup", "limitations"],
+  "properties": {
+    "schema_version": {"const": "storage-v2-topk-prototype/v1"},
+    "status": {"$ref": "#/$defs/status"},
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "commit_sha": {"$ref": "#/$defs/gitSha"},
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "extension", "settings"],
+      "properties": {
+        "name": {"const": "PostgreSQL native GIN"},
+        "version": {"type": "string", "minLength": 1},
+        "extension": {"type": "null"},
+        "settings": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string"}}
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixture_sha256", "query_sha256", "documents", "views", "queries"],
+      "properties": {
+        "fixture_sha256": {"$ref": "#/$defs/sha256"},
+        "query_sha256": {"$ref": "#/$defs/sha256"},
+        "documents": {"type": "integer", "minimum": 1},
+        "views": {"type": "integer", "minimum": 1},
+        "queries": {"type": "integer", "minimum": 1}
+      }
+    },
+    "execution": {
+      "type": "object",
+      "required": ["candidate_limit", "fully_scored_gate", "result_limit", "warmups_per_query", "iterations_per_query", "concurrency", "fallback", "second_stage"],
+      "properties": {
+        "candidate_limit": {"type": "null"},
+        "fully_scored_gate": {"const": 500},
+        "result_limit": {"const": 10},
+        "warmups_per_query": {"type": "integer", "minimum": 3},
+        "iterations_per_query": {"type": "integer", "minimum": 30},
+        "concurrency": {"const": 1},
+        "fallback": {"type": "string", "minLength": 1},
+        "second_stage": {"type": "string", "minLength": 1}
+      }
+    },
+    "aggregate": {
+      "type": "object",
+      "required": ["result_identity_sha256", "max_fully_scored_search_documents", "max_fully_scored_views", "warm_latency", "cold_first_latency"],
+      "properties": {
+        "result_identity_sha256": {"$ref": "#/$defs/sha256"},
+        "max_fully_scored_search_documents": {"type": "integer", "minimum": 0, "maximum": 500},
+        "max_fully_scored_views": {"type": "integer", "minimum": 0},
+        "warm_latency": {"$ref": "#/$defs/latency"},
+        "cold_first_latency": {"$ref": "#/$defs/latency"}
+      }
+    },
+    "queries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "query_sha256", "ast", "status", "top_10", "reference_top_10", "matched_postings", "fully_scored_search_documents", "fully_scored_views", "returned_shortlist", "fallback", "cold_first_ms", "warm_latency", "plan", "errors"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "query_sha256": {"$ref": "#/$defs/sha256"},
+          "ast": {"type": "object"},
+          "status": {"$ref": "#/$defs/status"},
+          "top_10": {"type": "array", "maxItems": 10, "items": {"type": "string"}},
+          "reference_top_10": {"type": "array", "maxItems": 10, "items": {"type": "string"}},
+          "matched_postings": {"type": "integer", "minimum": 0},
+          "fully_scored_search_documents": {"type": "integer", "minimum": 0, "maximum": 500},
+          "fully_scored_views": {"type": "integer", "minimum": 0},
+          "returned_shortlist": {"type": "integer", "minimum": 0, "maximum": 10},
+          "fallback": {"type": "string"},
+          "cold_first_ms": {"type": "number", "minimum": 0},
+          "warm_latency": {"$ref": "#/$defs/latency"},
+          "plan": {"type": "object", "required": ["Plan", "Planning Time", "Execution Time", "Settings"]},
+          "errors": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "required": ["status", "selected_backend", "reason", "rejected_for_now", "unresolved_operational_gates"],
+      "properties": {
+        "status": {"enum": ["GO", "NO-GO"]},
+        "selected_backend": {"type": ["string", "null"]},
+        "reason": {"type": "string"},
+        "rejected_for_now": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "unresolved_operational_gates": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "required": ["temporary_cluster_removed"],
+      "properties": {"temporary_cluster_removed": {"const": true}}
+    },
+    "limitations": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+  },
+  "$defs": {
+    "status": {"enum": ["PASS", "FAIL", "BLOCKED", "SKIP", "NOT_RUN"]},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "latency": {
+      "type": "object",
+      "required": ["samples", "p50_ms", "p95_ms", "p99_ms"],
+      "properties": {
+        "samples": {"type": "integer", "minimum": 1},
+        "p50_ms": {"type": "number", "minimum": 0},
+        "p95_ms": {"type": "number", "minimum": 0, "exclusiveMaximum": 200},
+        "p99_ms": {"type": "number", "minimum": 0}
+      }
+    }
+  }
+}

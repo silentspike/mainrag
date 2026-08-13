@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "documents": [
+    {"id":"doc-generation","body":"immutable source generation active_generation_id atomic pointer"},
+    {"id":"doc-storage","body":"content body shared pack entry digest integrity verified"},
+    {"id":"doc-auth","body":"occurrence authorization tenant visibility source isolation"},
+    {"id":"doc-search","body":"WAND MaxScore complete fallback arbitrary limit pruning"},
+    {"id":"doc-intelligence","body":"analysis profile provenance parser domain fields unknown"},
+    {"id":"doc-legacy","body":"legacy_hit_mapping exact split merged canonical occurrence"},
+    {"id":"doc-call","body":"deploy command tool invocation"},
+    {"id":"doc-result","body":"checksum failure tool result"},
+    {"id":"doc-phrase-decoy","body":"atomic checks happen before activation"},
+    {"id":"doc-mutable","body":"mutable generation rewrites prior state"},
+    {"id":"doc-common-a","body":"source data source pipeline common source term"},
+    {"id":"doc-common-b","body":"source configuration contains source documentation"},
+    {"id":"doc-group","body":"body integrity for packed content"},
+    {"id":"doc-secret","body":"occurrence authorization tenant visibility source isolation"}
+  ],
+  "views": [
+    {"id":"view-generation","external_hit_id":"hit-generation","tenant":"tenant-a","source":"source-alpha","graph_bonus":0.10,"components":[{"document":"doc-generation","role_weight":1.0}]},
+    {"id":"view-storage","external_hit_id":"hit-storage","tenant":"tenant-a","source":"source-alpha","graph_bonus":0.05,"components":[{"document":"doc-storage","role_weight":1.0}]},
+    {"id":"view-auth-a","external_hit_id":"hit-auth-a","tenant":"tenant-a","source":"source-alpha","graph_bonus":0.0,"components":[{"document":"doc-auth","role_weight":1.0}]},
+    {"id":"view-auth-b","external_hit_id":"hit-auth-b","tenant":"tenant-b","source":"source-alpha","graph_bonus":0.0,"components":[{"document":"doc-secret","role_weight":1.0}]},
+    {"id":"view-search","external_hit_id":"hit-search","tenant":"tenant-a","source":"source-alpha","graph_bonus":0.15,"components":[{"document":"doc-search","role_weight":1.0}]},
+    {"id":"view-intelligence","external_hit_id":"hit-intelligence","tenant":"tenant-a","source":"source-alpha","graph_bonus":0.0,"components":[{"document":"doc-intelligence","role_weight":1.0}]},
+    {"id":"view-legacy","external_hit_id":"hit-legacy","tenant":"tenant-a","source":"source-alpha","graph_bonus":0.0,"components":[{"document":"doc-legacy","role_weight":1.0}]},
+    {"id":"view-distributed","external_hit_id":"hit-distributed","tenant":"tenant-a","source":"source-alpha","graph_bonus":0.20,"components":[{"document":"doc-call","role_weight":1.2},{"document":"doc-result","role_weight":1.0}]},
+    {"id":"view-phrase-decoy","external_hit_id":"hit-phrase-decoy","tenant":"tenant-a","source":"source-alpha","graph_bonus":0.0,"components":[{"document":"doc-phrase-decoy","role_weight":1.0}]},
+    {"id":"view-mutable","external_hit_id":"hit-mutable","tenant":"tenant-a","source":"source-alpha","graph_bonus":0.0,"components":[{"document":"doc-mutable","role_weight":1.0}]},
+    {"id":"view-common-a","external_hit_id":"hit-common-a","tenant":"tenant-a","source":"source-alpha","graph_bonus":0.0,"components":[{"document":"doc-common-a","role_weight":1.0}]},
+    {"id":"view-common-b","external_hit_id":"hit-common-b","tenant":"tenant-a","source":"source-alpha","graph_bonus":0.0,"components":[{"document":"doc-common-b","role_weight":1.0}]},
+    {"id":"view-group","external_hit_id":"hit-group","tenant":"tenant-a","source":"source-alpha","graph_bonus":0.0,"components":[{"document":"doc-group","role_weight":1.0}]},
+    {"id":"view-other-source","external_hit_id":"hit-other-source","tenant":"tenant-a","source":"source-beta","graph_bonus":0.0,"components":[{"document":"doc-generation","role_weight":1.0}]}
+  ],
+  "rerank": [
+    {"query":"distributed-terms","view":"view-distributed","bonus":0.30},
+    {"query":"adverse-fallback","view":"view-search","bonus":0.25}
+  ]
+}
