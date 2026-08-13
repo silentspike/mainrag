@@ -15,6 +15,9 @@ python3 -m unittest eval/storage_v2/schema/test_content_graph_schema.py
 python3 -m unittest eval/storage_v2/schema/test_shadow_ingest_schema.py
 ```
 
+The shadow-ingest suite also exercises the additive storage-v2 intelligence
+schema, named-generation commands, redacted export, and clean-source import.
+
 For the release gate, point the suite at a separately started disposable
 PostgreSQL 18.4 server over a private Unix socket:
 

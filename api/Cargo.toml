@@ -20,6 +20,7 @@ path = "src/main.rs"
 default = []
 pdf-mupdf = ["dep:mupdf"]
 storage-v2-shadow-ingest = []
+storage-v2-intelligence = ["storage-v2-shadow-ingest"]
 
 [dependencies]
 # Async Runtime

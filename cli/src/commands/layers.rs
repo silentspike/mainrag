@@ -6,6 +6,8 @@ use colored::Colorize;
 
 pub async fn run(
     client: &ApiClient,
+    source: Option<&str>,
+    generation: Option<&str>,
     layer: Option<&str>,
     resource: Option<&str>,
     side_effect: Option<&str>,
@@ -16,6 +18,23 @@ pub async fn run(
         eprint!("{}", "Browsing layers...".cyan());
     }
 
+    if let Some(generation) = generation {
+        let source = source.ok_or_else(|| anyhow::anyhow!("--generation requires --source"))?;
+        let result = client
+            .shadow_intelligence(
+                "layers",
+                source,
+                generation,
+                &[
+                    ("layer", layer),
+                    ("resource", resource),
+                    ("side_effect", side_effect),
+                ],
+            )
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
     // Build URL with server-side filters
     let mut url = format!(
         "{}/api/v1/intelligence/cards?name=%25&limit={}",

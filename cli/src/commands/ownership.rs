@@ -4,11 +4,25 @@ use crate::client::ApiClient;
 use anyhow::Result;
 use colored::Colorize;
 
-pub async fn run(client: &ApiClient, symbol: &str, json_output: bool) -> Result<()> {
+pub async fn run(
+    client: &ApiClient,
+    symbol: &str,
+    source: Option<&str>,
+    generation: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
     if !json_output {
         eprint!("{}", "Loading ownership...".cyan());
     }
 
+    if let Some(generation) = generation {
+        let source = source.ok_or_else(|| anyhow::anyhow!("--generation requires --source"))?;
+        let result = client
+            .shadow_intelligence("ownership", source, generation, &[("name", Some(symbol))])
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
     let url = format!(
         "{}/api/v1/intelligence/ownership?symbol={}",
         client.base_url(),

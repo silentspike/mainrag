@@ -146,6 +146,10 @@ enum Commands {
         /// Filter by source name
         #[arg(short, long)]
         source: Option<String>,
+
+        /// Read an explicitly named storage-v2 generation (requires --source)
+        #[arg(long)]
+        generation: Option<String>,
     },
 
     /// Trace delegation chain through proxy -> dispatch -> mutation
@@ -157,6 +161,10 @@ enum Commands {
         #[arg(short, long)]
         source: Option<String>,
 
+        /// Read an explicitly named storage-v2 generation (requires --source)
+        #[arg(long)]
+        generation: Option<String>,
+
         /// Maximum chain depth
         #[arg(short, long, default_value = "6")]
         depth: u32,
@@ -164,6 +172,14 @@ enum Commands {
 
     /// Browse API layers, resources, and side-effects
     Layers {
+        /// Source name for an explicitly named storage-v2 generation
+        #[arg(short, long)]
+        source: Option<String>,
+
+        /// Read an explicitly named storage-v2 generation (requires --source)
+        #[arg(long)]
+        generation: Option<String>,
+
         /// Filter by layer (e.g. controller_api, proxy, internal)
         #[arg(short, long)]
         layer: Option<String>,
@@ -185,6 +201,14 @@ enum Commands {
     Ownership {
         /// Symbol or class name
         symbol: String,
+
+        /// Source name for an explicitly named storage-v2 generation
+        #[arg(short, long)]
+        source: Option<String>,
+
+        /// Read an explicitly named storage-v2 generation (requires --source)
+        #[arg(long)]
+        generation: Option<String>,
     },
 
     /// Explore a concept: query rewriting + path tracing + dead-end warnings
@@ -398,19 +422,41 @@ async fn main() -> anyhow::Result<()> {
             .await
         }
 
-        Commands::Card { symbol, source } => {
-            commands::card::run(&client, &symbol, source.as_deref(), cli.json).await
+        Commands::Card {
+            symbol,
+            source,
+            generation,
+        } => {
+            commands::card::run(
+                &client,
+                &symbol,
+                source.as_deref(),
+                generation.as_deref(),
+                cli.json,
+            )
+            .await
         }
 
         Commands::Explain {
             symbol,
             source,
+            generation,
             depth,
         } => {
-            commands::explain::run(&client, &symbol, source.as_deref(), Some(depth), cli.json).await
+            commands::explain::run(
+                &client,
+                &symbol,
+                source.as_deref(),
+                generation.as_deref(),
+                Some(depth),
+                cli.json,
+            )
+            .await
         }
 
         Commands::Layers {
+            source,
+            generation,
             layer,
             resource,
             side_effect,
@@ -418,6 +464,8 @@ async fn main() -> anyhow::Result<()> {
         } => {
             commands::layers::run(
                 &client,
+                source.as_deref(),
+                generation.as_deref(),
                 layer.as_deref(),
                 resource.as_deref(),
                 side_effect.as_deref(),
@@ -427,8 +475,19 @@ async fn main() -> anyhow::Result<()> {
             .await
         }
 
-        Commands::Ownership { symbol } => {
-            commands::ownership::run(&client, &symbol, cli.json).await
+        Commands::Ownership {
+            symbol,
+            source,
+            generation,
+        } => {
+            commands::ownership::run(
+                &client,
+                &symbol,
+                source.as_deref(),
+                generation.as_deref(),
+                cli.json,
+            )
+            .await
         }
 
         Commands::Explore { query, source } => {

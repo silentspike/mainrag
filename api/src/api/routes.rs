@@ -201,7 +201,7 @@ fn api_v1_routes(rate_limiter: KeyedRateLimiter, auth_layer: AuthLayer) -> Route
 /// Routes that require authentication (API-Key for agents, JWT for admin).
 /// Moved from public_routes() to enforce auth on all data endpoints.
 fn authenticated_routes(auth_layer: AuthLayer) -> Router<Arc<AppState>> {
-    Router::new()
+    let routes = Router::new()
         // H7: Detailed health check requires auth (exposes service status)
         .route("/health", get(handlers::health_check))
         // Search
@@ -236,7 +236,13 @@ fn authenticated_routes(auth_layer: AuthLayer) -> Router<Arc<AppState>> {
         .route("/mcp/protocol", get(handlers::get_mcp_protocol_info))
         // Sources (read-only)
         .route("/sources", get(handlers::list_sources))
-        .route("/sources/:id", get(handlers::get_source))
+        .route("/sources/:id", get(handlers::get_source));
+    #[cfg(feature = "storage-v2-intelligence")]
+    let routes = routes.route(
+        "/intelligence/shadow",
+        get(handlers::shadow_intelligence_command),
+    );
+    routes
         // Auth middleware (validates JWT or API-Key and adds Claims extension)
         .layer(middleware::from_fn(move |req, next| {
             let auth = Extension(auth_layer.clone());
