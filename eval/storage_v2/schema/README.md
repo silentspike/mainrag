@@ -12,6 +12,7 @@ Run against the locally installed PostgreSQL binaries:
 python3 -m unittest eval/storage_v2/schema/test_generation_schema.py
 python3 -m unittest eval/storage_v2/schema/test_content_schema.py
 python3 -m unittest eval/storage_v2/schema/test_content_graph_schema.py
+python3 -m unittest eval/storage_v2/schema/test_shadow_ingest_schema.py
 ```
 
 For the release gate, point the suite at a separately started disposable

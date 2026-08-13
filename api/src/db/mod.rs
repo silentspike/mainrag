@@ -3,6 +3,8 @@
 
 pub mod content_body;
 pub mod content_graph;
+#[cfg(feature = "storage-v2-shadow-ingest")]
+pub mod generation_ingest;
 pub mod health_pool;
 pub mod models;
 pub mod postgres;

@@ -7,6 +7,9 @@ pub mod content_graph;
 pub mod content_store;
 pub mod domain_profile;
 pub mod embeddings;
+#[cfg(feature = "storage-v2-shadow-ingest")]
+#[allow(dead_code)]
+pub mod generation_ingest;
 pub mod gpu_semaphore;
 pub mod index;
 pub mod intelligence;
