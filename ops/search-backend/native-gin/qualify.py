@@ -251,13 +251,13 @@ $$;
                     "--dbname",
                     "postgres",
                     "--command",
-                    "SET application_name='mainrag_qualification_interrupt'; "
                     "CREATE INDEX CONCURRENTLY qualification_interrupted_gin "
                     "ON qualification_interrupt USING GIN (qualification_slow_fts(fts));",
                 ],
                 cwd=ROOT,
+                env={**os.environ, "PGAPPNAME": "mainrag_qualification_interrupt"},
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 text=True,
             )
             backend_pid: int | None = None
@@ -278,8 +278,12 @@ $$;
                 time.sleep(0.02)
             if backend_pid is None or interrupt.poll() is not None:
                 interrupt.kill()
-                interrupt.wait(timeout=5)
-                raise RuntimeError("concurrent GIN build completed before interruption gate")
+                _, stderr = interrupt.communicate(timeout=5)
+                detail = (stderr or "").strip().splitlines()
+                suffix = f": {detail[-1]}" if detail else ""
+                raise RuntimeError(
+                    f"concurrent GIN build completed before interruption gate{suffix}"
+                )
             if cluster.sql(f"SELECT pg_cancel_backend({backend_pid});") != "t":
                 raise RuntimeError("failed to cancel the concurrent GIN build")
             interrupt.wait(timeout=30)
