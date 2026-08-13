@@ -21,6 +21,7 @@ default = []
 pdf-mupdf = ["dep:mupdf"]
 storage-v2-shadow-ingest = []
 storage-v2-intelligence = ["storage-v2-shadow-ingest"]
+storage-v2-retrieval = ["storage-v2-intelligence"]
 
 [dependencies]
 # Async Runtime

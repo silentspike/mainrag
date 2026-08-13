@@ -441,6 +441,22 @@ evaluated candidates separately from returned result limits and captures the
 actual SQL plan. The prototype decides whether a backend can preserve exact
 composed-view Top-K; this architecture does not preselect that backend.
 
+The additive implementation selected by the prototype is compiled with the
+`storage-v2-retrieval` API feature. It uses native PostgreSQL GIN materialization
+and complete scoped-view evaluation; no unsafe candidate cap is enabled. The API
+and CLI select it only when `read_path=storage_v2`, a source, and a positive named
+generation sequence are supplied. For example:
+
+```bash
+mainrag search 'alpha AND "beta gamma" NOT decoy' \
+  --source synthetic-source \
+  --read-path storage_v2 \
+  --generation 1
+```
+
+Omitting the selector keeps the current path. Storage-v2 generation and filter
+arguments are rejected on the current path rather than silently ignored.
+
 ## Migration and authority phases
 
 Storage v2 is additive until cleanup. The required phase order is:

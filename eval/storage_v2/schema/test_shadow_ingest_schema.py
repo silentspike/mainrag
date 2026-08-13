@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -76,9 +77,12 @@ INSERT INTO sources(id, name, type, path) VALUES
     (2, 'synthetic-two', 'fixture', 'synthetic-two'),
     (3, 'synthetic-writer', 'fixture', 'synthetic-writer'),
     (4, 'synthetic-intelligence-export', 'fixture', 'synthetic-intelligence-export'),
-    (5, 'synthetic-intelligence-import', 'fixture', 'synthetic-intelligence-import');
+    (5, 'synthetic-intelligence-import', 'fixture', 'synthetic-intelligence-import'),
+    (6, 'synthetic-retrieval', 'fixture', 'synthetic-retrieval'),
+    (7, 'synthetic-retrieval-denied', 'fixture', 'synthetic-retrieval-denied');
 INSERT INTO fixture_source_access VALUES
     ('{WRITER_ID}', 1, TRUE, TRUE), ('{WRITER_ID}', 3, TRUE, TRUE),
+    ('{WRITER_ID}', 6, TRUE, TRUE),
     ('{OTHER_ID}', 2, TRUE, TRUE);
 CREATE FUNCTION user_can_access_source(
     p_user_id UUID, p_source_id BIGINT, p_action TEXT DEFAULT 'read'
@@ -263,6 +267,25 @@ SELECT (storage_v2_finish_analysis_attempt(
             ),
             "sealed",
         )
+
+    def exact_search(
+        self,
+        ast: dict[str, object],
+        filters: dict[str, object] | None = None,
+        *,
+        user_id: str = ADMIN_ID,
+        source_id: int = 6,
+    ) -> dict[str, object]:
+        ast_json = json.dumps(ast, separators=(",", ":")).replace("'", "''")
+        filter_json = json.dumps(filters or {}, separators=(",", ":")).replace("'", "''")
+        value = self.sql(
+            self.actor(
+                user_id,
+                "SELECT storage_v2_search_exact("
+                f"{source_id}, '1', '{ast_json}'::JSONB, '{filter_json}'::JSONB, 10)::TEXT;",
+            )
+        )
+        return json.loads(value)
 
     def test_initial_noop_delta_reuse_and_a_to_b_to_a(self) -> None:
         node_a, view_a, digest_a = self.make_projection("alpha")
@@ -516,6 +539,286 @@ SELECT storage_v2_update_append_frontier(
                 )
             ),
             "0",
+        )
+
+    def test_exact_retrieval_composes_views_and_fails_closed(self) -> None:
+        projection = self.sql(
+            self.admin(
+                """
+WITH first_body AS (
+    SELECT id FROM storage_v2_put_inline_body(convert_to('prefix alpha', 'UTF8'))
+), first_node AS (
+    SELECT leaf.id FROM first_body CROSS JOIN LATERAL
+        storage_v2_put_leaf_node('retrieval-fixture', 'text', first_body.id) leaf
+), second_body AS (
+    SELECT id FROM storage_v2_put_inline_body(convert_to('beta gamma exact beta.gamma', 'UTF8'))
+), second_node AS (
+    SELECT leaf.id FROM second_body CROSS JOIN LATERAL
+        storage_v2_put_leaf_node('retrieval-fixture', 'text', second_body.id) leaf
+), root_node AS (
+    SELECT value.id FROM first_node CROSS JOIN second_node CROSS JOIN LATERAL
+        storage_v2_put_internal_node(
+            'retrieval-fixture', 'artifact-root', 39,
+            ARRAY['first', 'second'], ARRAY[first_node.id, second_node.id]
+        ) value
+), view_row AS (
+    SELECT value.id FROM first_node CROSS JOIN second_node CROSS JOIN LATERAL
+        storage_v2_put_retrieval_view(
+            'composed', 'retrieval-fixture-v1', 'text', 'fixture-tokenizer-v1', 0,
+            ARRAY['title', 'body'], ARRAY['node', 'node'],
+            ARRAY[first_node.id, second_node.id], ARRAY[0::BIGINT, 12::BIGINT],
+            ARRAY[12::BIGINT, 39::BIGINT]
+        ) value
+)
+SELECT root_node.id || ':' || view_row.id || ':' || first_node.id || ':' || second_node.id
+  FROM root_node, view_row, first_node, second_node;
+"""
+            )
+        )
+        root_id, view_id, first_node_id, second_node_id = map(int, projection.split(":"))
+        content = "prefix alphabeta gamma exact beta.gamma"
+        digest_hex = self.sql(
+            "SELECT encode(digest(convert_to('prefix alphabeta gamma exact beta.gamma', 'UTF8'), "
+            "'sha256'), 'hex');"
+        )
+        unindexed_node, unindexed_view, unindexed_digest = self.make_projection(
+            "unindexed decoy"
+        )
+        run_id = self.begin(6, "6" * 64, "7" * 64)
+        self.stage(run_id, "retrieval-main", content, root_id, view_id, digest_hex)
+        self.stage(
+            run_id,
+            "unindexed",
+            "unindexed decoy",
+            unindexed_node,
+            unindexed_view,
+            unindexed_digest,
+        )
+        self.complete_analysis(digest_hex)
+        self.complete_analysis(unindexed_digest)
+        self.commit(run_id, 2)
+        denied_run_id = self.begin(7, "8" * 64, "9" * 64)
+        self.stage(
+            denied_run_id,
+            "retrieval-main",
+            content,
+            root_id,
+            view_id,
+            digest_hex,
+        )
+        self.commit(denied_run_id, 1)
+
+        document_rows = self.sql(
+            self.admin(
+                f"""
+SELECT id FROM storage_v2_put_search_document(
+    'native-gin-v1', 'node', {first_node_id}, 'prefix alpha', ARRAY['alpha_name']
+);
+SELECT id FROM storage_v2_put_search_document(
+    'native-gin-v1', 'node', {second_node_id}, 'beta gamma exact beta.gamma', ARRAY['exact_name']
+);
+"""
+            )
+        ).splitlines()
+        first_document_id, second_document_id = map(int, document_rows)
+        self.sql(
+            self.admin(
+                f"""
+SELECT storage_v2_bind_search_document({view_id}, 0, {first_document_id}, 2.0);
+SELECT storage_v2_bind_search_document({view_id}, 1, {second_document_id}, 1.0);
+"""
+            )
+        )
+        occurrence_rows = self.sql(
+            "SELECT id || ':' || source_path FROM occurrence WHERE source_id = 6 ORDER BY id;"
+        ).splitlines()
+        occurrences = {path: int(identifier) for identifier, path in (
+            row.split(":", 1) for row in occurrence_rows
+        )}
+        main_occurrence = occurrences["/synthetic/retrieval-main"]
+        unindexed_occurrence = occurrences["/synthetic/unindexed"]
+        self.sql(
+            self.admin(
+                f"""
+SELECT storage_v2_put_occurrence_score_component(
+    {main_occurrence}, 'graph', 'graph-v1', 'available', 0.25,
+    '{{"fixture":true}}'::JSONB
+);
+SELECT storage_v2_put_occurrence_score_component(
+    {main_occurrence}, 'semantic', 'semantic-v1', 'failed', NULL,
+    '{{"reason":"fixture-failure"}}'::JSONB
+);
+SELECT storage_v2_replace_legacy_hit_mapping(
+    'legacy-exact', ARRAY[{main_occurrence}], 'exact', ARRAY[39], ARRAY[0]
+);
+SELECT storage_v2_replace_legacy_hit_mapping(
+    'legacy-split', ARRAY[{main_occurrence}, {unindexed_occurrence}], 'split',
+    ARRAY[20, 8], ARRAY[0, 20]
+);
+SELECT storage_v2_replace_legacy_hit_mapping(
+    'legacy-merged-a', ARRAY[{main_occurrence}], 'merged', ARRAY[39], ARRAY[0]
+);
+SELECT storage_v2_replace_legacy_hit_mapping(
+    'legacy-merged-b', ARRAY[{main_occurrence}], 'merged', ARRAY[39], ARRAY[0]
+);
+"""
+            )
+        )
+
+        filters = {
+            "path_prefix": "/synthetic/retrieval-main",
+            "role": "artifact",
+            "graph_profile": "graph-v1",
+            "semantic_profile": "semantic-v1",
+            "rerank_profile": "rerank-v1",
+        }
+        composed_ast = {
+            "type": "and",
+            "children": [
+                {"type": "term", "value": "alpha"},
+                {"type": "term", "value": "beta"},
+                {
+                    "type": "not",
+                    "children": [{"type": "term", "value": "decoy"}],
+                },
+            ],
+        }
+        first = self.exact_search(composed_ast, filters, user_id=WRITER_ID)
+        second = self.exact_search(composed_ast, filters, user_id=WRITER_ID)
+        self.assertEqual(first, second, "exact retrieval output must be deterministic")
+        self.assertEqual(first["generation_seq"], 1)
+        self.assertEqual(first["execution"], "complete_scoped_view_evaluation")
+        self.assertEqual(first["fully_scored_views"], 1)
+        self.assertEqual(first["total"], 1)
+        hit = first["results"][0]
+        self.assertEqual(hit["occurrence_id"], main_occurrence)
+        self.assertTrue(hit["external_hit_id"].startswith("storage-v2:"))
+        self.assertEqual(hit["score_explanation"]["graph"]["status"], "available")
+        self.assertEqual(hit["score_explanation"]["semantic"]["status"], "failed")
+        self.assertEqual(hit["score_explanation"]["rerank"]["status"], "unavailable")
+        self.assertEqual(hit["score_explanation"]["pruning"], "disabled_unsafe_bounds")
+        self.assertEqual(hit["legacy_successors"][0]["old_hit_id"], "legacy-exact")
+        denied_scope = self.exact_search(composed_ast, filters, source_id=7)
+        self.assertEqual(denied_scope["total"], 1)
+        self.assertNotEqual(
+            denied_scope["results"][0]["external_hit_id"],
+            hit["external_hit_id"],
+            "source-bound occurrences need distinct external identities",
+        )
+        self.assert_sql_fails(
+            self.actor(
+                WRITER_ID,
+                "SELECT storage_v2_search_exact(7, '1', "
+                "'{\"type\":\"term\",\"value\":\"alpha\"}'::JSONB);",
+            ),
+            "authorized generation selector required",
+        )
+
+        phrase = self.exact_search({"type": "phrase", "value": "beta gamma"}, filters)
+        self.assertEqual(phrase["total"], 1)
+        crossing = self.exact_search({"type": "phrase", "value": "alpha beta"}, filters)
+        self.assertEqual(crossing["total"], 0, "phrases may not cross component boundaries")
+        self.assertEqual(crossing["fully_scored_views"], 1)
+        punctuation = self.exact_search(
+            {"type": "term", "value": "beta.gamma"}, filters
+        )
+        self.assertEqual(punctuation["total"], 1)
+        exact = self.exact_search({"type": "exact", "value": "exact_name"}, filters)
+        self.assertEqual(exact["total"], 1)
+        self.assertEqual(
+            self.exact_search(
+                {"type": "term", "value": "alpha"}, dict(filters, role="heading")
+            )["total"],
+            0,
+        )
+        self.assertEqual(
+            self.exact_search(
+                {"type": "term", "value": "alpha"},
+                dict(filters, occurred_from="2100-01-01T00:00:00Z"),
+            )["total"],
+            0,
+        )
+        alternative = self.exact_search(
+            {
+                "type": "or",
+                "children": [
+                    {"type": "term", "value": "missing"},
+                    {"type": "group", "children": [{"type": "term", "value": "alpha"}]},
+                ],
+            },
+            filters,
+        )
+        self.assertEqual(alternative["total"], 1)
+
+        literal_percent_filter = dict(filters, path_prefix="/synthetic/retrieval%")
+        self.assertEqual(self.exact_search({"type": "term", "value": "alpha"}, literal_percent_filter)["total"], 0)
+        self.assert_sql_fails(
+            self.admin(
+                "SELECT storage_v2_search_exact(6, '1', "
+                "'{\"type\":\"not\",\"children\":[{\"type\":\"term\",\"value\":\"alpha\"}]}'::JSONB);"
+            ),
+            "valid exact retrieval request required",
+        )
+        self.assert_sql_fails(
+            self.admin(
+                "SELECT storage_v2_search_exact(6, '1', "
+                "'{\"type\":\"term\",\"value\":\"\",\"children\":[]}'::JSONB);"
+            ),
+            "valid exact retrieval request required",
+        )
+        self.assert_sql_fails(
+            self.admin(
+                "SELECT storage_v2_search_exact(6, '1', "
+                "'{\"type\":\"term\",\"value\":\"alpha\"}'::JSONB, "
+                "'{\"unknown_filter\":\"value\"}'::JSONB);"
+            ),
+            "valid exact retrieval request required",
+        )
+        self.assert_sql_fails(
+            self.actor(
+                OTHER_ID,
+                "SELECT storage_v2_search_exact(6, '1', "
+                "'{\"type\":\"term\",\"value\":\"alpha\"}'::JSONB);",
+            ),
+            "authorized generation selector required",
+        )
+        self.assert_sql_fails(
+            self.actor(
+                OTHER_ID,
+                "SELECT storage_v2_resolve_legacy_hit(6, '1', 'legacy-exact');",
+            ),
+            "authorized generation selector required",
+        )
+        split = json.loads(
+            self.sql(
+                self.actor(
+                    WRITER_ID,
+                    "SELECT storage_v2_resolve_legacy_hit(6, '1', 'legacy-split')::TEXT;",
+                )
+            )
+        )
+        self.assertEqual(split["primary_ordinal"], 0)
+        self.assertEqual([target["ordinal"] for target in split["targets"]], [0, 1])
+        self.assertEqual(
+            [target["relation_kind"] for target in split["targets"]],
+            ["split", "split"],
+        )
+        merged = json.loads(
+            self.sql(
+                self.actor(
+                    WRITER_ID,
+                    "SELECT storage_v2_resolve_legacy_hit(6, '1', 'legacy-merged-a')::TEXT;",
+                )
+            )
+        )
+        self.assertEqual(merged["targets"][0]["relation_kind"], "merged")
+        self.assertEqual(merged["targets"][0]["occurrence_id"], main_occurrence)
+        self.assert_sql_fails(
+            self.admin(
+                "SELECT storage_v2_search_exact(6, '1', "
+                "'{\"type\":\"term\",\"value\":\"alpha\"}'::JSONB);"
+            ),
+            "required lexical search document missing",
         )
         self.assertEqual(
             self.sql(

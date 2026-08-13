@@ -78,6 +78,18 @@ pub struct SearchResult {
     /// Parent context (e.g., class signature for a function chunk)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_context: Option<String>,
+    /// Stable external identity for storage-v2 hits. Legacy results omit it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_hit_id: Option<String>,
+    /// Ordered exact/split/merged compatibility mappings, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub successor_metadata: Option<serde_json::Value>,
+    /// Score components actually used by the selected read path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_explanation: Option<serde_json::Value>,
+    /// Explicit unavailable/failed optional stages; never fabricated scores.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degradation: Option<serde_json::Value>,
 }
 
 impl SearchResult {
