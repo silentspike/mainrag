@@ -557,3 +557,4 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag;
 -- Additive storage-v2 generation schema. Numbered migrations are authoritative;
 -- this psql-relative include keeps the historical bootstrap in sync.
 \ir migrations/029_storage_v2_generations.sql
+\ir migrations/030_storage_v2_content_bodies.sql
