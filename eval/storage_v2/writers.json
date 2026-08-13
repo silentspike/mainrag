@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "scope": "repository-tracked runtime and operator entrypoints that can mutate current MainRAG content, index, or search state",
+  "limitations": "This inventory does not prove that unknown external writers do not exist and performs no service action.",
+  "writers": [
+    {"path":"api/src/api/handlers/admin.rs","class":"api-entrypoint","reason":"Creates, updates, synchronizes, backfills, and deletes source state."},
+    {"path":"api/src/api/handlers/watch.rs","class":"api-entrypoint","reason":"Accepts incremental watch updates."},
+    {"path":"api/src/main.rs","class":"runtime-supervisor","reason":"Starts repository-managed background writer services."},
+    {"path":"api/src/services/index.rs","class":"runtime-writer","reason":"Writes files, chunks, embeddings, and outbox records."},
+    {"path":"api/src/services/intelligence.rs","class":"runtime-writer","reason":"Writes source-bound intelligence and evidence state."},
+    {"path":"api/src/services/outbox_worker.rs","class":"runtime-writer","reason":"Claims outbox work and mutates Qdrant plus delivery state."},
+    {"path":"api/src/services/qdrant.rs","class":"runtime-writer","reason":"Implements Qdrant upsert, payload, and deletion operations."},
+    {"path":"api/src/services/query_expander.rs","class":"runtime-writer","reason":"Persists query-expansion state."},
+    {"path":"cli/src/client/api.rs","class":"operator-client","reason":"Exposes mutating API calls used by CLI commands."},
+    {"path":"cli/src/commands/add.rs","class":"operator-entrypoint","reason":"Creates a source and directs the operator to synchronize it."},
+    {"path":"cli/src/commands/backfill.rs","class":"operator-entrypoint","reason":"Triggers persistence backfill."},
+    {"path":"cli/src/commands/source.rs","class":"operator-entrypoint","reason":"Triggers source synchronization and deletion."},
+    {"path":"cli/src/commands/watch.rs","class":"operator-entrypoint","reason":"Starts and controls incremental watch ingestion."},
+    {"path":"ops/migration/import-mainrag.py","class":"migration-writer","reason":"Imports legacy PostgreSQL and Qdrant state."},
+    {"path":"scripts/backfill-visibility.py","class":"maintenance-writer","reason":"Backfills visibility state."},
+    {"path":"scripts/load_synonyms_to_qdrant.py","class":"maintenance-writer","reason":"Writes synonym-derived Qdrant state."},
+    {"path":"scripts/migrate-embeddings-gte.py","class":"maintenance-writer","reason":"Writes embedding rows and Qdrant points."},
+    {"path":"scripts/reembed-cch.py","class":"maintenance-writer","reason":"Replaces PostgreSQL embeddings and Qdrant points."}
+  ]
+}
