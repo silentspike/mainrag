@@ -1,6 +1,7 @@
 // Allow dead_code for planned infrastructure (Qdrant vectors, RLS, etc.)
 #![allow(dead_code)]
 
+pub mod content_body;
 pub mod health_pool;
 pub mod models;
 pub mod postgres;

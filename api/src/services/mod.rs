@@ -1,6 +1,7 @@
 pub mod chunker;
 pub mod circuit_breaker;
 pub mod compressor;
+pub mod content_store;
 pub mod domain_profile;
 pub mod embeddings;
 pub mod gpu_semaphore;
