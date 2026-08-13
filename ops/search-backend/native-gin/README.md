@@ -21,10 +21,10 @@ ops/search-backend/native-gin/build-target-postgres.sh \
   /tmp/mainrag-pg18.4-prefix
 ```
 
-The helper downloads the two locked public source archives, verifies SHA-256,
-builds PostgreSQL with the recorded feature flags, and installs only into the
-given prefix. This is a disposable qualification binary, not a production
-package.
+The helper downloads the locked public source archives, verifies SHA-256,
+builds a private Flex 2.6.4 tool when the host has no Flex installation, builds
+PostgreSQL with the recorded feature flags, and installs only into the given
+prefix. This is a disposable qualification binary, not a production package.
 
 ## Run the complete disposable-cluster scenario
 
