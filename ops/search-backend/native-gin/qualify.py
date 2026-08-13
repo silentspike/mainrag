@@ -53,7 +53,11 @@ def run(
     )
     if check and result.returncode != 0:
         command = Path(arguments[0]).name
-        raise RuntimeError(f"{command} failed with exit code {result.returncode}")
+        detail = result.stderr.strip().splitlines()
+        suffix = f": {detail[-1]}" if detail else ""
+        raise RuntimeError(
+            f"{command} failed with exit code {result.returncode}{suffix}"
+        )
     return result
 
 
@@ -341,12 +345,12 @@ $$;
             if post_restart != expected:
                 raise RuntimeError("GIN result changed after immediate restart")
             flags = cluster.sql(
-                "SELECT index_row.indisvalid::INT || index_row.indisready::INT || "
-                "index_row.indislive::INT FROM pg_index index_row "
+                "SELECT index_row.indisvalid AND index_row.indisready AND "
+                "index_row.indislive FROM pg_index index_row "
                 "JOIN pg_class relation ON relation.oid = index_row.indexrelid "
                 "WHERE relation.relname = 'qualification_docs_fts_gin';"
             )
-            if flags != "111":
+            if flags != "t":
                 raise RuntimeError("qualified GIN index is not valid, ready, and live after restart")
             gates["wal_crash_restart"] = {
                 "status": "PASS",
