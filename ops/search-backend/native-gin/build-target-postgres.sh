@@ -41,6 +41,7 @@ tar -xjf "$work_dir/postgresql.tar.bz2" -C "$work_dir"
 postgres_source="$work_dir/postgresql-18.4"
 configure_flags=(
     --disable-nls
+    --with-ssl=openssl
     --without-icu
     --without-ldap
     --without-libxml
