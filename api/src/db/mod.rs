@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod content_body;
+pub mod content_graph;
 pub mod health_pool;
 pub mod models;
 pub mod postgres;

@@ -1,6 +1,9 @@
 pub mod chunker;
 pub mod circuit_breaker;
 pub mod compressor;
+#[allow(dead_code)]
+pub mod content_graph;
+#[allow(dead_code)]
 pub mod content_store;
 pub mod domain_profile;
 pub mod embeddings;
