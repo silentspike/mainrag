@@ -7,7 +7,7 @@
 
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
@@ -330,7 +330,7 @@ impl PackBuilder {
             ));
         }
 
-        let raw_reader = File::open(&raw_path)?;
+        let raw_reader = BufReader::with_capacity(self.buffer_bytes, File::open(&raw_path)?);
         let mut encoded: Box<dyn Read + '_> = match (codec, dictionary.as_ref()) {
             (BodyCodec::Identity, None) => Box::new(raw_reader),
             (BodyCodec::Zstd, Some((_, bytes))) => Box::new(
@@ -547,7 +547,10 @@ impl PackReader {
             .write(true)
             .open(&staging_path)?;
         let file = File::open(&self.path)?;
-        let range = RangeReader::new(file, entry.pack_offset, entry.stored_length)?;
+        let range = BufReader::with_capacity(
+            buffer_bytes,
+            RangeReader::new(file, entry.pack_offset, entry.stored_length)?,
+        );
         let mut decoded: Box<dyn Read + '_> = match (entry.codec, dictionary) {
             (BodyCodec::Identity, None) => Box::new(range),
             (BodyCodec::Zstd, Some(bytes)) => {
