@@ -184,8 +184,9 @@ END
 $$;
 
 CREATE OR REPLACE FUNCTION storage_v2_is_admin() RETURNS BOOLEAN
-LANGUAGE plpgsql STABLE SECURITY INVOKER
+LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path = pg_catalog, public
+SET row_security = off
 AS $$
 DECLARE
     v_user_id UUID;
