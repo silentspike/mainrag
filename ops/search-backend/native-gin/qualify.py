@@ -205,7 +205,7 @@ CREATE INDEX qualification_docs_fts_gin ON qualification_docs USING GIN (fts);
                 cluster.sql(
                     "SET enable_seqscan = off; EXPLAIN (FORMAT JSON) "
                     "SELECT id FROM qualification_docs "
-                    "WHERE fts @@ to_tsquery('simple', 'alpha & beta') ORDER BY id;"
+                    "WHERE fts @@ to_tsquery('simple', 'alpha & beta');"
                 )
             )
             if not plan_uses_index(plan, "qualification_docs_fts_gin"):
