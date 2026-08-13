@@ -8,11 +8,59 @@ pub async fn run(
     limit: u32,
     offset: u32,
     source: Option<&str>,
+    read_path: &str,
+    generation: Option<&str>,
+    path_prefix: Option<&str>,
+    occurred_from: Option<&str>,
+    occurred_to: Option<&str>,
+    role: Option<&str>,
+    graph_profile: Option<&str>,
+    semantic_profile: Option<&str>,
+    rerank_profile: Option<&str>,
     json_output: bool,
 ) -> anyhow::Result<()> {
+    if read_path == "storage_v2" {
+        let generation = generation.filter(|value| {
+            !value.is_empty()
+                && !value.starts_with('0')
+                && value.bytes().all(|byte| byte.is_ascii_digit())
+        });
+        if generation.is_none() || source.is_none() {
+            anyhow::bail!(
+                "--read-path storage_v2 requires --source and a positive --generation sequence"
+            );
+        }
+    } else if read_path != "current" {
+        anyhow::bail!("--read-path must be current or storage_v2");
+    } else if generation.is_some()
+        || path_prefix.is_some()
+        || occurred_from.is_some()
+        || occurred_to.is_some()
+        || role.is_some()
+        || graph_profile.is_some()
+        || semantic_profile.is_some()
+        || rerank_profile.is_some()
+    {
+        anyhow::bail!("storage-v2 generation and filters require --read-path storage_v2");
+    }
     // Fetch extra results to handle offset client-side (API doesn't support offset yet)
-    let fetch_limit = limit + offset;
-    let all_results = client.search(query, mode, fetch_limit, source).await?;
+    let fetch_limit = limit
+        .checked_add(offset)
+        .ok_or_else(|| anyhow::anyhow!("--limit plus --offset exceeds the supported range"))?;
+    let options = crate::client::api::SearchOptions {
+        read_path: Some(read_path),
+        generation,
+        path_prefix,
+        occurred_from,
+        occurred_to,
+        role,
+        graph_profile,
+        semantic_profile,
+        rerank_profile,
+    };
+    let all_results = client
+        .search_with_options(query, mode, fetch_limit, source, &options)
+        .await?;
 
     // Apply offset client-side (but keep original total for pagination display)
     let results = crate::client::api::SearchResponse {
@@ -26,6 +74,9 @@ pub async fn run(
         took_ms: all_results.took_ms,
         quality_tier: all_results.quality_tier,
         reranked: all_results.reranked,
+        read_path: all_results.read_path,
+        generation: all_results.generation,
+        fully_scored_views: all_results.fully_scored_views,
     };
 
     if json_output {
@@ -40,6 +91,10 @@ pub async fn run(
                     "score": (r.score * 100.0).round() / 100.0,
                     "content": r.content,
                     "context": r.context_prefix,
+                    "external_hit_id": r.external_hit_id,
+                    "successors": r.successor_metadata,
+                    "score_explanation": r.score_explanation,
+                    "degradation": r.degradation,
                 })
             })
             .collect();
@@ -49,6 +104,9 @@ pub async fn run(
             serde_json::to_string_pretty(&json!({
                 "query": query,
                 "total": results.total,
+                "read_path": results.read_path,
+                "generation": results.generation,
+                "fully_scored_views": results.fully_scored_views,
                 "results": json_results,
             }))?
         );
@@ -99,6 +157,9 @@ pub async fn run(
         // Parent context: show class/struct signature for function chunks
         if let Some(ref parent) = result.parent_context {
             println!("  >> {}", parent);
+        }
+        if let Some(external_hit_id) = &result.external_hit_id {
+            println!("  id: {}", external_hit_id);
         }
 
         // Content: full chunk text, no snippet, no highlighting

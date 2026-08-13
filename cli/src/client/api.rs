@@ -37,6 +37,14 @@ pub struct SearchResult {
     /// Parent context (e.g., class signature for a function chunk)
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub parent_context: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub external_hit_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub successor_metadata: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub score_explanation: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub degradation: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -51,6 +59,25 @@ pub struct SearchResponse {
     pub quality_tier: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reranked: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub read_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub generation: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fully_scored_views: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SearchOptions<'a> {
+    pub read_path: Option<&'a str>,
+    pub generation: Option<&'a str>,
+    pub path_prefix: Option<&'a str>,
+    pub occurred_from: Option<&'a str>,
+    pub occurred_to: Option<&'a str>,
+    pub role: Option<&'a str>,
+    pub graph_profile: Option<&'a str>,
+    pub semantic_profile: Option<&'a str>,
+    pub rerank_profile: Option<&'a str>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -322,6 +349,18 @@ impl ApiClient {
         limit: u32,
         source: Option<&str>,
     ) -> Result<SearchResponse> {
+        self.search_with_options(query, mode, limit, source, &SearchOptions::default())
+            .await
+    }
+
+    pub async fn search_with_options(
+        &self,
+        query: &str,
+        mode: &str,
+        limit: u32,
+        source: Option<&str>,
+        options: &SearchOptions<'_>,
+    ) -> Result<SearchResponse> {
         // Use keyword endpoint for keyword mode, hybrid for others
         let endpoint = if mode == "keyword" {
             "search/keyword"
@@ -344,6 +383,22 @@ impl ApiClient {
                 self.get_source_id_by_name(s).await?
             };
             body["source_id"] = serde_json::json!(source_id);
+        }
+
+        for (name, value) in [
+            ("read_path", options.read_path),
+            ("generation", options.generation),
+            ("path_prefix", options.path_prefix),
+            ("occurred_from", options.occurred_from),
+            ("occurred_to", options.occurred_to),
+            ("role", options.role),
+            ("graph_profile", options.graph_profile),
+            ("semantic_profile", options.semantic_profile),
+            ("rerank_profile", options.rerank_profile),
+        ] {
+            if let Some(value) = value {
+                body[name] = serde_json::json!(value);
+            }
         }
 
         // Add quality tier based on mode

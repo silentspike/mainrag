@@ -23,6 +23,8 @@ pub mod qdrant;
 pub mod quality;
 pub mod query_expander;
 pub mod rerank;
+#[cfg(feature = "storage-v2-retrieval")]
+pub mod retrieval_v2;
 pub mod search;
 #[allow(dead_code)]
 pub mod watch;

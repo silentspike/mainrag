@@ -56,6 +56,42 @@ enum Commands {
         /// Filter by source name
         #[arg(short = 'S', long)]
         source: Option<String>,
+
+        /// Select current (default) or storage_v2 retrieval
+        #[arg(long, default_value = "current")]
+        read_path: String,
+
+        /// Explicit storage-v2 generation; requires --read-path storage_v2 and --source
+        #[arg(long)]
+        generation: Option<String>,
+
+        /// Restrict storage-v2 occurrences to a path prefix
+        #[arg(long)]
+        path_prefix: Option<String>,
+
+        /// RFC3339 inclusive lower occurrence timestamp
+        #[arg(long)]
+        occurred_from: Option<String>,
+
+        /// RFC3339 exclusive upper occurrence timestamp
+        #[arg(long)]
+        occurred_to: Option<String>,
+
+        /// Restrict storage-v2 occurrence role/type
+        #[arg(long)]
+        role: Option<String>,
+
+        /// Explicit optional graph score profile
+        #[arg(long)]
+        graph_profile: Option<String>,
+
+        /// Explicit optional semantic score profile
+        #[arg(long)]
+        semantic_profile: Option<String>,
+
+        /// Explicit optional rerank score profile
+        #[arg(long)]
+        rerank_profile: Option<String>,
     },
 
     /// Add a new source (filesystem, git, or web)
@@ -363,6 +399,15 @@ async fn main() -> anyhow::Result<()> {
             limit,
             offset,
             source,
+            read_path,
+            generation,
+            path_prefix,
+            occurred_from,
+            occurred_to,
+            role,
+            graph_profile,
+            semantic_profile,
+            rerank_profile,
         } => {
             commands::search::run(
                 &client,
@@ -371,6 +416,15 @@ async fn main() -> anyhow::Result<()> {
                 limit,
                 offset,
                 source.as_deref(),
+                &read_path,
+                generation.as_deref(),
+                path_prefix.as_deref(),
+                occurred_from.as_deref(),
+                occurred_to.as_deref(),
+                role.as_deref(),
+                graph_profile.as_deref(),
+                semantic_profile.as_deref(),
+                rerank_profile.as_deref(),
                 cli.json,
             )
             .await
