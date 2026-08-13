@@ -226,7 +226,18 @@ CREATE TABLE qualification_interrupt(
 );
 INSERT INTO qualification_interrupt(id, body)
 SELECT value, 'alpha ' || md5(value::TEXT) || ' beta ' || md5((value + 1)::TEXT)
-  FROM generate_series(1, 2000000) AS value;
+  FROM generate_series(1, 10000) AS value;
+CREATE FUNCTION qualification_slow_fts(value TSVECTOR)
+RETURNS TSVECTOR
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+BEGIN
+    PERFORM pg_sleep(0.001);
+    RETURN value;
+END;
+$$;
 """
             )
             interrupt = subprocess.Popen(
@@ -242,7 +253,7 @@ SELECT value, 'alpha ' || md5(value::TEXT) || ' beta ' || md5((value + 1)::TEXT)
                     "--command",
                     "SET application_name='mainrag_qualification_interrupt'; "
                     "CREATE INDEX CONCURRENTLY qualification_interrupted_gin "
-                    "ON qualification_interrupt USING GIN (fts);",
+                    "ON qualification_interrupt USING GIN (qualification_slow_fts(fts));",
                 ],
                 cwd=ROOT,
                 stdout=subprocess.DEVNULL,
@@ -282,13 +293,16 @@ SELECT value, 'alpha ' || md5(value::TEXT) || ' beta ' || md5((value + 1)::TEXT)
                     "AND (NOT index_row.indisvalid OR NOT index_row.indisready);"
                 )
             )
+            if invalid_count != 1:
+                raise RuntimeError("canceled concurrent GIN build left no single invalid artifact")
             gates["interrupted_build"] = {
                 "status": "PASS",
-                "detail": "concurrent build was canceled and catalog inspection completed",
+                "detail": "throttled concurrent build was canceled and one invalid catalog artifact was detected",
                 "count": invalid_count,
             }
             cluster.sql(
                 "DROP INDEX IF EXISTS qualification_interrupted_gin; "
+                "DROP FUNCTION qualification_slow_fts(TSVECTOR); "
                 "CREATE INDEX qualification_interrupted_gin "
                 "ON qualification_interrupt USING GIN (fts);"
             )
