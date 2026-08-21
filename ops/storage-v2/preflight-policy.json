@@ -1,0 +1,57 @@
+{
+  "schema_version": "mainrag-storage-v2-preflight-policy/v1",
+  "accepted_backend_lock": "ops/search-backend/native-gin/backend.lock.json",
+  "accepted_backend_lock_sha256": "773e43a65ef99a450bb555841443c52aaabcd3483f232efa9c91121542988219",
+  "accepted_backend_evidence": "eval/storage_v2/backend/results/native-gin-pg18.4.json",
+  "accepted_backend_evidence_sha256": "a7c6ed9b07591de6a99e2f5b564b9f13fd22f83aad1e015086275466517068d7",
+  "tuning_config": "ops/postgresql/mainrag-tuning.conf",
+  "writer_inventory": "eval/storage_v2/writers.json",
+  "required_migrations": [
+    "migrations/029_storage_v2_generations.sql",
+    "migrations/030_storage_v2_content_bodies.sql",
+    "migrations/031_storage_v2_content_graph.sql",
+    "migrations/032_storage_v2_shadow_ingest.sql",
+    "migrations/033_storage_v2_intelligence.sql",
+    "migrations/034_storage_v2_retrieval.sql",
+    "migrations/035_storage_v2_shadow_slice.sql"
+  ],
+  "required_extensions": {
+    "vector": "0.8.2"
+  },
+  "required_settings": [
+    "shared_preload_libraries",
+    "shared_buffers",
+    "effective_cache_size",
+    "work_mem",
+    "maintenance_work_mem",
+    "max_connections",
+    "max_wal_size",
+    "max_worker_processes",
+    "max_parallel_workers",
+    "max_parallel_maintenance_workers",
+    "io_method",
+    "track_io_timing",
+    "autovacuum",
+    "statement_timeout"
+  ],
+  "managed_units": [
+    {"name": "mainrag-api.service", "writes": true, "read_behavior": "unavailable"},
+    {"name": "mainrag-backup.service", "writes": false, "read_behavior": "unchanged"},
+    {"name": "mainrag-backup.timer", "writes": false, "read_behavior": "unchanged"},
+    {"name": "mainrag-qdrant-snapshot.service", "writes": false, "read_behavior": "unchanged"},
+    {"name": "mainrag-qdrant-snapshot.timer", "writes": false, "read_behavior": "unchanged"},
+    {"name": "mainrag-svelte.service", "writes": false, "read_behavior": "available"}
+  ],
+  "capacity": {
+    "minimum_free_bytes": 21474836480,
+    "database_multiplier": 2.0,
+    "index_multiplier": 1.25,
+    "wal_reserve_bytes": 8589934592
+  },
+  "backup_max_age_seconds": 129600,
+  "allowed_database_applications": [
+    "",
+    "psql",
+    "mainrag-storage-v2-preflight"
+  ]
+}
