@@ -106,7 +106,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             }
         }));
 
-    // Long-running admin routes with 10min timeout (sync/backfill are I/O-bound)
+    // Long-running admin routes with a 24h timeout. Source sync and resumable
+    // storage-v2 candidate construction are intentionally source-bounded but
+    // can exceed ten minutes for multi-gigabyte sources.
     let long_running_routes = Router::new()
         .route(
             "/api/v1/admin/sources/:id/sync",
@@ -123,7 +125,13 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/admin/backfill/qdrant-user-ids",
             post(handlers::admin_backfill_qdrant_user_ids),
-        )
+        );
+    #[cfg(feature = "storage-v2-retrieval")]
+    let long_running_routes = long_running_routes.route(
+        "/api/v1/admin/sources/:id/storage-v2-release-candidate-build",
+        post(handlers::admin_build_release_candidate),
+    );
+    let long_running_routes = long_running_routes
         .layer(middleware::from_fn(admin_middleware))
         .layer(middleware::from_fn({
             let auth = auth_layer.clone();
@@ -134,7 +142,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         }))
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(600),
+            Duration::from_secs(24 * 3600),
         ));
 
     // Timed routes: everything except SSE and long-running, with 30s timeout
@@ -321,6 +329,10 @@ fn admin_routes(auth_layer: AuthLayer) -> Router<Arc<AppState>> {
         .route(
             "/sources/:id/storage-v2-dual-read",
             post(handlers::admin_record_dual_read),
+        )
+        .route(
+            "/sources/:id/storage-v2-release-candidate-qualify",
+            post(handlers::admin_qualify_release_candidate),
         )
         .route(
             "/sources/:id/storage-v2-shadow-runs/:run_id/cleanup",

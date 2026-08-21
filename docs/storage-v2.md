@@ -526,6 +526,28 @@ building runs may be cancelled and marked with an unreadable lifecycle
 tombstone; immutable staging rows remain as audit evidence and no membership or
 active pointer is changed.
 
+## Source release-candidate interface
+
+The same feature provides a distinct production build surface for #66. It
+accepts any registered source adapter, captures a canonical source watermark,
+builds and verifies one immutable generation, and leaves qualification separate.
+The production path does not inject the fixture's controlled parser retry and
+does not infer or update an active generation.
+
+The qualification surface accepts protected evidence only after supported
+current and named-generation reads have produced accepted dual-read evidence.
+One transaction records an opaque evidence UUID and manifest hash, rechecks
+source/generation ownership, watermark and profile identity, item/membership
+reconciliation, complete analysis, resource and quality gates, and active-pointer
+stability, then transitions `verified` to `release_candidate`. A partial unique
+index permits at most one current release candidate per logical source.
+
+Completed sources are restart/resume checkpoints: rerunning the same semantic
+snapshot reuses the verified or release-candidate generation and immutable
+content. Other sources can continue after one source fails, but aggregate
+activation remains blocked until every in-scope source has exactly one accepted
+candidate.
+
 ## Evidence and privacy contract
 
 Public evidence may contain repository commits, schema/package/profile versions,

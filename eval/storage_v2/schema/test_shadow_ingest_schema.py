@@ -81,7 +81,8 @@ INSERT INTO sources(id, name, type, path) VALUES
     (6, 'synthetic-retrieval', 'fixture', 'synthetic-retrieval'),
     (7, 'synthetic-retrieval-denied', 'fixture', 'synthetic-retrieval-denied'),
     (8, 'synthetic-test-scope', 'fixture', 'synthetic-test-scope'),
-    (9, 'synthetic-generation-occurrences', 'fixture', 'synthetic-generation-occurrences');
+    (9, 'synthetic-generation-occurrences', 'fixture', 'synthetic-generation-occurrences'),
+    (10, 'synthetic-release-candidate', 'fixture', 'synthetic-release-candidate');
 UPDATE sources SET is_test = TRUE WHERE id = 8;
 INSERT INTO fixture_source_access VALUES
     ('{WRITER_ID}', 1, TRUE, TRUE), ('{WRITER_ID}', 3, TRUE, TRUE),
@@ -691,6 +692,102 @@ SELECT storage_v2_verify_generation({generation_id}, '{'31' * 32}');
             state["analysis_incomplete_count"],
             1,
             "a visible membership without the named generation run item must fail closed",
+        )
+
+    def test_release_candidate_requires_complete_evidence_and_keeps_pointer_null(self) -> None:
+        node_id, view_id, digest_hex = self.make_projection("candidate evidence")
+        watermark = "41" * 32
+        run_id = int(
+            self.sql(
+                self.admin(
+                    "SELECT (storage_v2_begin_shadow_ingest("
+                    f"10, '{'42' * 32}', '{watermark}', 'fixture-adapter-v1', "
+                    f"'release-candidate-build', '{{\"fixture_sha256\":\"{watermark}\"}}'::JSONB, FALSE"
+                    ")).id;"
+                )
+            )
+        )
+        self.stage(
+            run_id,
+            "candidate.txt",
+            "candidate evidence",
+            node_id,
+            view_id,
+            digest_hex,
+        )
+        self.complete_analysis(digest_hex)
+        self.commit(run_id, 1)
+        generation_id = int(
+            self.sql(
+                "SELECT generation_id FROM storage_v2_ingest_run "
+                f"WHERE id={run_id};"
+            )
+        )
+        self.sql(
+            self.admin(
+                f"SELECT storage_v2_verify_generation({generation_id}, '{'43' * 32}');"
+            )
+        )
+        dual_read_id = "00000000-0000-4000-8000-000000000038"
+        dual_read = (
+            '{"status":"PASS","unexplained_count":0,"comparisons":[]}'
+        )
+        self.sql(
+            self.admin(
+                "SELECT storage_v2_record_dual_read_evidence("
+                f"'{dual_read_id}', 10, {generation_id}, '{'44' * 20}', "
+                f"'{watermark}', '{'45' * 32}', '{dual_read}'::JSONB);"
+            )
+        )
+        evidence_id = "00000000-0000-4000-8000-000000000039"
+        incomplete = '{"status":"PASS","checks":{}}'
+        self.assert_sql_fails(
+            self.admin(
+                "SELECT storage_v2_qualify_release_candidate("
+                f"'{evidence_id}', 10, {generation_id}, '{'44' * 20}', "
+                f"'{watermark}', 'fixture-adapter-v1', 'fixture-analysis-v1', "
+                f"'fixture-search-v1', '{incomplete}'::JSONB);"
+            ),
+            "all release-candidate qualification checks must pass",
+        )
+        checks = {
+            key: "PASS"
+            for key in (
+                "artifact_root",
+                "authorization",
+                "body_pack_integrity",
+                "dual_read",
+                "intelligence",
+                "intervals",
+                "legacy_intelligence_export",
+                "resource_budget",
+                "restart_resume",
+                "search_quality",
+            )
+        }
+        manifest = json.dumps(
+            {"status": "PASS", "checks": checks}, separators=(",", ":")
+        )
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    "SELECT (storage_v2_qualify_release_candidate("
+                    f"'{evidence_id}', 10, {generation_id}, '{'44' * 20}', "
+                    f"'{watermark}', 'fixture-adapter-v1', 'fixture-analysis-v1', "
+                    f"'fixture-search-v1', '{manifest}'::JSONB)).id;"
+                )
+            ),
+            evidence_id,
+        )
+        self.assertEqual(
+            self.sql(
+                "SELECT generation.status::TEXT || ':' || "
+                "COALESCE(source.active_generation_id::TEXT, 'none') "
+                "FROM source_generation generation "
+                "JOIN logical_source source ON source.id=generation.source_id "
+                f"WHERE generation.id={generation_id};"
+            ),
+            "release_candidate:none",
         )
 
     def test_authorized_writer_can_use_source_local_shadow_functions(self) -> None:

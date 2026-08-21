@@ -27,6 +27,14 @@ use crate::services::parser::{CodeParser, ExtractedCall, ExtractedSymbol, ParseR
 pub const FIXTURE_ADAPTER_PROFILE: &str = "mainrag.fs-shadow-fixture.v1";
 pub const FIXTURE_VIEW_PROFILE: &str = "mainrag.whole-artifact-view.v1";
 pub const FIXTURE_SEARCH_PROFILE: &str = "mainrag.lexical-simple.v1";
+pub const RELEASE_VIEW_PROFILE: &str = "mainrag.whole-artifact-view.v1";
+pub const RELEASE_SEARCH_PROFILE: &str = "mainrag.lexical-simple.v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SliceMode {
+    PublicFixture,
+    ReleaseCandidate,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShadowSliceResult {
@@ -35,6 +43,7 @@ pub struct ShadowSliceResult {
     pub generation_id: i64,
     pub generation_seq: i64,
     pub fixture_sha256: String,
+    pub source_watermark_sha256: String,
     pub item_count: usize,
     pub symbol_count: usize,
     pub controlled_retry_count: usize,
@@ -44,6 +53,91 @@ pub struct ShadowSliceResult {
     pub active_generation_before: Option<i64>,
     pub active_generation_after: Option<i64>,
     pub telemetry: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReleaseCandidateEvidenceInput {
+    pub evidence_id: Uuid,
+    pub generation_id: i64,
+    pub commit_sha: String,
+    pub source_watermark_sha256: String,
+    pub adapter_profile_id: String,
+    pub analysis_profile_id: String,
+    pub search_profile_id: String,
+    pub manifest: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReleaseCandidateEvidenceResult {
+    pub evidence_id: Uuid,
+    pub source_id: i64,
+    pub generation_id: i64,
+    pub generation_seq: i64,
+    pub status: String,
+    pub manifest_sha256: String,
+    pub active_generation_id: Option<i64>,
+}
+
+pub async fn qualify_release_candidate<C>(
+    client: &C,
+    source_id: i64,
+    input: &ReleaseCandidateEvidenceInput,
+) -> Result<ReleaseCandidateEvidenceResult>
+where
+    C: GenericClient + Sync,
+{
+    if input.generation_id <= 0
+        || !is_git_sha(&input.commit_sha)
+        || !is_sha256(&input.source_watermark_sha256)
+        || input.adapter_profile_id.is_empty()
+        || input.analysis_profile_id.is_empty()
+        || input.search_profile_id.is_empty()
+        || !input.manifest.is_object()
+    {
+        bail!("complete release-candidate evidence identity is required");
+    }
+    let row = client
+        .query_one(
+            "SELECT evidence.id, evidence.generation_id, \
+                    encode(evidence.manifest_sha256, 'hex') AS manifest_sha256 \
+               FROM storage_v2_qualify_release_candidate( \
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9) evidence",
+            &[
+                &input.evidence_id,
+                &source_id,
+                &input.generation_id,
+                &input.commit_sha,
+                &input.source_watermark_sha256,
+                &input.adapter_profile_id,
+                &input.analysis_profile_id,
+                &input.search_profile_id,
+                &input.manifest,
+            ],
+        )
+        .await?;
+    let generation = client
+        .query_one(
+            "SELECT generation.generation_seq, generation.status::TEXT AS status, \
+                    source.active_generation_id \
+               FROM source_generation generation \
+               JOIN logical_source source ON source.id=generation.source_id \
+              WHERE generation.id=$1 AND generation.source_id=$2",
+            &[&input.generation_id, &source_id],
+        )
+        .await?;
+    let status: String = generation.get("status");
+    if status != "release_candidate" {
+        bail!("qualification did not produce a release candidate");
+    }
+    Ok(ReleaseCandidateEvidenceResult {
+        evidence_id: row.get("id"),
+        source_id,
+        generation_id: row.get("generation_id"),
+        generation_seq: generation.get("generation_seq"),
+        status,
+        manifest_sha256: row.get("manifest_sha256"),
+        active_generation_id: generation.get("active_generation_id"),
+    })
 }
 
 /// Run a bounded public fixture from the real source adapter through the
@@ -62,7 +156,60 @@ pub async fn run_public_shadow_slice<C>(
 where
     C: GenericClient + Sync,
 {
-    if source_type != "fs" || !is_git_sha(commit_sha) {
+    run_storage_v2_slice(
+        client,
+        source_id,
+        source_type,
+        source_path,
+        pack_root,
+        io_buffer_bytes,
+        commit_sha,
+        SliceMode::PublicFixture,
+    )
+    .await
+}
+
+/// Build and verify a complete source generation without changing an active
+/// pointer. Qualification and the release-candidate transition are separate.
+pub async fn run_release_candidate_build<C>(
+    client: &C,
+    source_id: i64,
+    source_type: &str,
+    source_path: &Path,
+    pack_root: &Path,
+    io_buffer_bytes: usize,
+    commit_sha: &str,
+) -> Result<ShadowSliceResult>
+where
+    C: GenericClient + Sync,
+{
+    run_storage_v2_slice(
+        client,
+        source_id,
+        source_type,
+        source_path,
+        pack_root,
+        io_buffer_bytes,
+        commit_sha,
+        SliceMode::ReleaseCandidate,
+    )
+    .await
+}
+
+async fn run_storage_v2_slice<C>(
+    client: &C,
+    source_id: i64,
+    source_type: &str,
+    source_path: &Path,
+    pack_root: &Path,
+    io_buffer_bytes: usize,
+    commit_sha: &str,
+    mode: SliceMode,
+) -> Result<ShadowSliceResult>
+where
+    C: GenericClient + Sync,
+{
+    if (mode == SliceMode::PublicFixture && source_type != "fs") || !is_git_sha(commit_sha) {
         bail!("shadow slice requires the filesystem adapter and an exact commit SHA");
     }
     if !(4096..=1024 * 1024).contains(&io_buffer_bytes) {
@@ -77,16 +224,17 @@ where
             &[&source_id],
         )
         .await?;
+    let is_test = source.get::<_, bool>("is_test");
     if source.get::<_, String>("type") != source_type
         || source.get::<_, String>("path") != source_path
-        || !source.get::<_, bool>("is_test")
+        || (mode == SliceMode::PublicFixture && !is_test)
     {
-        bail!("shadow fixture source registry does not match the explicit test source");
+        bail!("source registry does not match the requested storage-v2 scope");
     }
     client
         .execute(
-            "SELECT storage_v2_require_test_scope($1, TRUE)",
-            &[&source_id],
+            "SELECT storage_v2_require_test_scope($1, $2)",
+            &[&source_id, &is_test],
         )
         .await?;
     let active_generation_before = active_generation(client, source_id).await?;
@@ -96,10 +244,10 @@ where
     let total_started = Instant::now();
     let adapter_started = Instant::now();
     let plugin = plugins::get_plugin(source_type)
-        .ok_or_else(|| anyhow::anyhow!("filesystem source adapter is unavailable"))?;
+        .ok_or_else(|| anyhow::anyhow!("source adapter is unavailable"))?;
     let sync = plugin.sync(source_path).await?;
-    if !sync.errors.is_empty() || sync.files.is_empty() {
-        bail!("fixture adapter returned errors or zero files");
+    if !sync.errors.is_empty() || (mode == SliceMode::PublicFixture && sync.files.is_empty()) {
+        bail!("source adapter returned errors or an invalid empty fixture");
     }
     let mut files = Vec::with_capacity(sync.files.len());
     for file in sync.files {
@@ -122,11 +270,23 @@ where
             .context("fixture byte count overflow")
     })?;
     measurements.record_stage(ShadowIngestStage::ReadAndHash, adapter_started.elapsed());
+    let adapter_profile = match mode {
+        SliceMode::PublicFixture => FIXTURE_ADAPTER_PROFILE.to_string(),
+        SliceMode::ReleaseCandidate => {
+            format!("mainrag.{source_type}-release-candidate.v1")
+        }
+    };
+    let witness_kind = match mode {
+        SliceMode::PublicFixture => "public-fixture",
+        SliceMode::ReleaseCandidate => "release-candidate-build",
+    };
     let witness = json!({
-        "kind": "public-fixture",
+        "kind": witness_kind,
         "fixture_sha256": fixture_sha256.clone(),
+        "source_watermark_sha256": fixture_sha256.clone(),
         "commit_sha": commit_sha,
-        "is_test": true,
+        "is_test": is_test,
+        "adapter_profile_id": adapter_profile,
     });
     let predecessor_generation_id = client
         .query_opt(
@@ -140,9 +300,13 @@ where
         .await?
         .map(|row| row.get::<_, i64>(0))
         .unwrap_or(0);
+    let idempotency_domain = match mode {
+        SliceMode::PublicFixture => "mainrag.storage-v2.shadow-snapshot.v1",
+        SliceMode::ReleaseCandidate => "mainrag.storage-v2.release-candidate-build.v1",
+    };
     let idempotency_key = hex::encode(Sha256::digest(
         format!(
-            "mainrag.storage-v2.shadow-snapshot.v1:{source_id}:{predecessor_generation_id}:{fixture_sha256}"
+            "{idempotency_domain}:{source_id}:{predecessor_generation_id}:{fixture_sha256}:{adapter_profile}"
         )
         .as_bytes(),
     ));
@@ -152,8 +316,8 @@ where
         source_id,
         &idempotency_key,
         &fixture_sha256,
-        FIXTURE_ADAPTER_PROFILE,
-        "public-fixture",
+        &adapter_profile,
+        witness_kind,
         &witness,
         false,
     )
@@ -168,8 +332,11 @@ where
                 &[&run.generation_id, &source_id],
             )
             .await?;
-        if generation.get::<_, String>("status") != "verified" {
-            bail!("idempotent shadow run exists but its generation is not verified");
+        if !matches!(
+            generation.get::<_, String>("status").as_str(),
+            "verified" | "release_candidate"
+        ) {
+            bail!("idempotent storage-v2 run exists but its generation is not qualified");
         }
         let active_generation_after = active_generation(client, source_id).await?;
         if active_generation_after != active_generation_before {
@@ -213,7 +380,8 @@ where
             source_id,
             generation_id: run.generation_id,
             generation_seq: generation.get("generation_seq"),
-            fixture_sha256,
+            fixture_sha256: fixture_sha256.clone(),
+            source_watermark_sha256: fixture_sha256,
             item_count: usize::try_from(run.expected_item_count.unwrap_or(0))?,
             symbol_count: usize::try_from(symbol_count)?,
             controlled_retry_count: 0,
@@ -230,7 +398,7 @@ where
         });
     }
     if run.status != "building" {
-        bail!("shadow fixture ingest run is neither building nor reusable");
+        bail!("storage-v2 ingest run is neither building nor reusable");
     }
 
     let content_started = Instant::now();
@@ -347,7 +515,11 @@ where
     let mut controlled_retry_done = false;
     for ((path, language, bytes), body) in files.iter().zip(&bodies) {
         let projection_started = Instant::now();
-        let node = content_graph::put_leaf_node(client, "fixture", "artifact", body.id).await?;
+        let node_domain = match mode {
+            SliceMode::PublicFixture => "fixture",
+            SliceMode::ReleaseCandidate => "source",
+        };
+        let node = content_graph::put_leaf_node(client, node_domain, "artifact", body.id).await?;
         let roles = vec!["content".to_string()];
         let kinds = vec!["node".to_string()];
         let component_ids = vec![node.id];
@@ -356,7 +528,10 @@ where
         let view = content_graph::put_retrieval_view(
             client,
             "artifact",
-            FIXTURE_VIEW_PROFILE,
+            match mode {
+                SliceMode::PublicFixture => FIXTURE_VIEW_PROFILE,
+                SliceMode::ReleaseCandidate => RELEASE_VIEW_PROFILE,
+            },
             language.as_deref().unwrap_or("text"),
             "whole-bytes-v1",
             0,
@@ -402,7 +577,7 @@ where
                 GENERIC_ANALYSIS_PROFILE,
             )
             .await?;
-            if !controlled_retry_done {
+            if mode == SliceMode::PublicFixture && !controlled_retry_done {
                 generation_ingest::finish_analysis_attempt(
                     client,
                     content_digest,
@@ -458,9 +633,12 @@ where
                 run_id: run.id,
                 item_key: path,
                 item_kind: "document",
-                witness_type: "public-fixture-item",
+                witness_type: match mode {
+                    SliceMode::PublicFixture => "public-fixture-item",
+                    SliceMode::ReleaseCandidate => "release-candidate-item",
+                },
                 witness: &item_witness,
-                adapter_profile_id: FIXTURE_ADAPTER_PROFILE,
+                adapter_profile_id: &adapter_profile,
                 content_root_node_id: Some(node.id),
                 raw_body_id: None,
                 expected_content_hash: &expected_content_hash,
@@ -478,7 +656,15 @@ where
         let document_id: i64 = client
             .query_one(
                 "SELECT id FROM storage_v2_put_search_document($1, 'node', $2, $3, $4)",
-                &[&FIXTURE_SEARCH_PROFILE, &node.id, &text, &identifiers],
+                &[
+                    &match mode {
+                        SliceMode::PublicFixture => FIXTURE_SEARCH_PROFILE,
+                        SliceMode::ReleaseCandidate => RELEASE_SEARCH_PROFILE,
+                    },
+                    &node.id,
+                    &text,
+                    &identifiers,
+                ],
             )
             .await?
             .get(0);
@@ -565,11 +751,20 @@ where
             client
                 .execute(
                     "SELECT storage_v2_put_occurrence_score_component( \
-                     $1,$2,'fixture-unavailable-v1','unavailable',NULL,$3)",
+                     $1,$2,$3,'unavailable',NULL,$4)",
                     &[
                         &staged.occurrence_id,
                         &stage,
-                        &json!({"reason": "fixture-disabled"}),
+                        &match mode {
+                            SliceMode::PublicFixture => "fixture-unavailable-v1",
+                            SliceMode::ReleaseCandidate => "candidate-unavailable-v1",
+                        },
+                        &json!({
+                            "reason": match mode {
+                                SliceMode::PublicFixture => "fixture-disabled",
+                                SliceMode::ReleaseCandidate => "backend-not-applicable",
+                            }
+                        }),
                     ],
                 )
                 .await?;
@@ -609,7 +804,7 @@ where
     );
     let reuse_count_started = Instant::now();
     let reuse = client
-        .query_one(
+        .query_opt(
             "SELECT \
                 COUNT(*) FILTER (WHERE artifact.created_at >= run.created_at)::BIGINT AS artifacts_created, \
                 COUNT(*) FILTER (WHERE occurrence_row.created_at >= run.created_at)::BIGINT AS occurrences_created, \
@@ -625,17 +820,33 @@ where
             &[&run.id],
         )
         .await?;
-    measurements.artifacts_created = u64::try_from(reuse.get::<_, i64>("artifacts_created"))?;
-    measurements.occurrences_created = u64::try_from(reuse.get::<_, i64>("occurrences_created"))?;
-    measurements.reused_nodes = u64::try_from(reuse.get::<_, i64>("nodes"))?;
-    measurements.reused_views = u64::try_from(reuse.get::<_, i64>("views"))?;
+    measurements.artifacts_created = reuse
+        .as_ref()
+        .map(|row| u64::try_from(row.get::<_, i64>("artifacts_created")))
+        .transpose()?
+        .unwrap_or(0);
+    measurements.occurrences_created = reuse
+        .as_ref()
+        .map(|row| u64::try_from(row.get::<_, i64>("occurrences_created")))
+        .transpose()?
+        .unwrap_or(0);
+    measurements.reused_nodes = reuse
+        .as_ref()
+        .map(|row| u64::try_from(row.get::<_, i64>("nodes")))
+        .transpose()?
+        .unwrap_or(0);
+    measurements.reused_views = reuse
+        .as_ref()
+        .map(|row| u64::try_from(row.get::<_, i64>("views")))
+        .transpose()?
+        .unwrap_or(0);
     measurements.record_stage(
         ShadowIngestStage::DatabaseStage,
         reuse_count_started.elapsed(),
     );
     let verification_started = Instant::now();
     let verification_manifest = hex::encode(Sha256::digest(
-        format!("{fixture_sha256}:{root}:{commit_sha}").as_bytes(),
+        format!("{fixture_sha256}:{root}:{commit_sha}:{adapter_profile}").as_bytes(),
     ));
     client
         .execute(
@@ -661,7 +872,8 @@ where
         source_id,
         generation_id: committed.generation_id,
         generation_seq,
-        fixture_sha256,
+        fixture_sha256: fixture_sha256.clone(),
+        source_watermark_sha256: fixture_sha256,
         item_count: files.len(),
         symbol_count,
         controlled_retry_count,
