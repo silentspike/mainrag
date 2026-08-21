@@ -484,6 +484,24 @@ cleanup, and release are separate authorities. An implementation PR author does
 not acquire any later authority. A failed or missing gate leaves active/default
 reads unchanged.
 
+### Database preparation interface
+
+[`ops/storage-v2/preflight.py`](../ops/storage-v2/preflight.py) is the
+non-mutating boundary for database and maintenance preparation. Its redacted
+manifest binds PostgreSQL/client/backend versions, schema and repository
+configuration hashes, extension and preload state, collation/index state,
+writer/timer activity, backup evidence level, and resource headroom. Missing or
+drifted evidence is `BLOCKED`; backup-command evidence is never presented as a
+restore or recovery test.
+
+Live preparation uses
+[`ops/storage-v2/apply-gate.py`](../ops/storage-v2/apply-gate.py). It invokes at
+most one separately reviewed adapter and only when the exact gate, checked
+manifest digest, adapter digest, approval string, and fresh live-state digest
+match. It then requires immediate post-readback and rejects regression of any
+previous PASS. The coordinator does not itself grant upgrade, service, reindex,
+package, activation, deployment, or cleanup authority.
+
 ## Bounded shadow-slice interface
 
 The `storage-v2-retrieval` feature exposes only explicit, named-generation
