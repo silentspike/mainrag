@@ -1,0 +1,106 @@
+name: Engineering epic
+description: Define a bounded initiative composed of independently landable work.
+title: "[Epic] "
+labels: ["epic", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use public-safe information only. Do not include credentials, private source content,
+        account identities, hostnames, addresses, local paths, or raw private logs.
+  - type: textarea
+    id: product_outcome
+    attributes:
+      label: Product outcome
+      description: State the bounded observable outcome and affected users or operators.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: Explain the value and the impact of leaving the current state unchanged.
+    validations:
+      required: true
+  - type: textarea
+    id: current_baseline
+    attributes:
+      label: Current baseline
+      description: Include current observable behavior, code paths, evidence date, and facts that must be refreshed.
+    validations:
+      required: true
+  - type: textarea
+    id: in_scope
+    attributes:
+      label: In scope
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals and non-claims
+      description: Name behavior, evidence, deployment, or release claims this epic does not make.
+    validations:
+      required: true
+  - type: textarea
+    id: child_dependency_graph
+    attributes:
+      label: Child dependency graph
+      description: List ordering, parallel-safe work, blockers, and semantic ownership boundaries.
+    validations:
+      required: true
+  - type: textarea
+    id: stories_disposition
+    attributes:
+      label: Stories and disposition
+      description: List child stories/tasks and state how each closes or remains blocked.
+    validations:
+      required: true
+  - type: textarea
+    id: architecture_decisions
+    attributes:
+      label: Architecture decisions
+      description: Record binding decisions and references. Do not hide required decisions in comments.
+    validations:
+      required: true
+  - type: textarea
+    id: epic_acceptance_mapping
+    attributes:
+      label: Epic acceptance mapping
+      description: Map every epic outcome to the child work and evidence that proves it.
+    validations:
+      required: true
+  - type: textarea
+    id: verification_release_boundary
+    attributes:
+      label: Verification and release boundary
+      description: Define aggregate evidence, target branch, closure behavior, and deployment/release authority.
+    validations:
+      required: true
+  - type: textarea
+    id: privacy_evidence_cleanup
+    attributes:
+      label: Privacy, evidence, and cleanup
+      description: Define forbidden public data, evidence identity/retention, temporary resources, and cleanup.
+    validations:
+      required: true
+  - type: textarea
+    id: stop_conditions
+    attributes:
+      label: Stop conditions
+      description: State conditions that block implementation, landing, deployment, or destructive work.
+    validations:
+      required: true
+  - type: textarea
+    id: done_when
+    attributes:
+      label: Done when
+      description: Define epic completion without conflating merge, deployment, and release.
+    validations:
+      required: true

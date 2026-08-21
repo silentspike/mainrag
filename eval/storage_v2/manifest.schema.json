@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/silentspike/mainrag/eval/storage_v2/manifest.schema.json",
+  "title": "MainRAG storage-v2 baseline manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "status",
+    "recorded_at",
+    "subject",
+    "inputs",
+    "configuration",
+    "maintenance_gate",
+    "ingest",
+    "search",
+    "cleanup",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {"const": "storage-v2-baseline/v1"},
+    "run_id": {"type": "string", "pattern": "^fixture-current-[0-9a-f]{16}$"},
+    "status": {"$ref": "#/$defs/status"},
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter", "code_sha", "harness_commit", "schema_sha256"],
+      "properties": {
+        "adapter": {"const": "current-postgresql-fts-fixture-v1"},
+        "code_sha": {"$ref": "#/$defs/gitSha"},
+        "harness_commit": {"$ref": "#/$defs/gitSha"},
+        "schema_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["corpus_sha256", "corpus_items", "query_set_sha256", "query_count"],
+      "properties": {
+        "corpus_sha256": {"$ref": "#/$defs/sha256"},
+        "corpus_items": {"type": "integer", "minimum": 1},
+        "query_set_sha256": {"$ref": "#/$defs/sha256"},
+        "query_count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backend",
+        "backend_version",
+        "query_semantics",
+        "cache_profile",
+        "concurrency",
+        "warmups_per_query",
+        "measured_iterations_per_query",
+        "result_limit",
+        "tie_break"
+      ],
+      "properties": {
+        "backend": {"const": "PostgreSQL native FTS"},
+        "backend_version": {"type": "string", "minLength": 1},
+        "query_semantics": {"const": "dual simple/english websearch_or_phrase_tsquery with ts_rank_cd"},
+        "cache_profile": {"const": "first-before-query-warmups plus explicit warmups"},
+        "concurrency": {"const": 1},
+        "warmups_per_query": {"type": "integer", "minimum": 1},
+        "measured_iterations_per_query": {"type": "integer", "minimum": 30},
+        "result_limit": {"const": 10},
+        "tie_break": {"const": "score DESC, repository-relative path ASC, document id ASC"}
+      }
+    },
+    "maintenance_gate": {"$ref": "#/$defs/maintenanceGate"},
+    "ingest": {"$ref": "#/$defs/ingest"},
+    "search": {"$ref": "#/$defs/search"},
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "temporary_cluster_removed"],
+      "properties": {
+        "status": {"$ref": "#/$defs/status"},
+        "temporary_cluster_removed": {"type": "boolean"}
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    }
+  },
+  "$defs": {
+    "status": {"enum": ["PASS", "FAIL", "BLOCKED", "SKIP", "NOT_RUN"]},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "nonNegativeInteger": {"type": "integer", "minimum": 0},
+    "nonNegativeNumber": {"type": "number", "minimum": 0},
+    "latency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["samples", "p50_ms", "p95_ms", "p99_ms", "min_ms", "max_ms"],
+      "properties": {
+        "samples": {"type": "integer", "minimum": 1},
+        "p50_ms": {"$ref": "#/$defs/nonNegativeNumber"},
+        "p95_ms": {"$ref": "#/$defs/nonNegativeNumber"},
+        "p99_ms": {"$ref": "#/$defs/nonNegativeNumber"},
+        "min_ms": {"$ref": "#/$defs/nonNegativeNumber"},
+        "max_ms": {"$ref": "#/$defs/nonNegativeNumber"}
+      }
+    },
+    "maintenanceGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "mode", "checked_count", "checked", "limitations", "required_operator_actions", "errors"],
+      "properties": {
+        "status": {"$ref": "#/$defs/status"},
+        "mode": {"const": "read-only"},
+        "checked_count": {"type": "integer", "minimum": 1},
+        "checked": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "class", "sha256", "status"],
+            "properties": {
+              "path": {"type": "string", "pattern": "^(?!/)(?!.*\\.\\.).+$"},
+              "class": {"type": "string", "minLength": 1},
+              "sha256": {"$ref": "#/$defs/sha256"},
+              "status": {"$ref": "#/$defs/status"}
+            }
+          }
+        },
+        "limitations": {"type": "string", "minLength": 1},
+        "required_operator_actions": {"type": "array", "items": {"type": "string"}},
+        "errors": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "ingest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "source_bytes_read",
+        "content_bytes_stored",
+        "parsed_items",
+        "unchanged_items_reused",
+        "errors",
+        "elapsed_ms",
+        "database_bytes_after_ingest"
+      ],
+      "properties": {
+        "status": {"$ref": "#/$defs/status"},
+        "source_bytes_read": {"$ref": "#/$defs/nonNegativeInteger"},
+        "content_bytes_stored": {"$ref": "#/$defs/nonNegativeInteger"},
+        "parsed_items": {"type": "integer", "minimum": 1},
+        "unchanged_items_reused": {"$ref": "#/$defs/nonNegativeInteger"},
+        "errors": {"$ref": "#/$defs/nonNegativeInteger"},
+        "elapsed_ms": {"$ref": "#/$defs/nonNegativeNumber"},
+        "database_bytes_after_ingest": {"$ref": "#/$defs/nonNegativeInteger"}
+      }
+    },
+    "queryResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "construct", "query_sha256", "status", "expected", "exact_top_10",
+        "recall_at_10", "reciprocal_rank", "matched_documents", "scored_channel_rows",
+        "returned_shortlist", "cold_first_ms", "warm_latency"
+      ],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "construct": {"enum": ["and", "or", "not", "phrase", "group", "exact_identifier", "adverse", "common_term", "negative"]},
+        "query_sha256": {"$ref": "#/$defs/sha256"},
+        "status": {"$ref": "#/$defs/status"},
+        "expected": {"type": "array", "items": {"type": "string", "pattern": "^(?!/)(?!.*\\.\\.).+$"}},
+        "exact_top_10": {"type": "array", "maxItems": 10, "items": {"type": "string", "pattern": "^(?!/)(?!.*\\.\\.).+$"}},
+        "recall_at_10": {"type": "number", "minimum": 0, "maximum": 1},
+        "reciprocal_rank": {"type": "number", "minimum": 0, "maximum": 1},
+        "matched_documents": {"$ref": "#/$defs/nonNegativeInteger"},
+        "scored_channel_rows": {"$ref": "#/$defs/nonNegativeInteger"},
+        "returned_shortlist": {"$ref": "#/$defs/nonNegativeInteger"},
+        "cold_first_ms": {"$ref": "#/$defs/nonNegativeNumber"},
+        "warm_latency": {"$ref": "#/$defs/latency"}
+      }
+    },
+    "search": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "query_count", "recall_at_10", "mrr_at_10", "result_identity_sha256",
+        "matched_documents_total", "scored_channel_rows_total", "returned_shortlist_total",
+        "cold_first_latency", "warm_latency", "queries"
+      ],
+      "properties": {
+        "status": {"$ref": "#/$defs/status"},
+        "query_count": {"type": "integer", "minimum": 1},
+        "recall_at_10": {"type": "number", "minimum": 0, "maximum": 1},
+        "mrr_at_10": {"type": "number", "minimum": 0, "maximum": 1},
+        "result_identity_sha256": {"$ref": "#/$defs/sha256"},
+        "matched_documents_total": {"$ref": "#/$defs/nonNegativeInteger"},
+        "scored_channel_rows_total": {"$ref": "#/$defs/nonNegativeInteger"},
+        "returned_shortlist_total": {"$ref": "#/$defs/nonNegativeInteger"},
+        "cold_first_latency": {"$ref": "#/$defs/latency"},
+        "warm_latency": {"$ref": "#/$defs/latency"},
+        "queries": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/queryResult"}}
+      }
+    }
+  }
+}

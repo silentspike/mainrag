@@ -1,0 +1,52 @@
+{
+  "schema_version": "mainrag-native-gin-lock/v1",
+  "backend": {
+    "name": "PostgreSQL built-in GIN",
+    "version": "18.4",
+    "extension": null,
+    "preload_required": false,
+    "package_format": "none-built-in",
+    "selection": "complete occurrence-scoped evaluation"
+  },
+  "postgresql": {
+    "version": "18.4",
+    "source_url": "https://ftp.postgresql.org/pub/source/v18.4/postgresql-18.4.tar.bz2",
+    "source_sha256": "81a81ec695fb0c7901407defaa1d2f7973617154cf27ba74e3a7ab8e64436094",
+    "configure_flags": [
+      "--disable-nls",
+      "--with-ssl=openssl",
+      "--without-icu",
+      "--without-ldap",
+      "--without-libxml",
+      "--without-libxslt",
+      "--without-lz4",
+      "--without-pam",
+      "--without-readline",
+      "--without-systemd",
+      "--without-zlib",
+      "--without-zstd"
+    ]
+  },
+  "schema_prerequisite": {
+    "name": "pgvector",
+    "version": "0.8.2",
+    "commit": "cab9da72c04353f143bb06b42ab70a403daac64a",
+    "source_url": "https://github.com/pgvector/pgvector/archive/cab9da72c04353f143bb06b42ab70a403daac64a.tar.gz",
+    "source_sha256": "0af705b6c9b2a3a1fd1f6fd991425c125387d3c8edc68b75ef027d2e0a05e57a"
+  },
+  "build_prerequisite": {
+    "name": "flex",
+    "version": "2.6.4",
+    "source_url": "https://github.com/westes/flex/releases/download/v2.6.4/flex-2.6.4.tar.gz",
+    "source_sha256": "e87aae032bf07c26f85ac0ed3250998c37621d95f8bd748b31f15b33c45ee995"
+  },
+  "inputs": {
+    "cargo_lock_sha256": "2a48c96cede4feeffb156840097877e79f437419962c0bc26280a2aa4796ebf6",
+    "schema_sha256": "11180718cf5afc9984d305e1bd41cfb5808df7b3abbd6753e2bc309e2beb2d50",
+    "retrieval_migration_sha256": "e452f29df1849e7eb7907e49651ab5c820d69b3d5a3cb4866ba4c1a024230ab7",
+    "prototype_fixtures_sha256": "451768ec35ce441677be539c3cff0f5a95472c2c1c901626d9ce1dcfcb25dce1",
+    "prototype_queries_sha256": "fe2ea3faad8cc382a4221d0a11a736e4edc8c51ccc2bf7fa59efaec847871346",
+    "prototype_result_sha256": "87a9eefe3887632c9a2f50a14515435c520dc521b39cfb6b0d08ff8048ebcacb",
+    "prototype_schema_sha256": "b0676f44218813a910382cb24d4a454e3d3c91654a26d7cdc063e25484991e5a"
+  }
+}

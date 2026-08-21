@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/silentspike/mainrag/ops/storage-v2/preflight.schema.json",
+  "title": "MainRAG storage-v2 preparation preflight",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "mode",
+    "overall_status",
+    "state_sha256",
+    "candidate",
+    "postgresql",
+    "capacity",
+    "backup",
+    "maintenance",
+    "checks",
+    "limitations",
+    "generated_at_unix"
+  ],
+  "properties": {
+    "schema_version": {"const": "mainrag-storage-v2-preflight/v1"},
+    "mode": {"const": "check"},
+    "overall_status": {"enum": ["PASS", "BLOCKED", "FAIL"]},
+    "state_sha256": {"$ref": "#/$defs/sha256"},
+    "candidate": {"type": "object"},
+    "postgresql": {"type": "object"},
+    "capacity": {"type": "object"},
+    "backup": {"type": "object"},
+    "maintenance": {"type": "object"},
+    "checks": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"enum": ["PASS", "BLOCKED", "FAIL"]}
+    },
+    "limitations": {
+      "type": "array",
+      "items": {"type": "string"},
+      "minItems": 1
+    },
+    "generated_at_unix": {"type": "integer", "minimum": 0}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

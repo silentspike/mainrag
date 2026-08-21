@@ -1,44 +1,106 @@
 name: Bug report
-description: Something in MainRag is behaving incorrectly.
+description: Report a reproducible deviation from an existing MainRAG contract.
+title: "[Bug] "
 labels: ["bug", "triage"]
 body:
-  - type: textarea
-    id: what-happened
+  - type: markdown
     attributes:
-      label: What happened?
-      description: A clear, concise description of the bug.
-      placeholder: I searched for "foo" and expected bar, but got baz.
+      value: |
+        Search existing issues first. Use public-safe information only. Do not include
+        credentials, private source content, account identities, hostnames, addresses,
+        local paths, or raw private logs. Report vulnerabilities through the private
+        security link in the issue chooser, not through a public bug.
+  - type: textarea
+    id: current_behavior
+    attributes:
+      label: Current behavior
+      description: Describe the observed behavior and whether it previously worked.
     validations:
       required: true
   - type: textarea
-    id: reproduce
-    attributes:
-      label: Steps to reproduce
-      description: Minimal commands / queries that reproduce the issue.
-      render: bash
-    validations:
-      required: true
-  - type: textarea
-    id: expected
+    id: expected_behavior
     attributes:
       label: Expected behavior
+      description: Name the existing contract or documented expectation.
     validations:
       required: true
   - type: textarea
-    id: environment
+    id: reproduction
     attributes:
-      label: Environment
-      description: |
-        - MainRag commit / version (`git rev-parse HEAD`)
-        - OS + kernel
-        - Rust version (`rustc --version`)
-        - GPU / CUDA (for TEI)
-      render: text
+      label: Reproduction
+      description: Provide minimal public-safe steps, input classification, and observed output. Redact private values.
     validations:
       required: true
   - type: textarea
-    id: logs
+    id: environment_baseline
     attributes:
-      label: Relevant logs
-      description: Redact any secrets before pasting.
-      render: text
+      label: Environment and baseline
+      description: Include MainRAG commit/version, affected platform, first-bad/last-good when known, and dated volatile facts to refresh. Do not post private infrastructure identifiers.
+    validations:
+      required: true
+  - type: textarea
+    id: impact_safety_boundary
+    attributes:
+      label: Impact and safety boundary
+      description: Describe affected users/data and actions that must not be taken while reproducing.
+    validations:
+      required: true
+  - type: textarea
+    id: in_scope
+    attributes:
+      label: In scope
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals and non-claims
+    validations:
+      required: true
+  - type: textarea
+    id: affected_path
+    attributes:
+      label: Affected path and reusable components
+      description: Name repository-relative paths, direct callers/consumers, persistence/recovery boundaries, and helpers to reuse.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance criteria
+      description: Include corrected behavior, regression/rejection cases, recovery/race behavior where relevant, and affected platforms.
+    validations:
+      required: true
+  - type: textarea
+    id: verification_strategy
+    attributes:
+      label: Verification strategy
+      description: Define a failing-before/passing-after reproduction, focused regression tests, aggregate gate, and real evidence if required.
+    validations:
+      required: true
+  - type: textarea
+    id: redacted_evidence_cleanup
+    attributes:
+      label: Redacted evidence and cleanup
+      description: Define public evidence, forbidden data, temporary resources, retention, and cleanup.
+    validations:
+      required: true
+  - type: textarea
+    id: landing_rollback
+    attributes:
+      label: Landing and rollback
+      description: Name dependencies, target branch, closure mode, worker/reviewer/merge authority, and rollback/non-rollback boundary.
+    validations:
+      required: true
+  - type: textarea
+    id: stop_conditions
+    attributes:
+      label: Stop conditions
+    validations:
+      required: true

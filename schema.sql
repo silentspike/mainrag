@@ -553,3 +553,13 @@ $$ LANGUAGE plpgsql;
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO mainrag;
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainrag;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag;
+
+-- Additive storage-v2 generation schema. Numbered migrations are authoritative;
+-- this psql-relative include keeps the historical bootstrap in sync.
+\ir migrations/029_storage_v2_generations.sql
+\ir migrations/030_storage_v2_content_bodies.sql
+\ir migrations/031_storage_v2_content_graph.sql
+\ir migrations/032_storage_v2_shadow_ingest.sql
+\ir migrations/033_storage_v2_intelligence.sql
+\ir migrations/034_storage_v2_retrieval.sql
+\ir migrations/035_storage_v2_shadow_slice.sql

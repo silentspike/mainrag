@@ -7,6 +7,7 @@ pub async fn run(
     client: &ApiClient,
     path: &str,
     name: Option<&str>,
+    test_source: bool,
     json_output: bool,
 ) -> anyhow::Result<()> {
     // Auto-detect source type and generate name if not provided
@@ -22,6 +23,7 @@ pub async fn run(
         source_type: Some(source_type.clone()),
         path: path.to_string(),
         config: None,
+        is_test: test_source,
     };
 
     let source = client.create_source(req).await?;
@@ -34,6 +36,7 @@ pub async fn run(
                 "name": source.name,
                 "type": source.source_type,
                 "path": source.path,
+                "is_test": test_source,
             }))?
         );
         return Ok(());
@@ -45,6 +48,9 @@ pub async fn run(
     );
     println!("  Path: {}", source.path);
     println!("  Type: {}", source.source_type);
+    if test_source {
+        println!("  Scope: synthetic test source");
+    }
     println!();
     println!("{}", "Next step:".bright_black());
     println!(

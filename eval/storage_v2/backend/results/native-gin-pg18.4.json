@@ -1,0 +1,106 @@
+{
+  "cleanup": {
+    "status": "PASS",
+    "temporary_cluster_removed": true,
+    "temporary_evidence_removed": true
+  },
+  "gates": {
+    "binary_dependencies": {
+      "detail": "postgres had no unresolved dynamic dependency and contained ginhandler",
+      "status": "PASS"
+    },
+    "extension_create_remove": {
+      "detail": "built-in GIN has no CREATE EXTENSION, DROP EXTENSION, or preload lifecycle",
+      "status": "N/A"
+    },
+    "final_index_shape": {
+      "count": 2,
+      "detail": "generated tsvector plus built-in GIN returned the exact synthetic identity set",
+      "sha256": "ef96f1f6b55a072e70c2b4e8bd6585793f5f05ace0c01a5b07fad298a4d0051a",
+      "status": "PASS"
+    },
+    "final_storage_v2_schema": {
+      "count": 1,
+      "detail": "final migration and occurrence-scoped retrieval test passed on PostgreSQL 18.4",
+      "status": "PASS"
+    },
+    "frozen_exact_topk": {
+      "count": 11,
+      "detail": "all frozen queries matched exhaustive Top-10 without candidate truncation",
+      "sha256": "84604d6b660cc232e3f04be86a67a87e0ae503914b9038665a7b4e4baef0be49",
+      "status": "PASS"
+    },
+    "interrupted_build": {
+      "count": 1,
+      "detail": "throttled concurrent build was canceled and one invalid catalog artifact was detected",
+      "status": "PASS"
+    },
+    "locked_inputs": {
+      "count": 7,
+      "detail": "all public schema, lock, prototype, and dependency inputs matched SHA-256",
+      "status": "PASS"
+    },
+    "native_reindex": {
+      "detail": "native REINDEX completed and preserved the exact result identity",
+      "status": "PASS"
+    },
+    "orphan_cleanup": {
+      "count": 0,
+      "detail": "controlled drop and rebuild left no invalid, unready, or dead index",
+      "status": "PASS"
+    },
+    "package_file_ownership": {
+      "detail": "built-in GIN installs no extension package or backend-owned shared object",
+      "status": "N/A"
+    },
+    "page_integrity": {
+      "detail": "offline checksums covered the checksummed disposable data directory",
+      "status": "PASS"
+    },
+    "preload": {
+      "detail": "built-in GIN needs no extension or preload library; empty setting verified",
+      "status": "N/A"
+    },
+    "wal_crash_restart": {
+      "detail": "immediate stop recovered committed data and identical GIN results",
+      "sha256": "ef96f1f6b55a072e70c2b4e8bd6585793f5f05ace0c01a5b07fad298a4d0051a",
+      "status": "PASS"
+    }
+  },
+  "inputs": {
+    "cargo_lock_sha256": "2a48c96cede4feeffb156840097877e79f437419962c0bc26280a2aa4796ebf6",
+    "prototype_fixtures_sha256": "451768ec35ce441677be539c3cff0f5a95472c2c1c901626d9ce1dcfcb25dce1",
+    "prototype_queries_sha256": "fe2ea3faad8cc382a4221d0a11a736e4edc8c51ccc2bf7fa59efaec847871346",
+    "prototype_result_sha256": "87a9eefe3887632c9a2f50a14515435c520dc521b39cfb6b0d08ff8048ebcacb",
+    "prototype_schema_sha256": "b0676f44218813a910382cb24d4a454e3d3c91654a26d7cdc063e25484991e5a",
+    "retrieval_migration_sha256": "e452f29df1849e7eb7907e49651ab5c820d69b3d5a3cb4866ba4c1a024230ab7",
+    "schema_sha256": "11180718cf5afc9984d305e1bd41cfb5808df7b3abbd6753e2bc309e2beb2d50"
+  },
+  "limitations": [
+    "Disposable crash/restart evidence is not backup restore, PITR, HA, or production availability evidence.",
+    "Built-in GIN has no amcheck operator class; checksums, catalog flags, forced plans, exact reads, and REINDEX form the native integrity gate.",
+    "No production install, preload change, restart, reindex, deployment, or active-pointer change was performed.",
+    "temporary cluster and temporary prototype evidence removed"
+  ],
+  "package": {
+    "artifact_digest": "9623c1ce5a37590d44bf08d3dfa4ab918168509fc408cc432217f0307db31703",
+    "extension": null,
+    "format": "none-built-in",
+    "preload_required": false,
+    "reproducibility": "N/A: built-in backend; locked PostgreSQL source and schema inputs are qualified"
+  },
+  "recorded_at": "2026-08-13T15:37:10.782552+00:00",
+  "schema_version": "mainrag-native-gin-evidence/v1",
+  "status": "PASS",
+  "subject": {
+    "backend": "PostgreSQL built-in GIN",
+    "backend_version": "18.4",
+    "commit_sha": "1ea57ca0650687702740e3590170f750139d800b",
+    "postgresql_version": "18.4"
+  },
+  "toolchain": {
+    "compiler": "gcc",
+    "configure_sha256": "96e3b85ac5af698361f185fc1b3c4d4d3978ca7cf66ea9b291d7f7108cdc2aae",
+    "postgres_binary_sha256": "abacf4ff3fcd211c1fa580d47be2029c21af1f5a010b1d7490773f1e51c77804"
+  }
+}
