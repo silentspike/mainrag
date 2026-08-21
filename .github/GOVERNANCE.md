@@ -29,32 +29,32 @@ The `issue-contract` check validates the public structure. It does not establish
 that acceptance criteria have been met, that evidence is truthful, or that a
 deployment or release occurred.
 
-## Required roles
+## Single-maintainer responsibility model
 
 | Role | Current public assignment | Boundary |
 | --- | --- | --- |
-| Repository owner/settings operator | **Unassigned — blocking** | Must be an administrator and may apply reviewed settings only with explicit owner authorization. |
-| Worker | **Unassigned for storage v2 — blocking** | Implements issue-owned changes; cannot provide the independent required approval. |
-| Independent reviewer/orchestrator | **Unassigned — blocking** | Must be a qualified, distinct GitHub identity with repository write access. |
-| Merge authority | **Unassigned — blocking** | Merge authority does not imply deployment or release authority. |
+| Repository owner/settings operator | Sole maintainer | Must be an administrator and may apply settings only with explicit owner authorization. |
+| Worker | Sole maintainer | Implements issue-owned changes and records exact commands and results. |
+| Verification controller | Sole maintainer | Performs a fresh end-control pass at the exact candidate head. This is self-verification, not independent review. |
+| Merge authority | Separately authorized sole-maintainer action | Merge authority does not follow from implementation or verification and does not imply deployment or release authority. |
 | Runtime operator | **Unassigned** | Production operations require separate issue authority and evidence. |
 | Destructive-action authority | **Unassigned** | Destructive cleanup requires an explicit target, backup/rollback boundary, and separate confirmation. |
 | Deployment/release authority | **Unassigned** | Deployment, activation, tag, RC, and release remain separately authorized actions. |
 
-As reviewed on 2026-08-13, the repository has one listed collaborator,
-`@obtFusi`, with administrative access. Access is not an assignment of any role
-above. Enabling a required independent approval before a second qualified
-identity has write access would create an unfulfillable merge gate.
-Storage-v2 implementation remains blocked until that role exists, the desired
-settings are applied, and the enforcement tests below are observed.
+The repository has a single maintainer. Requiring a distinct approving identity
+would create an unfulfillable merge gate, so the repository does not claim
+independent review. The maintainer owns implementation and a separate, fresh
+end-control pass over the exact candidate head. Public evidence must identify
+that limitation rather than presenting self-verification as independent
+acceptance.
 
 ## Desired `main` controls
 
 - Required checks are strict and source-bound to the GitHub Actions app:
   `ci-required`, `workflow-policy`, and `issue-contract`.
-- At least one approving review is required.
-- Stale reviews are dismissed and the most recent push must be approved by an
-  actor other than the pusher.
+- No approving review is required while only one qualified maintainer exists.
+- A changed head invalidates prior verification evidence and requires the
+  protected checks and maintainer end-control pass to run again.
 - All review conversations must be resolved.
 - Administrators are covered; force pushes and branch deletion are disabled.
 - Default workflow token permissions are read-only and workflows cannot approve
@@ -63,8 +63,8 @@ settings are applied, and the enforcement tests below are observed.
 
 The checked-in `.github/scripts/repository-settings.sh` separates readback from
 mutation. Its `apply` mode is not authorization: the operator still needs an
-explicit owner instruction, a provisioned independent reviewer, and a reviewed
-diff. Post-apply readback is mandatory.
+explicit owner instruction and must explicitly confirm the single-maintainer
+model. Post-apply readback is mandatory.
 
 ## Required enforcement evidence
 
@@ -73,11 +73,10 @@ head SHAs, check sources, settings readback, and repository-file hashes. Observe
 
 1. missing or malformed issue/PR contract is blocked;
 2. a failed required check is blocked;
-3. missing independent approval is blocked;
-4. an unresolved review conversation is blocked;
-5. a new worker push invalidates the reviewed state;
-6. the worker cannot satisfy its own required approval;
-7. a positive PR becomes mergeable only after all intended gates pass.
+3. an unresolved review conversation is blocked;
+4. a changed head reruns all head-bound checks and invalidates older evidence;
+5. a positive PR becomes mergeable only after all intended automated gates
+   pass and the sole maintainer records the fresh end-control result.
 
 None of these tests may deploy, activate, publish a release, use a self-hosted
 runner, expose a secret, or execute untrusted PR content. Test branches and

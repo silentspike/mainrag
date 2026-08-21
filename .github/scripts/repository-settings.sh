@@ -32,20 +32,6 @@ github_actions_app_id() {
   printf '%s\n' "$app_ids"
 }
 
-check_reviewer() {
-  local reviewer="$1" operator="$2" permission
-  [[ "$reviewer" =~ ^[A-Za-z0-9-]+$ ]] || die 'invalid INDEPENDENT_REVIEWER login'
-  [[ "$reviewer" != "$operator" ]] || die 'independent reviewer must differ from the settings operator'
-  permission="$(gh api \
-    -H 'Accept: application/vnd.github+json' \
-    "repos/${REPOSITORY}/collaborators/${reviewer}/permission" \
-    --jq '.permission')"
-  case "$permission" in
-    admin|maintain|write) ;;
-    *) die "independent reviewer needs write access; observed: ${permission}" ;;
-  esac
-}
-
 readback() {
   local metadata protection actions workflow app_id
   metadata="$(gh api -H 'Accept: application/vnd.github+json' "repos/${REPOSITORY}")"
@@ -101,17 +87,15 @@ readback() {
 }
 
 apply_settings() {
-  local operator reviewer authenticated_actor operator_permission app_id checks_json payload
+  local operator authenticated_actor operator_permission app_id checks_json payload
   [[ "${CONFIRM_REPOSITORY:-}" == "$REPOSITORY" ]] || \
     die 'set CONFIRM_REPOSITORY to the exact repository'
   [[ "${CONFIRM_OWNER_SETTINGS_APPLY:-}" == 'yes' ]] || \
     die 'explicit owner settings authorization is required'
-  [[ "${INDEPENDENT_REVIEWER_READY:-}" == 'yes' ]] || \
-    die 'confirm that the independent reviewer is provisioned'
+  [[ "${CONFIRM_SINGLE_MAINTAINER_MODEL:-}" == 'yes' ]] || \
+    die 'confirm the documented single-maintainer responsibility model'
   operator="${SETTINGS_OPERATOR:-}"
-  reviewer="${INDEPENDENT_REVIEWER:-}"
   [[ "$operator" =~ ^[A-Za-z0-9-]+$ ]] || die 'SETTINGS_OPERATOR is required'
-  [[ -n "$reviewer" ]] || die 'INDEPENDENT_REVIEWER is required'
   authenticated_actor="$(gh api user --jq '.login')"
   [[ "$authenticated_actor" == "$operator" ]] || \
     die 'authenticated actor does not match SETTINGS_OPERATOR'
@@ -119,7 +103,6 @@ apply_settings() {
     "repos/${REPOSITORY}/collaborators/${operator}/permission" \
     --jq '.permission')"
   [[ "$operator_permission" == 'admin' ]] || die 'settings operator needs admin permission'
-  check_reviewer "$reviewer" "$operator"
 
   [[ "$(gh api "repos/${REPOSITORY}" --jq '.visibility')" == 'public' ]] || \
     die 'repository visibility changed; stop for review'
@@ -135,12 +118,7 @@ apply_settings() {
     '{
       required_status_checks: {strict: true, checks: $checks},
       enforce_admins: true,
-      required_pull_request_reviews: {
-        dismiss_stale_reviews: true,
-        require_code_owner_reviews: false,
-        required_approving_review_count: 1,
-        require_last_push_approval: true
-      },
+      required_pull_request_reviews: null,
       restrictions: null,
       required_conversation_resolution: true,
       allow_force_pushes: false,
