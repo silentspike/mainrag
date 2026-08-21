@@ -1273,21 +1273,20 @@ where
         .await?;
     let generation = client
         .query_opt(
-            "SELECT id, generation_seq, witness FROM source_generation \
-             WHERE source_id = $1 AND generation_seq = $2 AND status = 'verified'",
+            "SELECT generation.id, generation.generation_seq, generation.witness, source.is_test \
+               FROM source_generation generation \
+               JOIN sources source ON source.id=generation.source_id \
+              WHERE generation.source_id = $1 AND generation.generation_seq = $2 \
+                AND generation.status = 'verified'",
             &[&source_id, &input.generation],
         )
         .await?
-        .ok_or_else(|| anyhow::anyhow!("named verified shadow generation not found"))?;
+        .ok_or_else(|| anyhow::anyhow!("named verified generation not found"))?;
     let generation_id: i64 = generation.get("id");
     let generation_seq: i64 = generation.get("generation_seq");
     let witness: serde_json::Value = generation.get("witness");
-    if witness["fixture_sha256"].as_str() != Some(input.fixture_sha256.as_str())
-        || witness["commit_sha"].as_str() != Some(input.commit_sha.as_str())
-        || witness["is_test"].as_bool() != Some(true)
-    {
-        bail!("dual-read hashes do not match the verified generation witness");
-    }
+    let is_test: bool = generation.get("is_test");
+    validate_dual_read_witness(&witness, &input.fixture_sha256, &input.commit_sha, is_test)?;
 
     let actual_query_set_sha256 = canonical_query_set_hash(&input.queries)?;
     if actual_query_set_sha256 != input.query_set_sha256 {
@@ -1311,11 +1310,16 @@ where
         && input.performance_envelope_passed
         && input.restart_passed
         && input.optional_degradation_passed;
+    let source_scope = if is_test {
+        "synthetic_test_explicit"
+    } else {
+        "registered_production"
+    };
     let artifact = json!({
         "schema_version": 1,
         "status": if gates_passed { "PASS" } else { "FAIL" },
         "unexplained_count": 0,
-        "source_scope": "synthetic_test_only",
+        "source_scope": source_scope,
         "generation_seq": generation_seq,
         "queries": query_artifacts,
         "comparisons": differences,
@@ -1356,6 +1360,21 @@ where
         artifact_sha256: row.get("artifact_sha256"),
         artifact: row.get("artifact"),
     })
+}
+
+fn validate_dual_read_witness(
+    witness: &serde_json::Value,
+    fixture_sha256: &str,
+    commit_sha: &str,
+    expected_is_test: bool,
+) -> Result<()> {
+    if witness["fixture_sha256"].as_str() != Some(fixture_sha256)
+        || witness["commit_sha"].as_str() != Some(commit_sha)
+        || witness["is_test"].as_bool() != Some(expected_is_test)
+    {
+        bail!("dual-read hashes or source scope do not match the verified generation witness");
+    }
+    Ok(())
 }
 
 fn canonical_query_set_hash(queries: &[DualReadQueryInput]) -> Result<String> {
@@ -1611,6 +1630,25 @@ mod tests {
             base,
             release_source_watermark("fs", "/opaque/a", "adapter.v1", &"b".repeat(64))
         );
+    }
+
+    #[test]
+    fn dual_read_witness_accepts_matching_production_and_test_scope() {
+        let fixture_sha256 = "a".repeat(64);
+        let commit_sha = "b".repeat(40);
+        for is_test in [false, true] {
+            let witness = json!({
+                "fixture_sha256": fixture_sha256,
+                "commit_sha": commit_sha,
+                "is_test": is_test,
+            });
+            validate_dual_read_witness(&witness, &fixture_sha256, &commit_sha, is_test)
+                .expect("matching source scope must be accepted");
+            assert!(
+                validate_dual_read_witness(&witness, &fixture_sha256, &commit_sha, !is_test)
+                    .is_err()
+            );
+        }
     }
 
     fn hit(id: &str, rank: usize, score: f64) -> ComparableHit {
