@@ -1,8 +1,8 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     Extension, Json,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -18,7 +18,7 @@ pub struct SourcesResponse {
 }
 
 #[cfg(feature = "storage-v2-retrieval")]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 pub struct ShadowSourceStateQuery {
     pub generation: String,
     #[serde(default)]
@@ -30,7 +30,7 @@ pub async fn shadow_source_state(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Arc<crate::auth::Claims>>,
     Path(source_id): Path<i64>,
-    Query(request): Query<ShadowSourceStateQuery>,
+    axum::extract::Query(request): axum::extract::Query<ShadowSourceStateQuery>,
 ) -> Result<Json<serde_json::Value>> {
     let user_id = Uuid::from_str(&claims.sub)
         .map_err(|_| AppError::Auth("Invalid user ID in claims".into()))?;
