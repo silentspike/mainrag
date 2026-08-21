@@ -15,8 +15,11 @@ target/
 /cli/target/
 /api/target/
 Cargo.lock.bak
+__pycache__/
+*.py[cod]
 
 # ─── Local state ─────────────────────────────────────────────────────
+/AGENTS.md
 *.db
 *.db-journal
 *.db-wal

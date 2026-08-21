@@ -201,7 +201,7 @@ fn api_v1_routes(rate_limiter: KeyedRateLimiter, auth_layer: AuthLayer) -> Route
 /// Routes that require authentication (API-Key for agents, JWT for admin).
 /// Moved from public_routes() to enforce auth on all data endpoints.
 fn authenticated_routes(auth_layer: AuthLayer) -> Router<Arc<AppState>> {
-    Router::new()
+    let routes = Router::new()
         // H7: Detailed health check requires auth (exposes service status)
         .route("/health", get(handlers::health_check))
         // Search
@@ -236,7 +236,18 @@ fn authenticated_routes(auth_layer: AuthLayer) -> Router<Arc<AppState>> {
         .route("/mcp/protocol", get(handlers::get_mcp_protocol_info))
         // Sources (read-only)
         .route("/sources", get(handlers::list_sources))
-        .route("/sources/:id", get(handlers::get_source))
+        .route("/sources/:id", get(handlers::get_source));
+    #[cfg(feature = "storage-v2-intelligence")]
+    let routes = routes.route(
+        "/intelligence/shadow",
+        get(handlers::shadow_intelligence_command),
+    );
+    #[cfg(feature = "storage-v2-retrieval")]
+    let routes = routes.route(
+        "/sources/:id/shadow-state",
+        get(handlers::shadow_source_state),
+    );
+    routes
         // Auth middleware (validates JWT or API-Key and adds Claims extension)
         .layer(middleware::from_fn(move |req, next| {
             let auth = Extension(auth_layer.clone());
@@ -273,7 +284,7 @@ fn auth_routes(rate_limiter: KeyedRateLimiter, auth_layer: AuthLayer) -> Router<
 }
 
 fn admin_routes(auth_layer: AuthLayer) -> Router<Arc<AppState>> {
-    Router::new()
+    let routes = Router::new()
         // Source management
         .route("/sources", get(handlers::admin_list_sources))
         .route("/sources", post(handlers::admin_create_source))
@@ -300,7 +311,22 @@ fn admin_routes(auth_layer: AuthLayer) -> Router<Arc<AppState>> {
         .route("/agents", post(handlers::admin_create_agent))
         .route("/agents", get(handlers::admin_list_agents))
         .route("/agents/:id", delete(handlers::admin_revoke_agent))
-        .route("/agents/:id/rotate", post(handlers::admin_rotate_agent_key))
+        .route("/agents/:id/rotate", post(handlers::admin_rotate_agent_key));
+    #[cfg(feature = "storage-v2-retrieval")]
+    let routes = routes
+        .route(
+            "/sources/:id/storage-v2-shadow-slice",
+            post(handlers::admin_run_shadow_slice),
+        )
+        .route(
+            "/sources/:id/storage-v2-dual-read",
+            post(handlers::admin_record_dual_read),
+        )
+        .route(
+            "/sources/:id/storage-v2-shadow-runs/:run_id/cleanup",
+            post(handlers::admin_cleanup_shadow_slice),
+        );
+    routes
         // backfill endpoints moved to long_running_routes (10min timeout)
         // Admin middleware (checks is_admin claim)
         .layer(middleware::from_fn(admin_middleware))

@@ -1,0 +1,490 @@
+{
+  "cleanup": {
+    "status": "PASS",
+    "temporary_cluster_removed": true
+  },
+  "configuration": {
+    "backend": "PostgreSQL native FTS",
+    "backend_version": "18.3",
+    "cache_profile": "first-before-query-warmups plus explicit warmups",
+    "concurrency": 1,
+    "measured_iterations_per_query": 30,
+    "query_semantics": "dual simple/english websearch_or_phrase_tsquery with ts_rank_cd",
+    "result_limit": 10,
+    "tie_break": "score DESC, repository-relative path ASC, document id ASC",
+    "warmups_per_query": 3
+  },
+  "ingest": {
+    "content_bytes_stored": 2576,
+    "database_bytes_after_ingest": 131072,
+    "elapsed_ms": 108.381,
+    "errors": 0,
+    "parsed_items": 12,
+    "source_bytes_read": 2576,
+    "status": "PASS",
+    "unchanged_items_reused": 12
+  },
+  "inputs": {
+    "corpus_items": 12,
+    "corpus_sha256": "4bfb8ce2bbd58abccc0c38d5a92c9c2f6fc153e8f311e06ad6c4ebacdc3e06b0",
+    "query_count": 11,
+    "query_set_sha256": "239d4dbbc89b4b331899a6046d1a34bc80c5e8f602ddc799642c975fd779efaa"
+  },
+  "limitations": [
+    "The public fixture baseline is not a production performance guarantee.",
+    "First-before-query-warmups latency does not claim an operating-system cold page cache.",
+    "The read-only writer inventory cannot prove that unknown external writers do not exist.",
+    "This current-path fixture does not select a storage-v2 search backend."
+  ],
+  "maintenance_gate": {
+    "checked": [
+      {
+        "class": "api-entrypoint",
+        "path": "api/src/api/handlers/admin.rs",
+        "sha256": "2fba19a9e47e80c401f473868ca4816a9093b994307622cfb4bc08a83cb611fe",
+        "status": "PASS"
+      },
+      {
+        "class": "api-entrypoint",
+        "path": "api/src/api/handlers/watch.rs",
+        "sha256": "e301e102beb55ae98fb8cdf35fd5294aeafebeb8d7d46ad41cc7764111527922",
+        "status": "PASS"
+      },
+      {
+        "class": "runtime-supervisor",
+        "path": "api/src/main.rs",
+        "sha256": "5fbb0f6ec22a0cca8b364896966f52a3cac587f0e4fecb08e4e49520a0443e4e",
+        "status": "PASS"
+      },
+      {
+        "class": "runtime-writer",
+        "path": "api/src/services/index.rs",
+        "sha256": "d41c83193ed4095f7785756f66bf0e0619922bff9d16c9ed10c6cd9ac2276142",
+        "status": "PASS"
+      },
+      {
+        "class": "runtime-writer",
+        "path": "api/src/services/intelligence.rs",
+        "sha256": "5345c79a116de86f0ab299bdeabd0fc8e67471ac5ae4157da97ec7c8255775eb",
+        "status": "PASS"
+      },
+      {
+        "class": "runtime-writer",
+        "path": "api/src/services/outbox_worker.rs",
+        "sha256": "111fcbbae58f7142d4f5d22ccb7a758230b6520061ba9dbf984902f3d608418d",
+        "status": "PASS"
+      },
+      {
+        "class": "runtime-writer",
+        "path": "api/src/services/qdrant.rs",
+        "sha256": "ac4f9f57c7ffad86ce9171f585d9aad97b3037e6f414e65d86f758094b0215cf",
+        "status": "PASS"
+      },
+      {
+        "class": "runtime-writer",
+        "path": "api/src/services/query_expander.rs",
+        "sha256": "213fdb0b605d5338c6777eee3b722152aa02a72e4cae2f19a9e2a9054dfbe9b2",
+        "status": "PASS"
+      },
+      {
+        "class": "operator-client",
+        "path": "cli/src/client/api.rs",
+        "sha256": "f37bd00509225cd250b66fac01a1f7862b530f3c0d345c835ece64b808f9bf5e",
+        "status": "PASS"
+      },
+      {
+        "class": "operator-entrypoint",
+        "path": "cli/src/commands/add.rs",
+        "sha256": "ecf27e53669d49708fa52cda56744423fc90e246c946976054f9e32436308210",
+        "status": "PASS"
+      },
+      {
+        "class": "operator-entrypoint",
+        "path": "cli/src/commands/backfill.rs",
+        "sha256": "2127bd7307fac9fb3bb5376174e2f29a0ba83e8aa7a45863c78ff1f27609608b",
+        "status": "PASS"
+      },
+      {
+        "class": "operator-entrypoint",
+        "path": "cli/src/commands/source.rs",
+        "sha256": "9d1825c70af6bcc6177a3c922413b411434df2867cf389207239602af8aff145",
+        "status": "PASS"
+      },
+      {
+        "class": "operator-entrypoint",
+        "path": "cli/src/commands/watch.rs",
+        "sha256": "0ea55b5206434703e65938ec2254f072682a4b6458dc5b3dfe4bc8e876a0f7fe",
+        "status": "PASS"
+      },
+      {
+        "class": "migration-writer",
+        "path": "ops/migration/import-mainrag.py",
+        "sha256": "a1ebf20b07cfd9191f92f5b33a396f5b1c211f08bfda8e95445363e9926bcdca",
+        "status": "PASS"
+      },
+      {
+        "class": "maintenance-writer",
+        "path": "scripts/backfill-visibility.py",
+        "sha256": "6b13abf63ae40f30f2587e3c210dc3c4178e6f2280c881bcbe354a071e4e8145",
+        "status": "PASS"
+      },
+      {
+        "class": "maintenance-writer",
+        "path": "scripts/load_synonyms_to_qdrant.py",
+        "sha256": "760345a49fab8ca4ed40c85f6e2dbfffa3187c562dbdf84043f215c6dcc0df59",
+        "status": "PASS"
+      },
+      {
+        "class": "maintenance-writer",
+        "path": "scripts/migrate-embeddings-gte.py",
+        "sha256": "9ccb5a48d254b79d13763b79eaea7f2a6b6b88db62b042b197968631d8bc81ec",
+        "status": "PASS"
+      },
+      {
+        "class": "maintenance-writer",
+        "path": "scripts/reembed-cch.py",
+        "sha256": "af4e7bc69a7d77389df1e05e98a6f69437d1d6fc7903701640b640ed15775f89",
+        "status": "PASS"
+      }
+    ],
+    "checked_count": 18,
+    "errors": [],
+    "limitations": "This inventory does not prove that unknown external writers do not exist and performs no service action.",
+    "mode": "read-only",
+    "required_operator_actions": [
+      "Confirm the inventory against the target environment.",
+      "Quiesce applicable writers through separately authorized operating procedures.",
+      "Re-run this read-only gate after the code revision or inventory changes."
+    ],
+    "status": "PASS"
+  },
+  "recorded_at": "2026-08-13T10:37:08.207787Z",
+  "run_id": "fixture-current-a1823a9adf9a82aa",
+  "schema_version": "storage-v2-baseline/v1",
+  "search": {
+    "cold_first_latency": {
+      "max_ms": 4.246,
+      "min_ms": 0.432,
+      "p50_ms": 0.519,
+      "p95_ms": 2.437,
+      "p99_ms": 3.884,
+      "samples": 11
+    },
+    "matched_documents_total": 17,
+    "mrr_at_10": 1.0,
+    "queries": [
+      {
+        "cold_first_ms": 4.246,
+        "construct": "and",
+        "exact_top_10": [
+          "generations.md",
+          "mutable-decoy.md"
+        ],
+        "expected": [
+          "generations.md"
+        ],
+        "id": "and-generation",
+        "matched_documents": 2,
+        "query_sha256": "e06406286e3d2b00430348588d20fba7e91798fb5cf6bf03c8941c119b020e9b",
+        "recall_at_10": 1.0,
+        "reciprocal_rank": 1.0,
+        "returned_shortlist": 2,
+        "scored_channel_rows": 4,
+        "status": "PASS",
+        "warm_latency": {
+          "max_ms": 0.68,
+          "min_ms": 0.377,
+          "p50_ms": 0.431,
+          "p95_ms": 0.558,
+          "p99_ms": 0.65,
+          "samples": 30
+        }
+      },
+      {
+        "cold_first_ms": 0.628,
+        "construct": "or",
+        "exact_top_10": [
+          "storage.md",
+          "generations.md"
+        ],
+        "expected": [
+          "storage.md",
+          "generations.md"
+        ],
+        "id": "or-storage-generation",
+        "matched_documents": 2,
+        "query_sha256": "9a7f58bd6e5b2ca83ea8665896c6131b4825751eac6e8b20070fc63121c87923",
+        "recall_at_10": 1.0,
+        "reciprocal_rank": 1.0,
+        "returned_shortlist": 2,
+        "scored_channel_rows": 4,
+        "status": "PASS",
+        "warm_latency": {
+          "max_ms": 0.61,
+          "min_ms": 0.374,
+          "p50_ms": 0.395,
+          "p95_ms": 0.549,
+          "p99_ms": 0.602,
+          "samples": 30
+        }
+      },
+      {
+        "cold_first_ms": 0.49,
+        "construct": "not",
+        "exact_top_10": [
+          "generations.md",
+          "authorization.md",
+          "migration.md"
+        ],
+        "expected": [
+          "generations.md"
+        ],
+        "id": "not-mutable",
+        "matched_documents": 3,
+        "query_sha256": "1ea90d57ad41b8adce34096a40a938603922364e447e2b3b8274d14df332847b",
+        "recall_at_10": 1.0,
+        "reciprocal_rank": 1.0,
+        "returned_shortlist": 3,
+        "scored_channel_rows": 6,
+        "status": "PASS",
+        "warm_latency": {
+          "max_ms": 0.618,
+          "min_ms": 0.377,
+          "p50_ms": 0.421,
+          "p95_ms": 0.534,
+          "p99_ms": 0.605,
+          "samples": 30
+        }
+      },
+      {
+        "cold_first_ms": 0.505,
+        "construct": "phrase",
+        "exact_top_10": [
+          "generations.md"
+        ],
+        "expected": [
+          "generations.md"
+        ],
+        "id": "phrase-activation",
+        "matched_documents": 1,
+        "query_sha256": "15e9edaf70298f2281f80e85925615a03d2b4d60788b204e85bb4b54dbcd5d5f",
+        "recall_at_10": 1.0,
+        "reciprocal_rank": 1.0,
+        "returned_shortlist": 1,
+        "scored_channel_rows": 2,
+        "status": "PASS",
+        "warm_latency": {
+          "max_ms": 0.605,
+          "min_ms": 0.375,
+          "p50_ms": 0.411,
+          "p95_ms": 0.552,
+          "p99_ms": 0.591,
+          "samples": 30
+        }
+      },
+      {
+        "cold_first_ms": 0.462,
+        "construct": "group",
+        "exact_top_10": [
+          "storage.md"
+        ],
+        "expected": [
+          "storage.md"
+        ],
+        "id": "grouped-storage",
+        "matched_documents": 1,
+        "query_sha256": "153910f138f9bcabba822f819f2e7d85947e3634ae661ec93f876a21cd78e777",
+        "recall_at_10": 1.0,
+        "reciprocal_rank": 1.0,
+        "returned_shortlist": 1,
+        "scored_channel_rows": 2,
+        "status": "PASS",
+        "warm_latency": {
+          "max_ms": 0.532,
+          "min_ms": 0.368,
+          "p50_ms": 0.446,
+          "p95_ms": 0.517,
+          "p99_ms": 0.528,
+          "samples": 30
+        }
+      },
+      {
+        "cold_first_ms": 0.617,
+        "construct": "exact_identifier",
+        "exact_top_10": [
+          "generations.md"
+        ],
+        "expected": [
+          "generations.md"
+        ],
+        "id": "exact-identifier",
+        "matched_documents": 1,
+        "query_sha256": "a4a3181a3f0b9533c8bb9736ce6f01c63dbf1c2eb55e0b3d82ec39f3b262bcc8",
+        "recall_at_10": 1.0,
+        "reciprocal_rank": 1.0,
+        "returned_shortlist": 1,
+        "scored_channel_rows": 2,
+        "status": "PASS",
+        "warm_latency": {
+          "max_ms": 0.567,
+          "min_ms": 0.364,
+          "p50_ms": 0.419,
+          "p95_ms": 0.511,
+          "p99_ms": 0.556,
+          "samples": 30
+        }
+      },
+      {
+        "cold_first_ms": 0.519,
+        "construct": "and",
+        "exact_top_10": [
+          "authorization.md"
+        ],
+        "expected": [
+          "authorization.md"
+        ],
+        "id": "authorization-isolation",
+        "matched_documents": 1,
+        "query_sha256": "cfd806ee51646a003c9e8f277172ce70307dc33725a61aabf54056bdf5e08b0f",
+        "recall_at_10": 1.0,
+        "reciprocal_rank": 1.0,
+        "returned_shortlist": 1,
+        "scored_channel_rows": 2,
+        "status": "PASS",
+        "warm_latency": {
+          "max_ms": 0.516,
+          "min_ms": 0.385,
+          "p50_ms": 0.426,
+          "p95_ms": 0.492,
+          "p99_ms": 0.51,
+          "samples": 30
+        }
+      },
+      {
+        "cold_first_ms": 0.452,
+        "construct": "adverse",
+        "exact_top_10": [
+          "search.md"
+        ],
+        "expected": [
+          "search.md"
+        ],
+        "id": "complete-fallback",
+        "matched_documents": 1,
+        "query_sha256": "49fde822cb64031d066911e54bc7ddef90d101d2e8e23eb5fabb70dfa4024b4e",
+        "recall_at_10": 1.0,
+        "reciprocal_rank": 1.0,
+        "returned_shortlist": 1,
+        "scored_channel_rows": 2,
+        "status": "PASS",
+        "warm_latency": {
+          "max_ms": 0.639,
+          "min_ms": 0.399,
+          "p50_ms": 0.477,
+          "p95_ms": 0.555,
+          "p99_ms": 0.619,
+          "samples": 30
+        }
+      },
+      {
+        "cold_first_ms": 0.559,
+        "construct": "and",
+        "exact_top_10": [
+          "legacy.md"
+        ],
+        "expected": [
+          "legacy.md"
+        ],
+        "id": "legacy-split-merge",
+        "matched_documents": 1,
+        "query_sha256": "fafd365be6375a9a1991ca95cb649f0fc657870e33846d5cd34ce9bd63a5b069",
+        "recall_at_10": 1.0,
+        "reciprocal_rank": 1.0,
+        "returned_shortlist": 1,
+        "scored_channel_rows": 2,
+        "status": "PASS",
+        "warm_latency": {
+          "max_ms": 0.583,
+          "min_ms": 0.42,
+          "p50_ms": 0.484,
+          "p95_ms": 0.568,
+          "p99_ms": 0.579,
+          "samples": 30
+        }
+      },
+      {
+        "cold_first_ms": 0.562,
+        "construct": "common_term",
+        "exact_top_10": [
+          "common-beta.md",
+          "common-alpha.md",
+          "generations.md",
+          "authorization.md"
+        ],
+        "expected": [
+          "common-alpha.md",
+          "common-beta.md"
+        ],
+        "id": "common-source",
+        "matched_documents": 4,
+        "query_sha256": "41cf6794ba4200b839c53531555f0f3998df4cbb01a4d5cb0b94e3ca5e23947d",
+        "recall_at_10": 1.0,
+        "reciprocal_rank": 1.0,
+        "returned_shortlist": 4,
+        "scored_channel_rows": 8,
+        "status": "PASS",
+        "warm_latency": {
+          "max_ms": 0.592,
+          "min_ms": 0.386,
+          "p50_ms": 0.443,
+          "p95_ms": 0.568,
+          "p99_ms": 0.591,
+          "samples": 30
+        }
+      },
+      {
+        "cold_first_ms": 0.432,
+        "construct": "negative",
+        "exact_top_10": [],
+        "expected": [],
+        "id": "negative-no-match",
+        "matched_documents": 0,
+        "query_sha256": "3a44b95c87d5fb297c3e5aadf6661c8a20a3ce73dd34ed861b6c20cf9ac0525e",
+        "recall_at_10": 1.0,
+        "reciprocal_rank": 1.0,
+        "returned_shortlist": 0,
+        "scored_channel_rows": 0,
+        "status": "PASS",
+        "warm_latency": {
+          "max_ms": 0.648,
+          "min_ms": 0.371,
+          "p50_ms": 0.439,
+          "p95_ms": 0.521,
+          "p99_ms": 0.612,
+          "samples": 30
+        }
+      }
+    ],
+    "query_count": 11,
+    "recall_at_10": 1.0,
+    "result_identity_sha256": "287e1eca47f965af2dcce4e32cdecb30ade7e0d3f48dcaff3819f2a24809c317",
+    "returned_shortlist_total": 17,
+    "scored_channel_rows_total": 34,
+    "status": "PASS",
+    "warm_latency": {
+      "max_ms": 0.68,
+      "min_ms": 0.364,
+      "p50_ms": 0.434,
+      "p95_ms": 0.561,
+      "p99_ms": 0.615,
+      "samples": 330
+    }
+  },
+  "status": "PASS",
+  "subject": {
+    "adapter": "current-postgresql-fts-fixture-v1",
+    "code_sha": "b969dc7d4f4fa989999bbf2058fe6af0477afde0",
+    "harness_commit": "1ee36f9dcf795d30bc9e1512acfe3d535762d7f8",
+    "schema_sha256": "2a777e8859e6b965fd1808cd0eba69fdf654549ca82a5ef4798c2c3fed001e3d"
+  }
+}

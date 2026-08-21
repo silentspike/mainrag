@@ -10,8 +10,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 /// Role of a source within a domain profile
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +27,8 @@ pub enum SourceRole {
 #[derive(Debug, Clone)]
 pub struct DomainProfile {
     pub name: String,
+    pub version: u64,
+    pub content_sha256: [u8; 32],
     pub description: String,
     pub language: String,
     pub code_sources: Vec<String>,
@@ -54,12 +57,18 @@ struct ProfileToml {
 #[derive(Debug, Deserialize)]
 struct ProfileHeader {
     name: String,
+    #[serde(default = "legacy_profile_version")]
+    version: u64,
     description: String,
     language: String,
     #[serde(default)]
     code_sources: Vec<String>,
     #[serde(default)]
     support_sources: Vec<String>,
+}
+
+fn legacy_profile_version() -> u64 {
+    1
 }
 
 /// Domain Profile Registry — loads profiles from disk, caches, resolves by source name
@@ -83,8 +92,11 @@ impl DomainProfileRegistry {
             });
         }
 
-        for entry in std::fs::read_dir(dir).context("read domain_profiles dir")? {
-            let entry = entry?;
+        let mut entries = std::fs::read_dir(dir)
+            .context("read domain_profiles dir")?
+            .collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("toml") {
                 continue;
@@ -139,9 +151,15 @@ impl DomainProfileRegistry {
         let parsed: ProfileToml =
             toml::from_str(&content).context(format!("parse profile {:?}", path))?;
         let raw: toml::Value = toml::from_str(&content)?;
+        ensure!(
+            parsed.profile.version > 0,
+            "profile version must be positive"
+        );
 
         Ok(DomainProfile {
             name: parsed.profile.name,
+            version: parsed.profile.version,
+            content_sha256: Sha256::digest(content.as_bytes()).into(),
             description: parsed.profile.description,
             language: parsed.profile.language,
             code_sources: parsed.profile.code_sources,
@@ -283,5 +301,14 @@ mod tests {
         assert_eq!(detect_intent("get track bank"), Some("read".to_string()));
         assert_eq!(detect_intent("toggle mute"), Some("modify".to_string()));
         assert_eq!(detect_intent("what is this"), None);
+    }
+
+    #[test]
+    fn legacy_profile_gets_a_compatibility_version_and_content_hash() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../data/domain_profiles/bitwig.toml");
+        let profile = DomainProfileRegistry::load_profile(&path).unwrap();
+        assert_eq!(profile.version, 1);
+        assert_ne!(profile.content_sha256, [0; 32]);
     }
 }

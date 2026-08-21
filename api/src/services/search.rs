@@ -792,6 +792,10 @@ impl SearchService {
                     chunk_type,
                     level,
                     parent_context: None, // Populated below
+                    external_hit_id: None,
+                    successor_metadata: None,
+                    score_explanation: None,
+                    degradation: None,
                 }
             })
             .collect();
@@ -1322,6 +1326,10 @@ impl SearchService {
                     chunk_type: None, // Not fetched for semantic-only search
                     level: None,
                     parent_context: None,
+                    external_hit_id: None,
+                    successor_metadata: None,
+                    score_explanation: None,
+                    degradation: None,
                 }
             })
             .collect();
@@ -1432,6 +1440,10 @@ impl SearchService {
                     chunk_type: None, // Not fetched for keyword-only search
                     level: None,
                     parent_context: None,
+                    external_hit_id: None,
+                    successor_metadata: None,
+                    score_explanation: None,
+                    degradation: None,
                 }
             })
             .collect();

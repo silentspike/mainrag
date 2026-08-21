@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/silentspike/mainrag/ops/search-backend/native-gin/evidence.schema.json",
+  "title": "MainRAG native-GIN qualification evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "recorded_at",
+    "subject",
+    "inputs",
+    "toolchain",
+    "package",
+    "gates",
+    "cleanup",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {"const": "mainrag-native-gin-evidence/v1"},
+    "status": {"$ref": "#/$defs/status"},
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit_sha", "backend", "backend_version", "postgresql_version"],
+      "properties": {
+        "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "backend": {"const": "PostgreSQL built-in GIN"},
+        "backend_version": {"const": "18.4"},
+        "postgresql_version": {"const": "18.4"}
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    },
+    "toolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["postgres_binary_sha256", "configure_sha256", "compiler"],
+      "properties": {
+        "postgres_binary_sha256": {"$ref": "#/$defs/sha256"},
+        "configure_sha256": {"$ref": "#/$defs/sha256"},
+        "compiler": {"type": "string", "minLength": 1}
+      }
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "artifact_digest", "extension", "preload_required", "reproducibility"],
+      "properties": {
+        "format": {"const": "none-built-in"},
+        "artifact_digest": {"$ref": "#/$defs/sha256"},
+        "extension": {"type": "null"},
+        "preload_required": {"const": false},
+        "reproducibility": {"const": "N/A: built-in backend; locked PostgreSQL source and schema inputs are qualified"}
+      }
+    },
+    "gates": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "detail"],
+        "properties": {
+          "status": {"$ref": "#/$defs/status"},
+          "detail": {"type": "string", "minLength": 1},
+          "count": {"type": "integer", "minimum": 0},
+          "sha256": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "temporary_cluster_removed", "temporary_evidence_removed"],
+      "properties": {
+        "status": {"$ref": "#/$defs/status"},
+        "temporary_cluster_removed": {"type": "boolean"},
+        "temporary_evidence_removed": {"type": "boolean"}
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    }
+  },
+  "$defs": {
+    "status": {"enum": ["PASS", "FAIL", "BLOCKED", "N/A"]},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

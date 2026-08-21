@@ -108,12 +108,14 @@ pub async fn toggle_watch(
     Path(source_id): Path<i64>,
 ) -> Result<Json<WatchStatusResponse>, StatusCode> {
     state.rls_client.with_system(|txn| Box::pin(async move {
-        let row = txn.query_one(
+        let row = txn.query_opt(
             "UPDATE sources SET watch_enabled = NOT COALESCE(watch_enabled, false), updated_at = NOW()
-             WHERE id = $1
+             WHERE id = $1 AND NOT is_test
              RETURNING id, name, path, watch_enabled",
             &[&source_id],
-        ).await?;
+        ).await?.ok_or(crate::error::AppError::BadRequest(
+            "test sources cannot enter legacy watch sync".to_string(),
+        ))?;
 
         let new_status: bool = row.get(3);
 
@@ -129,7 +131,10 @@ pub async fn toggle_watch(
             path: row.get(2),
             watching: new_status,
         }))
-    })).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    })).await.map_err(|error| match error {
+        crate::error::AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    })
 }
 
 /// Get detailed watch statistics for monitoring

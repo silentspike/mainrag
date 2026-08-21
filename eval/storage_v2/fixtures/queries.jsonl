@@ -1,0 +1,11 @@
+{"id":"and-generation","construct":"and","query":"immutable generation","phrase":false,"k":10,"expected":["generations.md"]}
+{"id":"or-storage-generation","construct":"or","query":"pack OR active_generation_id","phrase":false,"k":10,"expected":["storage.md","generations.md"]}
+{"id":"not-mutable","construct":"not","query":"generation -mutable","phrase":false,"k":10,"expected":["generations.md"]}
+{"id":"phrase-activation","construct":"phrase","query":"atomic activation","phrase":true,"k":10,"expected":["generations.md"]}
+{"id":"grouped-storage","construct":"group","query":"(pack OR body) integrity","phrase":false,"k":10,"expected":["storage.md"]}
+{"id":"exact-identifier","construct":"exact_identifier","query":"active_generation_id","phrase":false,"k":10,"expected":["generations.md"]}
+{"id":"authorization-isolation","construct":"and","query":"occurrence authorization","phrase":false,"k":10,"expected":["authorization.md"]}
+{"id":"complete-fallback","construct":"adverse","query":"complete fallback arbitrary limit","phrase":false,"k":10,"expected":["search.md"]}
+{"id":"legacy-split-merge","construct":"and","query":"split merged canonical","phrase":false,"k":10,"expected":["legacy.md"]}
+{"id":"common-source","construct":"common_term","query":"source","phrase":false,"k":10,"expected":["common-alpha.md","common-beta.md"]}
+{"id":"negative-no-match","construct":"negative","query":"nonexistent_fixture_token_7f3a","phrase":false,"k":10,"expected":[]}

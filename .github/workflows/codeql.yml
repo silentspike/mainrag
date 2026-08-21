@@ -9,29 +9,29 @@ on:
     - cron: '23 7 * * 1'   # weekly, Monday 07:23 UTC
 
 permissions:
-  security-events: write
   contents: read
-  actions: read
 
 jobs:
   analyze:
     name: Analyze ${{ matrix.language }}
-    runs-on: ubuntu-latest
-    # CodeQL Rust support is still GA-limited to GitHub Advanced Security
-    # subscribers and public repos. On a private repo without GHAS this
-    # job will error with "Advanced Security must be enabled" — that is
-    # expected and non-blocking (continue-on-error).
-    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
     strategy:
       fail-fast: false
       matrix:
         language: [rust, actions]
     steps:
-      - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
         with:
           languages: ${{ matrix.language }}
-      - uses: github/codeql-action/autobuild@v3
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/autobuild@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+      - uses: github/codeql-action/analyze@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
         with:
           category: "/language:${{ matrix.language }}"
