@@ -1,8 +1,8 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Extension, Json,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -15,6 +15,51 @@ use crate::AppState;
 pub struct SourcesResponse {
     pub sources: Vec<Source>,
     pub total: usize,
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
+#[derive(Debug, Deserialize)]
+pub struct ShadowSourceStateQuery {
+    pub generation: String,
+    #[serde(default)]
+    pub include_test: bool,
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
+pub async fn shadow_source_state(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
+    Path(source_id): Path<i64>,
+    Query(request): Query<ShadowSourceStateQuery>,
+) -> Result<Json<serde_json::Value>> {
+    let user_id = Uuid::from_str(&claims.sub)
+        .map_err(|_| AppError::Auth("Invalid user ID in claims".into()))?;
+    let instance_id = state.instance_id.to_string();
+    state
+        .rls_client
+        .with_rls(user_id, claims.is_admin, move |transaction| {
+            Box::pin(async move {
+                let row = transaction
+                    .query_one(
+                        "SELECT storage_v2_shadow_source_state($1,$2,$3)",
+                        &[&source_id, &request.generation, &request.include_test],
+                    )
+                    .await
+                    .map_err(|error| {
+                        if error.code()
+                            == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+                        {
+                            AppError::Forbidden("shadow source state is not authorized".to_string())
+                        } else {
+                            AppError::Database(error)
+                        }
+                    })?;
+                let mut value: serde_json::Value = row.get(0);
+                value["server_instance_id"] = serde_json::Value::String(instance_id);
+                Ok(Json(value))
+            })
+        })
+        .await
 }
 
 pub async fn list_sources(

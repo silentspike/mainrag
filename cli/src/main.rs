@@ -92,6 +92,10 @@ enum Commands {
         /// Explicit optional rerank score profile
         #[arg(long)]
         rerank_profile: Option<String>,
+
+        /// Include an explicit admin-only synthetic/benchmark source
+        #[arg(long)]
+        include_test: bool,
     },
 
     /// Add a new source (filesystem, git, or web)
@@ -102,6 +106,10 @@ enum Commands {
         /// Custom source name (defaults to directory/repo name)
         #[arg(short, long)]
         name: Option<String>,
+
+        /// Mark this source as synthetic test data (admin-only shadow workflows)
+        #[arg(long)]
+        test_source: bool,
     },
 
     /// Manage sources
@@ -186,6 +194,10 @@ enum Commands {
         /// Read an explicitly named storage-v2 generation (requires --source)
         #[arg(long)]
         generation: Option<String>,
+
+        /// Include an explicit admin-only synthetic/benchmark source
+        #[arg(long)]
+        include_test: bool,
     },
 
     /// Trace delegation chain through proxy -> dispatch -> mutation
@@ -201,6 +213,10 @@ enum Commands {
         #[arg(long)]
         generation: Option<String>,
 
+        /// Include an explicit admin-only synthetic/benchmark source
+        #[arg(long)]
+        include_test: bool,
+
         /// Maximum chain depth
         #[arg(short, long, default_value = "6")]
         depth: u32,
@@ -215,6 +231,10 @@ enum Commands {
         /// Read an explicitly named storage-v2 generation (requires --source)
         #[arg(long)]
         generation: Option<String>,
+
+        /// Include an explicit admin-only synthetic/benchmark source
+        #[arg(long)]
+        include_test: bool,
 
         /// Filter by layer (e.g. controller_api, proxy, internal)
         #[arg(short, long)]
@@ -245,6 +265,10 @@ enum Commands {
         /// Read an explicitly named storage-v2 generation (requires --source)
         #[arg(long)]
         generation: Option<String>,
+
+        /// Include an explicit admin-only synthetic/benchmark source
+        #[arg(long)]
+        include_test: bool,
     },
 
     /// Explore a concept: query rewriting + path tracing + dead-end warnings
@@ -277,6 +301,50 @@ enum Commands {
 enum SourceAction {
     /// List all sources
     List,
+
+    /// Inspect an explicitly named storage-v2 generation
+    State {
+        /// Source name
+        name: String,
+
+        /// Positive storage-v2 generation sequence
+        #[arg(long)]
+        generation: String,
+
+        /// Include an explicit admin-only synthetic/benchmark source
+        #[arg(long)]
+        include_test: bool,
+    },
+
+    /// Run the bounded admin-only storage-v2 fixture slice
+    ShadowSlice {
+        /// Test source name
+        name: String,
+
+        /// Exact implementation commit SHA
+        #[arg(long)]
+        commit_sha: String,
+    },
+
+    /// Classify and persist a redacted dual-read evidence envelope
+    DualRead {
+        /// Test source name
+        name: String,
+
+        /// JSON file containing results returned by both supported search APIs
+        #[arg(long)]
+        evidence: std::path::PathBuf,
+    },
+
+    /// Mark an abandoned test-only building generation unreadable
+    CleanupShadow {
+        /// Test source name
+        name: String,
+
+        /// Building/cancelled shadow ingest run ID
+        #[arg(long)]
+        run_id: i64,
+    },
 
     /// Sync a source (re-index files)
     Sync {
@@ -408,6 +476,7 @@ async fn main() -> anyhow::Result<()> {
             graph_profile,
             semantic_profile,
             rerank_profile,
+            include_test,
         } => {
             commands::search::run(
                 &client,
@@ -425,14 +494,17 @@ async fn main() -> anyhow::Result<()> {
                 graph_profile.as_deref(),
                 semantic_profile.as_deref(),
                 rerank_profile.as_deref(),
+                include_test,
                 cli.json,
             )
             .await
         }
 
-        Commands::Add { path, name } => {
-            commands::add::run(&client, &path, name.as_deref(), cli.json).await
-        }
+        Commands::Add {
+            path,
+            name,
+            test_source,
+        } => commands::add::run(&client, &path, name.as_deref(), test_source, cli.json).await,
 
         Commands::Source { action } => commands::source::run(&client, action, cli.json).await,
 
@@ -480,12 +552,14 @@ async fn main() -> anyhow::Result<()> {
             symbol,
             source,
             generation,
+            include_test,
         } => {
             commands::card::run(
                 &client,
                 &symbol,
                 source.as_deref(),
                 generation.as_deref(),
+                include_test,
                 cli.json,
             )
             .await
@@ -495,6 +569,7 @@ async fn main() -> anyhow::Result<()> {
             symbol,
             source,
             generation,
+            include_test,
             depth,
         } => {
             commands::explain::run(
@@ -502,6 +577,7 @@ async fn main() -> anyhow::Result<()> {
                 &symbol,
                 source.as_deref(),
                 generation.as_deref(),
+                include_test,
                 Some(depth),
                 cli.json,
             )
@@ -511,6 +587,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Layers {
             source,
             generation,
+            include_test,
             layer,
             resource,
             side_effect,
@@ -520,6 +597,7 @@ async fn main() -> anyhow::Result<()> {
                 &client,
                 source.as_deref(),
                 generation.as_deref(),
+                include_test,
                 layer.as_deref(),
                 resource.as_deref(),
                 side_effect.as_deref(),
@@ -533,12 +611,14 @@ async fn main() -> anyhow::Result<()> {
             symbol,
             source,
             generation,
+            include_test,
         } => {
             commands::ownership::run(
                 &client,
                 &symbol,
                 source.as_deref(),
                 generation.as_deref(),
+                include_test,
                 cli.json,
             )
             .await

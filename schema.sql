@@ -562,3 +562,4 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag;
 \ir migrations/032_storage_v2_shadow_ingest.sql
 \ir migrations/033_storage_v2_intelligence.sql
 \ir migrations/034_storage_v2_retrieval.sql
+\ir migrations/035_storage_v2_shadow_slice.sql

@@ -4,10 +4,12 @@ use crate::client::ApiClient;
 use anyhow::Result;
 use colored::Colorize;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     client: &ApiClient,
     source: Option<&str>,
     generation: Option<&str>,
+    include_test: bool,
     layer: Option<&str>,
     resource: Option<&str>,
     side_effect: Option<&str>,
@@ -25,6 +27,7 @@ pub async fn run(
                 "layers",
                 source,
                 generation,
+                include_test,
                 &[
                     ("layer", layer),
                     ("resource", resource),
@@ -34,6 +37,9 @@ pub async fn run(
             .await?;
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
+    }
+    if include_test {
+        anyhow::bail!("--include-test requires --generation and --source");
     }
     // Build URL with server-side filters
     let mut url = format!(

@@ -484,6 +484,30 @@ cleanup, and release are separate authorities. An implementation PR author does
 not acquire any later authority. A failed or missing gate leaves active/default
 reads unchanged.
 
+## Bounded shadow-slice interface
+
+The `storage-v2-retrieval` feature exposes only explicit, named-generation
+shadow operations. A permanent public fixture source is created with
+`is_test=true`; legacy sync and watch entry points reject that source. Search,
+source-state, card, explain, layers, and ownership reads require both the exact
+generation sequence and the admin-only `include_test` scope. Neither the current
+selector nor an omitted selector can infer the fixture generation.
+
+The shadow writer uses the real filesystem adapter, verified pack files under
+`MAINRAG_STORAGE_V2_PACK_ROOT`, content nodes/views, analysis cache,
+intelligence records, exact lexical documents, membership intervals, sealing
+and verification. A repeated semantic manifest reuses the verified generation;
+a delta verifies existing packed bytes before reusing a body. Optional graph,
+semantic, and rerank stages remain explicitly `unavailable`, not silently zero.
+
+Dual-read evidence is submitted through the supported admin API after both
+search APIs have returned. The server recomputes query-set identity, binds the
+artifact to the verified generation witness, classifies every difference into
+the closed taxonomy, and rejects unexplained differences. Abandoned test-only
+building runs may be cancelled and marked with an unreadable lifecycle
+tombstone; immutable staging rows remain as audit evidence and no membership or
+active pointer is changed.
+
 ## Evidence and privacy contract
 
 Public evidence may contain repository commits, schema/package/profile versions,

@@ -9,6 +9,7 @@ pub async fn run(
     symbol: &str,
     source: Option<&str>,
     generation: Option<&str>,
+    include_test: bool,
     json_output: bool,
 ) -> Result<()> {
     if !json_output {
@@ -18,10 +19,19 @@ pub async fn run(
     if let Some(generation) = generation {
         let source = source.ok_or_else(|| anyhow::anyhow!("--generation requires --source"))?;
         let result = client
-            .shadow_intelligence("ownership", source, generation, &[("name", Some(symbol))])
+            .shadow_intelligence(
+                "ownership",
+                source,
+                generation,
+                include_test,
+                &[("name", Some(symbol))],
+            )
             .await?;
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
+    }
+    if include_test {
+        anyhow::bail!("--include-test requires --generation and --source");
     }
     let url = format!(
         "{}/api/v1/intelligence/ownership?symbol={}",

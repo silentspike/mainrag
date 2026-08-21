@@ -1,5 +1,5 @@
 use serde_json::Value;
-use tokio_postgres::{Client, Error, Row};
+use tokio_postgres::{Client, Error, GenericClient, Row};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestRunRecord {
@@ -101,8 +101,8 @@ const RUN_COLUMNS: &str = "id, source_id, generation_id, idempotency_key, \
     bytes_read, parser_work_count, error_count, membership_delta_us, sealing_us";
 
 #[allow(clippy::too_many_arguments)]
-pub async fn begin_shadow_ingest(
-    client: &Client,
+pub async fn begin_shadow_ingest<C>(
+    client: &C,
     source_id: i64,
     idempotency_key: &str,
     semantic_manifest_sha256: &str,
@@ -110,7 +110,10 @@ pub async fn begin_shadow_ingest(
     witness_type: &str,
     witness: &Value,
     force: bool,
-) -> Result<IngestRunRecord, Error> {
+) -> Result<IngestRunRecord, Error>
+where
+    C: GenericClient + Sync,
+{
     client
         .query_one(
             &format!(
@@ -122,7 +125,7 @@ pub async fn begin_shadow_ingest(
                 &semantic_manifest_sha256,
                 &adapter_profile_id,
                 &witness_type,
-                &witness,
+                witness,
                 &force,
             ],
         )
@@ -130,10 +133,13 @@ pub async fn begin_shadow_ingest(
         .map(IngestRunRecord::from)
 }
 
-pub async fn stage_shadow_item(
-    client: &Client,
+pub async fn stage_shadow_item<C>(
+    client: &C,
     item: &StageItem<'_>,
-) -> Result<StagedItemRecord, Error> {
+) -> Result<StagedItemRecord, Error>
+where
+    C: GenericClient + Sync,
+{
     client
         .query_one(
             "SELECT run_id, source_id, source_item_id, artifact_version_id, occurrence_id, \
@@ -145,7 +151,7 @@ pub async fn stage_shadow_item(
                 &item.item_key,
                 &item.item_kind,
                 &item.witness_type,
-                &item.witness,
+                item.witness,
                 &item.adapter_profile_id,
                 &item.content_root_node_id,
                 &item.raw_body_id,
@@ -155,7 +161,7 @@ pub async fn stage_shadow_item(
                 &item.analysis_profile_id,
                 &item.view_id,
                 &item.source_path,
-                &item.locator,
+                item.locator,
                 &item.parser_pass_count,
             ],
         )
@@ -163,11 +169,14 @@ pub async fn stage_shadow_item(
         .map(StagedItemRecord::from)
 }
 
-pub async fn begin_analysis_attempt(
-    client: &Client,
+pub async fn begin_analysis_attempt<C>(
+    client: &C,
     content_identity_sha256: &[u8],
     analysis_profile_id: &str,
-) -> Result<String, Error> {
+) -> Result<String, Error>
+where
+    C: GenericClient + Sync,
+{
     client
         .query_one(
             "SELECT status FROM storage_v2_begin_analysis_attempt($1, $2)",
@@ -177,13 +186,16 @@ pub async fn begin_analysis_attempt(
         .map(|row| row.get("status"))
 }
 
-pub async fn finish_analysis_attempt(
-    client: &Client,
+pub async fn finish_analysis_attempt<C>(
+    client: &C,
     content_identity_sha256: &[u8],
     analysis_profile_id: &str,
     result: Option<&Value>,
     error_code: Option<&str>,
-) -> Result<String, Error> {
+) -> Result<String, Error>
+where
+    C: GenericClient + Sync,
+{
     client
         .query_one(
             "SELECT status FROM storage_v2_finish_analysis_attempt($1, $2, $3, $4)",
@@ -198,12 +210,15 @@ pub async fn finish_analysis_attempt(
         .map(|row| row.get("status"))
 }
 
-pub async fn commit_shadow_ingest(
-    client: &Client,
+pub async fn commit_shadow_ingest<C>(
+    client: &C,
     run_id: i64,
     expected_item_count: i64,
     generation_root_sha256: &str,
-) -> Result<IngestRunRecord, Error> {
+) -> Result<IngestRunRecord, Error>
+where
+    C: GenericClient + Sync,
+{
     client
         .query_one(
             &format!("SELECT {RUN_COLUMNS} FROM storage_v2_commit_shadow_ingest($1,$2,$3)"),

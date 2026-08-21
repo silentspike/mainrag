@@ -5,6 +5,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+#[cfg(feature = "storage-v2-retrieval")]
+use uuid::Uuid;
 
 use crate::api::JsonBody;
 use crate::error::{AppError, Result};
@@ -31,6 +33,131 @@ pub struct CreateSourceRequest {
     pub source_type: Option<String>,
     pub path: String,
     pub config: Option<serde_json::Value>, // Flexible source-type-specific config
+    #[serde(default)]
+    pub is_test: bool,
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
+#[derive(Debug, Deserialize)]
+pub struct ShadowSliceRequest {
+    pub commit_sha: String,
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
+pub async fn admin_run_shadow_slice(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
+    Path(source_id): Path<i64>,
+    JsonBody(request): JsonBody<ShadowSliceRequest>,
+) -> Result<Json<crate::services::shadow_slice::ShadowSliceResult>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
+    let commit_sha = request.commit_sha;
+    let pack_root = state.config.storage_v2_pack_root.clone();
+    let pack_io_buffer_bytes = state.config.storage_v2_pack_io_buffer_bytes;
+    state
+        .rls_client
+        .with_rls(user_id, true, move |transaction| {
+            Box::pin(async move {
+                let source = transaction
+                    .query_opt(
+                        "SELECT type, path, is_test FROM sources WHERE id = $1",
+                        &[&source_id],
+                    )
+                    .await?
+                    .ok_or_else(|| AppError::NotFound(format!("Source {source_id} not found")))?;
+                if !source.get::<_, bool>("is_test") {
+                    return Err(AppError::BadRequest(
+                        "shadow slice requires a source created with is_test=true".to_string(),
+                    ));
+                }
+                let source_type: String = source.get("type");
+                let source_path: String = source.get("path");
+                let result = crate::services::shadow_slice::run_public_shadow_slice(
+                    &**transaction,
+                    source_id,
+                    &source_type,
+                    std::path::Path::new(&source_path),
+                    &pack_root,
+                    pack_io_buffer_bytes,
+                    &commit_sha,
+                )
+                .await
+                .map_err(|error| {
+                    AppError::Internal(format!("storage-v2 shadow slice failed: {error}"))
+                })?;
+                Ok(Json(result))
+            })
+        })
+        .await
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
+pub async fn admin_record_dual_read(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
+    Path(source_id): Path<i64>,
+    JsonBody(request): JsonBody<crate::services::shadow_slice::DualReadEvidenceInput>,
+) -> Result<Json<crate::services::shadow_slice::DualReadEvidenceResult>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
+    state
+        .rls_client
+        .with_rls(user_id, true, move |transaction| {
+            Box::pin(async move {
+                let result = crate::services::shadow_slice::record_dual_read_evidence(
+                    &**transaction,
+                    source_id,
+                    &request,
+                )
+                .await
+                .map_err(|error| {
+                    AppError::BadRequest(format!("invalid dual-read evidence: {error}"))
+                })?;
+                Ok(Json(result))
+            })
+        })
+        .await
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
+pub async fn admin_cleanup_shadow_slice(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
+    Path((source_id, run_id)): Path<(i64, i64)>,
+) -> Result<Json<serde_json::Value>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
+    state
+        .rls_client
+        .with_rls(user_id, true, move |transaction| {
+            Box::pin(async move {
+                let row = transaction
+                    .query_opt(
+                        "SELECT storage_v2_cleanup_abandoned_shadow_ingest($1) AS cleanup \
+                         WHERE EXISTS (SELECT 1 FROM storage_v2_ingest_run WHERE id=$1 AND source_id=$2)",
+                        &[&run_id, &source_id],
+                    )
+                    .await
+                    .map_err(|error| {
+                        if error.code()
+                            == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+                        {
+                            AppError::Forbidden(
+                                "shadow cleanup cannot touch visible, verified, active, or foreign state"
+                                    .to_string(),
+                            )
+                        } else {
+                            AppError::Database(error)
+                        }
+                    })?
+                    .ok_or_else(|| {
+                        AppError::NotFound("shadow ingest run not found".to_string())
+                    })?;
+                Ok(Json(row.get::<_, serde_json::Value>("cleanup")))
+            })
+        })
+        .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +251,7 @@ pub async fn admin_create_source(
         ));
     }
     let config = req.config;
+    let is_test = req.is_test;
 
     // K3: INSERT in transaction via RlsClient
     state
@@ -134,13 +262,13 @@ pub async fn admin_create_source(
                 match txn
                     .query_one(
                         r#"
-                INSERT INTO sources (name, type, path, config, user_id)
-                VALUES ($1, $2, $3, $4, $5)
+                INSERT INTO sources (name, type, path, config, user_id, is_test)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 RETURNING id, name, type as source_type, path, last_synced, created_at, updated_at,
                           COALESCE(file_count, 0)::bigint as file_count,
                           COALESCE(total_size, 0)::bigint as total_size
                 "#,
-                        &[&name, &source_type, &path, &config, &owner_id],
+                        &[&name, &source_type, &path, &config, &owner_id, &is_test],
                     )
                     .await
                 {
@@ -400,6 +528,24 @@ pub async fn admin_sync_source(
 ) -> Result<Json<serde_json::Value>> {
     use crate::services::IndexService;
 
+    let is_test = state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                Ok(txn
+                    .query_opt("SELECT is_test FROM sources WHERE id=$1", &[&id])
+                    .await?
+                    .map(|row| row.get::<_, bool>(0)))
+            })
+        })
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Source {id} not found")))?;
+    if is_test {
+        return Err(AppError::BadRequest(
+            "test sources can only use the explicit storage-v2 shadow endpoint".to_string(),
+        ));
+    }
+
     // K3: IndexService manages its own DB connections from the pool.
     // No RLS setup needed here — IndexService handles it internally.
     let index_service =
@@ -549,6 +695,24 @@ pub async fn admin_sync_files(
     JsonBody(req): JsonBody<SyncFilesRequest>,
 ) -> Result<Json<serde_json::Value>> {
     use crate::services::IndexService;
+
+    let is_test = state
+        .rls_client
+        .with_system(|txn| {
+            Box::pin(async move {
+                Ok(txn
+                    .query_opt("SELECT is_test FROM sources WHERE id=$1", &[&id])
+                    .await?
+                    .map(|row| row.get::<_, bool>(0)))
+            })
+        })
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Source {id} not found")))?;
+    if is_test {
+        return Err(AppError::BadRequest(
+            "test sources cannot enter legacy incremental sync".to_string(),
+        ));
+    }
 
     // S2: Path traversal prevention on file paths
     for f in &req.files {

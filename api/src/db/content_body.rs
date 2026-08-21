@@ -1,4 +1,4 @@
-use tokio_postgres::{Client, Error, Row};
+use tokio_postgres::{Client, Error, GenericClient, Row};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -35,12 +35,50 @@ pub async fn put_inline_body(client: &Client, bytes: &[u8]) -> Result<ContentBod
         .map(ContentBodyRecord::from)
 }
 
-pub async fn create_pack(
-    client: &Client,
+#[allow(clippy::too_many_arguments)]
+pub async fn put_packed_body<C>(
+    client: &C,
+    pack_id: Uuid,
+    ordinal: i64,
+    digest: &[u8],
+    logical_length: i64,
+    pack_offset: i64,
+    stored_length: i64,
+    codec: &str,
+    entry_digest: &[u8],
+) -> Result<ContentBodyRecord, Error>
+where
+    C: GenericClient + Sync,
+{
+    client
+        .query_one(
+            "SELECT id, digest_algorithm, digest, logical_length, inline_bytes, pack_id \
+             FROM storage_v2_put_packed_body(\
+                $1,$2,$3,$4,$5,$6,$7::TEXT::storage_v2_body_codec,$8)",
+            &[
+                &pack_id,
+                &ordinal,
+                &digest,
+                &logical_length,
+                &pack_offset,
+                &stored_length,
+                &codec,
+                &entry_digest,
+            ],
+        )
+        .await
+        .map(ContentBodyRecord::from)
+}
+
+pub async fn create_pack<C>(
+    client: &C,
     pack_id: Uuid,
     storage_key: &str,
     build_nonce: Uuid,
-) -> Result<(), Error> {
+) -> Result<(), Error>
+where
+    C: GenericClient + Sync,
+{
     client
         .execute(
             "SELECT storage_v2_create_pack($1, $2, $3)",
@@ -50,12 +88,15 @@ pub async fn create_pack(
         .map(|_| ())
 }
 
-pub async fn verify_pack(
-    client: &Client,
+pub async fn verify_pack<C>(
+    client: &C,
     pack_id: Uuid,
     manifest_sha256: &[u8],
     stored_bytes: i64,
-) -> Result<(), Error> {
+) -> Result<(), Error>
+where
+    C: GenericClient + Sync,
+{
     client
         .execute(
             "SELECT storage_v2_verify_pack($1, $2, $3)",
@@ -65,7 +106,10 @@ pub async fn verify_pack(
         .map(|_| ())
 }
 
-pub async fn publish_pack(client: &Client, pack_id: Uuid) -> Result<(), Error> {
+pub async fn publish_pack<C>(client: &C, pack_id: Uuid) -> Result<(), Error>
+where
+    C: GenericClient + Sync,
+{
     client
         .execute("SELECT storage_v2_publish_pack($1)", &[&pack_id])
         .await

@@ -90,6 +90,47 @@ counts. Compare two candidate runs with:
 python3 eval/storage_v2/compare_manifests.py FIRST.json SECOND.json
 ```
 
+## Supported-API shadow slice
+
+`shadow_slice.py` runs the permanent public fixture through the real filesystem
+adapter and storage-v2 API without activating it or writing legacy chunks. The
+two phases must straddle an API restart; the verify phase rejects an unchanged
+server instance ID and records only hashes, counts, timings, generation IDs and
+classified result identities.
+
+```bash
+export MAINRAG_TOKEN=REDACTED
+python3 eval/storage_v2/prepare_shadow_fixture.py prepare \
+  --output /tmp/mainrag-storage-v2-shadow-source
+python3 eval/storage_v2/shadow_slice.py \
+  --phase ingest \
+  --source-path /tmp/mainrag-storage-v2-shadow-source \
+  --commit-sha 0123456789012345678901234567890123456789 \
+  --checkpoint /tmp/mainrag-storage-v2-shadow.json
+
+# Restart the API without changing its database or pack root.
+
+python3 eval/storage_v2/shadow_slice.py \
+  --phase verify \
+  --checkpoint /tmp/mainrag-storage-v2-shadow.json \
+  --output /tmp/mainrag-storage-v2-shadow-result.json
+```
+
+The preparer composes the frozen 12-document baseline with one neutral Rust
+symbol fixture. This preserves the #55 corpus and query expectations while
+making the real `card`, `explain`, `layers`, and `ownership` API/CLI gates
+executable. `prepare` refuses to overwrite an existing directory; `verify`
+detects drift, `delta` makes the one supported deterministic source change,
+and `reset` restores its exact base bytes. The guarded `base -> delta -> reset`
+sequence exercises temporal A -> B -> A membership: the return to A must create
+a new generation while reusing immutable bodies, nodes, views, and analysis.
+
+The ingest response embeds the existing `ShadowIngestMeasurements` phase keys
+(`lesen_hashen_ms`, `content_store_ms`, `strukturprojektion_ms`, `analyse_ms`,
+`db_staging_ms`, `intervall_delta_ms`, and `sealing_ms`), so a telemetry
+collector can compare the full read/dedup/write pipeline across repeated and
+delta runs. The harness never stores the token or the local fixture path.
+
 Warm p50/p95/p99 may differ by at most 50% between the two local subprocess
 runs. This deliberately broad tolerance detects large regressions without
 pretending that scheduler and process-start noise are deterministic. Result

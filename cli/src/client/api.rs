@@ -78,6 +78,7 @@ pub struct SearchOptions<'a> {
     pub graph_profile: Option<&'a str>,
     pub semantic_profile: Option<&'a str>,
     pub rerank_profile: Option<&'a str>,
+    pub include_test: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -89,6 +90,8 @@ pub struct CreateSourceRequest {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<serde_json::Value>,
+    #[serde(default)]
+    pub is_test: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -399,6 +402,9 @@ impl ApiClient {
             if let Some(value) = value {
                 body[name] = serde_json::json!(value);
             }
+        }
+        if options.include_test {
+            body["include_test"] = serde_json::json!(true);
         }
 
         // Add quality tier based on mode
@@ -923,6 +929,7 @@ impl ApiClient {
         command: &str,
         source: &str,
         generation: &str,
+        include_test: bool,
         query: &[(&str, Option<&str>)],
     ) -> Result<serde_json::Value> {
         let sources = self.list_sources().await?;
@@ -933,11 +940,12 @@ impl ApiClient {
             .map(|candidate| candidate.id)
             .ok_or_else(|| anyhow!("source '{}' not found", source))?;
         let mut url = format!(
-            "{}/api/v1/intelligence/shadow?source_id={}&generation={}&command={}",
+            "{}/api/v1/intelligence/shadow?source_id={}&generation={}&command={}&include_test={}",
             self.base_url,
             source_id,
             urlencoding::encode(generation),
-            urlencoding::encode(command)
+            urlencoding::encode(command),
+            include_test
         );
         for (key, value) in query {
             if let Some(value) = value {
@@ -961,6 +969,128 @@ impl ApiClient {
             ));
         }
         response.json().await.context("parse shadow intelligence")
+    }
+
+    pub async fn shadow_source_state(
+        &self,
+        source: &str,
+        generation: &str,
+        include_test: bool,
+    ) -> Result<serde_json::Value> {
+        let source_id = self.get_source_id_by_name(source).await?;
+        let url = format!(
+            "{}/api/v1/sources/{}/shadow-state?generation={}&include_test={}",
+            self.base_url,
+            source_id,
+            urlencoding::encode(generation),
+            include_test
+        );
+        let response = self
+            .client
+            .get(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .send()
+            .await
+            .context("shadow source-state request failed")?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "shadow source-state request failed: {}",
+                response.status()
+            ));
+        }
+        response
+            .json()
+            .await
+            .context("parse shadow source-state response")
+    }
+
+    pub async fn run_shadow_slice(
+        &self,
+        source: &str,
+        commit_sha: &str,
+    ) -> Result<serde_json::Value> {
+        let source_id = self.get_source_id_by_name(source).await?;
+        let url = format!(
+            "{}/api/v1/admin/sources/{}/storage-v2-shadow-slice",
+            self.base_url, source_id
+        );
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .json(&serde_json::json!({"commit_sha": commit_sha}))
+            .send()
+            .await
+            .context("storage-v2 shadow-slice request failed")?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "storage-v2 shadow-slice request failed: {}",
+                response.status()
+            ));
+        }
+        response
+            .json()
+            .await
+            .context("parse storage-v2 shadow-slice response")
+    }
+
+    pub async fn record_dual_read(
+        &self,
+        source: &str,
+        evidence: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let source_id = self.get_source_id_by_name(source).await?;
+        let url = format!(
+            "{}/api/v1/admin/sources/{}/storage-v2-dual-read",
+            self.base_url, source_id
+        );
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .json(evidence)
+            .send()
+            .await
+            .context("storage-v2 dual-read request failed")?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "storage-v2 dual-read request failed: {}",
+                response.status()
+            ));
+        }
+        response
+            .json()
+            .await
+            .context("parse storage-v2 dual-read response")
+    }
+
+    pub async fn cleanup_shadow_slice(
+        &self,
+        source: &str,
+        run_id: i64,
+    ) -> Result<serde_json::Value> {
+        let source_id = self.get_source_id_by_name(source).await?;
+        let url = format!(
+            "{}/api/v1/admin/sources/{}/storage-v2-shadow-runs/{}/cleanup",
+            self.base_url, source_id, run_id
+        );
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .send()
+            .await
+            .context("storage-v2 shadow cleanup request failed")?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "storage-v2 shadow cleanup request failed: {}",
+                response.status()
+            ));
+        }
+        response
+            .json()
+            .await
+            .context("parse storage-v2 shadow cleanup response")
     }
 
     pub async fn explain_path(
