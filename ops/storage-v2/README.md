@@ -123,6 +123,15 @@ Repeat the same command after a client or service restart to prove idempotent
 resume: the generation identity must be reused and semantic row counts must not
 increase.
 
+Filesystem discovery for this command returns metadata and file paths rather
+than retaining the entire corpus. The builder reads files serially, rechecks
+each content hash after the source watermark is captured, rediscovers and
+rehashes the complete source immediately before sealing, and reports a
+conservative source/pack buffer peak in phase telemetry. Changed, added, or
+removed content aborts the candidate; it is never accepted as a mixed snapshot.
+The production watermark also binds the registered source type/path and adapter
+profile without publishing those protected values.
+
 Current and explicitly named generation reads must then be compared through the
 supported APIs. Record the accepted, fully classified dual-read envelope before
 qualification:
