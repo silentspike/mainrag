@@ -133,8 +133,9 @@ The production watermark also binds the registered source type/path and adapter
 profile without publishing those protected values.
 
 Current and explicitly named generation reads must then be compared through the
-supported APIs. Record the accepted, fully classified dual-read envelope before
-qualification:
+supported APIs. The evidence endpoint binds the source's recorded production or
+explicit-test scope to the verified generation witness. Record the accepted,
+fully classified dual-read envelope before qualification:
 
 ```bash
 mainrag source dual-read SOURCE --evidence PROTECTED_DUAL_READ_JSON
