@@ -47,8 +47,12 @@ WITH settings AS (
             pg_database_collation_actual_version(d.oid),
         'explicit_mismatch_count', (
             SELECT count(*)
-              FROM pg_collation c
+             FROM pg_collation c
              WHERE c.collversion IS NOT NULL
+               AND c.collencoding IN (
+                   -1,
+                   pg_char_to_encoding(current_setting('server_encoding'))
+               )
                AND c.collversion IS DISTINCT FROM
                    pg_collation_actual_version(c.oid)
         ),

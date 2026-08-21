@@ -105,6 +105,13 @@ def evaluate(snapshot: dict | None = None, units: dict | None = None, backup_val
 
 
 class PreflightTests(unittest.TestCase):
+    def test_collation_check_only_counts_current_database_encoding(self) -> None:
+        compact_sql = " ".join(preflight.DATABASE_SNAPSHOT_SQL.split())
+        self.assertIn(
+            "c.collencoding IN ( -1, pg_char_to_encoding(current_setting('server_encoding')) )",
+            compact_sql,
+        )
+
     def test_schema_dump_identity_ignores_only_postgres_safety_token(self) -> None:
         first = b"-- schema\n\\restrict alpha\nCREATE TABLE t(id int);\n\\unrestrict alpha\n"
         second = b"-- schema\n\\restrict beta\nCREATE TABLE t(id int);\n\\unrestrict beta\n"

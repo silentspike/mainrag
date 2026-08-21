@@ -23,7 +23,8 @@ The output is deliberately redacted and validates against
 preload/configuration values, resource limits and totals, and
 PASS/BLOCKED/FAIL states, but no database address,
 hostname, account identity, data path, command line, or raw log. A missing
-backup record, version/configuration drift, stale collation, active or unknown
+backup record, version/configuration drift, a stale collation usable by the
+current database encoding, active or unknown
 writer, active maintenance operation, insufficient free space, wrong extension,
 or invalid selected index keeps the result `BLOCKED`.
 
