@@ -107,9 +107,26 @@ impl SourcePlugin for FilesystemPlugin {
         let mut files = vec![];
         let mut errors = vec![];
 
-        self.collect_files(path, Path::new(source_path), &mut files, &mut errors)
+        self.collect_files(path, Path::new(source_path), &mut files, &mut errors, true)
             .await?;
 
+        Ok(SyncResult { files, errors })
+    }
+
+    async fn sync_for_storage_v2(&self, source_path: &str) -> anyhow::Result<SyncResult> {
+        let path = Path::new(source_path);
+
+        if !path.exists() {
+            return Err(anyhow::anyhow!("Path does not exist: {}", source_path));
+        }
+        if !path.is_dir() {
+            return Err(anyhow::anyhow!("Path is not a directory: {}", source_path));
+        }
+
+        let mut files = vec![];
+        let mut errors = vec![];
+        self.collect_files(path, Path::new(source_path), &mut files, &mut errors, false)
+            .await?;
         Ok(SyncResult { files, errors })
     }
 
@@ -131,6 +148,7 @@ impl FilesystemPlugin {
         _current_path: &Path, // Not used with WalkBuilder (kept for API compat)
         files: &mut Vec<RawFile>,
         errors: &mut Vec<String>,
+        load_content: bool,
     ) -> anyhow::Result<()> {
         const INDEXABLE_EXTENSIONS: &[&str] = &[
             "rs", "py", "js", "ts", "tsx", "go", "java", "c", "cpp", "h", "hpp", "md", "txt",
@@ -234,6 +252,18 @@ impl FilesystemPlugin {
                 .to_string_lossy()
                 .to_string();
 
+            if !load_content {
+                files.push(RawFile {
+                    path: relative_path,
+                    content: String::new(),
+                    size: file_size as usize,
+                    language: Some(ext),
+                    last_modified: None,
+                    source_path: Some(path),
+                });
+                continue;
+            }
+
             // MEMORY GUARD: Large conversation files (>5MB) are NOT loaded into memory.
             // The index service will stream them from disk.
             let is_conversation_ext = ext == "jsonl" || ext == "json";
@@ -288,5 +318,42 @@ impl FilesystemPlugin {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestDirectory(PathBuf);
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_v2_discovery_defers_file_content() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-storage-v2-fs-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&directory.0).expect("create test directory");
+        let source_file = directory.0.join("sample.rs");
+        std::fs::write(&source_file, "fn bounded() {}\n").expect("write test source");
+
+        let result = FilesystemPlugin::new()
+            .sync_for_storage_v2(directory.0.to_str().expect("UTF-8 test path"))
+            .await
+            .expect("discover storage-v2 source");
+
+        assert!(result.errors.is_empty());
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].path, "sample.rs");
+        assert!(result.files[0].content.is_empty());
+        assert_eq!(
+            result.files[0].source_path.as_deref(),
+            Some(source_file.as_path())
+        );
     }
 }

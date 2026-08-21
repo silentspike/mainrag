@@ -6,9 +6,10 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tokio_postgres::GenericClient;
 use uuid::Uuid;
@@ -34,6 +35,51 @@ pub const RELEASE_SEARCH_PROFILE: &str = "mainrag.lexical-simple.v1";
 enum SliceMode {
     PublicFixture,
     ReleaseCandidate,
+}
+
+struct SliceFile {
+    path: String,
+    language: Option<String>,
+    inline_bytes: Option<Vec<u8>>,
+    source_path: Option<PathBuf>,
+    content_sha256: Option<[u8; 32]>,
+    logical_length: u64,
+}
+
+impl From<plugins::RawFile> for SliceFile {
+    fn from(file: plugins::RawFile) -> Self {
+        let lazy = file.content.is_empty() && file.source_path.is_some();
+        Self {
+            path: file.path,
+            language: file.language,
+            inline_bytes: (!lazy).then(|| file.content.into_bytes()),
+            source_path: file.source_path,
+            content_sha256: None,
+            logical_length: 0,
+        }
+    }
+}
+
+impl SliceFile {
+    async fn load_bytes(&self) -> Result<Cow<'_, [u8]>> {
+        if let Some(bytes) = &self.inline_bytes {
+            return Ok(Cow::Borrowed(bytes));
+        }
+        let path = self
+            .source_path
+            .as_ref()
+            .context("storage-v2 adapter omitted both content and source path")?;
+        Ok(Cow::Owned(tokio::fs::read(path).await?))
+    }
+
+    async fn load_verified_bytes(&self) -> Result<Cow<'_, [u8]>> {
+        let bytes = self.load_bytes().await?;
+        let actual_sha256: [u8; 32] = Sha256::digest(bytes.as_ref()).into();
+        if self.content_sha256 != Some(actual_sha256) || self.logical_length != bytes.len() as u64 {
+            bail!("source content drifted after the candidate watermark was captured");
+        }
+        Ok(bytes)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -245,35 +291,30 @@ where
     let adapter_started = Instant::now();
     let plugin = plugins::get_plugin(source_type)
         .ok_or_else(|| anyhow::anyhow!("source adapter is unavailable"))?;
-    let sync = plugin.sync(source_path).await?;
+    let sync = match mode {
+        SliceMode::PublicFixture => plugin.sync(source_path).await?,
+        SliceMode::ReleaseCandidate => plugin.sync_for_storage_v2(source_path).await?,
+    };
     if !sync.errors.is_empty() || (mode == SliceMode::PublicFixture && sync.files.is_empty()) {
         bail!("source adapter returned errors or an invalid empty fixture");
     }
-    let mut files = Vec::with_capacity(sync.files.len());
-    for file in sync.files {
-        let bytes = if file.content.is_empty() {
-            let path = file
-                .source_path
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("adapter omitted content and source path"))?;
-            tokio::fs::read(path).await?
-        } else {
-            file.content.into_bytes()
-        };
-        files.push((file.path, file.language, bytes));
-    }
-    files.sort_by(|left, right| left.0.cmp(&right.0));
-    let fixture_sha256 = canonical_fixture_hash(&files);
-    measurements.input_bytes = files.iter().try_fold(0_u64, |total, (_, _, bytes)| {
-        total
-            .checked_add(bytes.len() as u64)
-            .context("fixture byte count overflow")
-    })?;
+    let mut files = sync
+        .files
+        .into_iter()
+        .map(SliceFile::from)
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    let (fixture_sha256, input_bytes) = canonical_fixture_hash(&mut files).await?;
+    measurements.input_bytes = input_bytes;
     measurements.record_stage(ShadowIngestStage::ReadAndHash, adapter_started.elapsed());
     let adapter_profile = match mode {
         SliceMode::PublicFixture => FIXTURE_ADAPTER_PROFILE.to_string(),
+        SliceMode::ReleaseCandidate => release_adapter_profile(source_type)?,
+    };
+    let source_watermark_sha256 = match mode {
+        SliceMode::PublicFixture => fixture_sha256.clone(),
         SliceMode::ReleaseCandidate => {
-            format!("mainrag.{source_type}-release-candidate.v1")
+            release_source_watermark(source_type, source_path, &adapter_profile, &fixture_sha256)
         }
     };
     let witness_kind = match mode {
@@ -283,7 +324,7 @@ where
     let witness = json!({
         "kind": witness_kind,
         "fixture_sha256": fixture_sha256.clone(),
-        "source_watermark_sha256": fixture_sha256.clone(),
+        "source_watermark_sha256": source_watermark_sha256.clone(),
         "commit_sha": commit_sha,
         "is_test": is_test,
         "adapter_profile_id": adapter_profile,
@@ -306,7 +347,7 @@ where
     };
     let idempotency_key = hex::encode(Sha256::digest(
         format!(
-            "{idempotency_domain}:{source_id}:{predecessor_generation_id}:{fixture_sha256}:{adapter_profile}"
+            "{idempotency_domain}:{source_id}:{predecessor_generation_id}:{source_watermark_sha256}:{adapter_profile}"
         )
         .as_bytes(),
     ));
@@ -315,7 +356,7 @@ where
         client,
         source_id,
         &idempotency_key,
-        &fixture_sha256,
+        &source_watermark_sha256,
         &adapter_profile,
         witness_kind,
         &witness,
@@ -381,7 +422,7 @@ where
             generation_id: run.generation_id,
             generation_seq: generation.get("generation_seq"),
             fixture_sha256: fixture_sha256.clone(),
-            source_watermark_sha256: fixture_sha256,
+            source_watermark_sha256,
             item_count: usize::try_from(run.expected_item_count.unwrap_or(0))?,
             symbol_count: usize::try_from(symbol_count)?,
             controlled_retry_count: 0,
@@ -404,9 +445,11 @@ where
     let content_started = Instant::now();
     let mut bodies = vec![None; files.len()];
     let mut missing_indices = Vec::new();
-    for (index, (_, _, bytes)) in files.iter().enumerate() {
+    for (index, file) in files.iter().enumerate() {
+        let bytes = file.load_verified_bytes().await?;
         if let Some(body) =
-            find_and_verify_existing_body(client, pack_root, bytes, io_buffer_bytes).await?
+            find_and_verify_existing_body(client, pack_root, bytes.as_ref(), io_buffer_bytes)
+                .await?
         {
             bodies[index] = Some(body);
             measurements.reused_bodies = measurements.reused_bodies.saturating_add(1);
@@ -422,8 +465,9 @@ where
         let mut pack_builder = PackBuilder::new(pack_root, pack_id, build_nonce, io_buffer_bytes)?;
         let mut entries = Vec::with_capacity(missing_indices.len());
         for index in &missing_indices {
+            let bytes = files[*index].load_verified_bytes().await?;
             entries.push(pack_builder.add_reader(
-                Cursor::new(files[*index].2.as_slice()),
+                Cursor::new(bytes.as_ref()),
                 BodyCodec::Zstd,
                 None,
             )?);
@@ -469,12 +513,12 @@ where
         content_body::publish_pack(client, pack_id).await?;
         let published_reader = published_pack.reader();
         for (index, entry) in missing_indices.iter().zip(&entries) {
-            let expected_bytes = &files[*index].2;
+            let expected_bytes = files[*index].load_verified_bytes().await?;
             let verified =
                 published_reader.verify_to_staging(entry, None, pack_root, io_buffer_bytes)?;
             let mut reconstructed = Vec::with_capacity(expected_bytes.len());
             verified.copy_to(&mut reconstructed)?;
-            if reconstructed.as_slice() != expected_bytes.as_slice() {
+            if reconstructed.as_slice() != expected_bytes.as_ref() {
                 bail!("published pack failed exact artifact reconstruction");
             }
         }
@@ -497,7 +541,7 @@ where
         .context("shadow content store omitted a fixture body")?;
     measurements.unique_bytes = missing_indices.iter().try_fold(0_u64, |total, index| {
         total
-            .checked_add(files[*index].2.len() as u64)
+            .checked_add(files[*index].logical_length)
             .context("unique fixture byte count overflow")
     })?;
     measurements.stored_bytes = if missing_indices.is_empty() {
@@ -505,7 +549,33 @@ where
     } else {
         result_pack_stored_bytes
     };
-    measurements.peak_buffer_bytes = u64::try_from(io_buffer_bytes)?;
+    let inline_bytes = files.iter().try_fold(0_u64, |total, file| {
+        total
+            .checked_add(
+                file.inline_bytes
+                    .as_ref()
+                    .map_or(0, |bytes| bytes.len() as u64),
+            )
+            .context("inline source byte count overflow")
+    })?;
+    let largest_lazy_file = files
+        .iter()
+        .filter(|file| file.inline_bytes.is_none())
+        .map(|file| file.logical_length)
+        .max()
+        .unwrap_or(0);
+    let largest_file = files
+        .iter()
+        .map(|file| file.logical_length)
+        .max()
+        .unwrap_or(0);
+    let io_buffer_bytes_u64 = u64::try_from(io_buffer_bytes)?;
+    measurements.peak_buffer_bytes = inline_bytes
+        .checked_add(largest_lazy_file)
+        .and_then(|bytes| bytes.checked_add(largest_file))
+        .and_then(|bytes| bytes.checked_add(io_buffer_bytes_u64))
+        .context("peak source buffer byte count overflow")?
+        .max(io_buffer_bytes_u64);
     measurements.writer_concurrency = 1;
     measurements.record_stage(ShadowIngestStage::ContentStore, content_started.elapsed());
 
@@ -513,7 +583,10 @@ where
     let mut symbol_count = 0_usize;
     let mut controlled_retry_count = 0_usize;
     let mut controlled_retry_done = false;
-    for ((path, language, bytes), body) in files.iter().zip(&bodies) {
+    for (file, body) in files.iter().zip(&bodies) {
+        let path = &file.path;
+        let language = &file.language;
+        let bytes = file.load_verified_bytes().await?;
         let projection_started = Instant::now();
         let node_domain = match mode {
             SliceMode::PublicFixture => "fixture",
@@ -547,7 +620,8 @@ where
             projection_started.elapsed(),
         );
 
-        let text = std::str::from_utf8(bytes).context("fixture adapter produced non-UTF-8 text")?;
+        let text = std::str::from_utf8(bytes.as_ref())
+            .context("fixture adapter produced non-UTF-8 text")?;
         let analysis_started = Instant::now();
         let content_digest = body.digest.as_slice();
         let cached_analysis = client
@@ -772,6 +846,33 @@ where
         measurements.record_stage(ShadowIngestStage::DatabaseStage, database_started.elapsed());
     }
 
+    let stabilization_started = Instant::now();
+    let final_sync = match mode {
+        SliceMode::PublicFixture => plugin.sync(source_path).await?,
+        SliceMode::ReleaseCandidate => plugin.sync_for_storage_v2(source_path).await?,
+    };
+    if !final_sync.errors.is_empty() {
+        bail!("source adapter returned errors during the final watermark check");
+    }
+    let mut final_files = final_sync
+        .files
+        .into_iter()
+        .map(SliceFile::from)
+        .collect::<Vec<_>>();
+    final_files.sort_by(|left, right| left.path.cmp(&right.path));
+    let (final_fixture_sha256, final_input_bytes) =
+        canonical_fixture_hash(&mut final_files).await?;
+    if final_fixture_sha256 != fixture_sha256
+        || final_input_bytes != measurements.input_bytes
+        || final_files.len() != files.len()
+    {
+        bail!("source drifted before the candidate generation could be sealed");
+    }
+    measurements.record_stage(
+        ShadowIngestStage::ReadAndHash,
+        stabilization_started.elapsed(),
+    );
+
     let commit_started = Instant::now();
     let root: String = client
         .query_one("SELECT storage_v2_shadow_generation_root($1)", &[&run.id])
@@ -846,7 +947,7 @@ where
     );
     let verification_started = Instant::now();
     let verification_manifest = hex::encode(Sha256::digest(
-        format!("{fixture_sha256}:{root}:{commit_sha}:{adapter_profile}").as_bytes(),
+        format!("{source_watermark_sha256}:{root}:{commit_sha}:{adapter_profile}").as_bytes(),
     ));
     client
         .execute(
@@ -873,7 +974,7 @@ where
         generation_id: committed.generation_id,
         generation_seq,
         fixture_sha256: fixture_sha256.clone(),
-        source_watermark_sha256: fixture_sha256,
+        source_watermark_sha256,
         item_count: files.len(),
         symbol_count,
         controlled_retry_count,
@@ -886,15 +987,58 @@ where
     })
 }
 
-fn canonical_fixture_hash(files: &[(String, Option<String>, Vec<u8>)]) -> String {
+async fn canonical_fixture_hash(files: &mut [SliceFile]) -> Result<(String, u64)> {
     let mut digest = Sha256::new();
-    for (path, _, bytes) in files {
-        digest.update((path.len() as u64).to_be_bytes());
-        digest.update(path.as_bytes());
-        digest.update((bytes.len() as u64).to_be_bytes());
-        digest.update(bytes);
+    let mut input_bytes = 0_u64;
+    for file in files {
+        let (content_sha256, logical_length) = {
+            let bytes = file.load_bytes().await?;
+            let logical_length = bytes.len() as u64;
+            digest.update((file.path.len() as u64).to_be_bytes());
+            digest.update(file.path.as_bytes());
+            digest.update(logical_length.to_be_bytes());
+            digest.update(bytes.as_ref());
+            (Sha256::digest(bytes.as_ref()).into(), logical_length)
+        };
+        file.content_sha256 = Some(content_sha256);
+        file.logical_length = logical_length;
+        input_bytes = input_bytes
+            .checked_add(logical_length)
+            .context("source byte count overflow")?;
+    }
+    Ok((hex::encode(digest.finalize()), input_bytes))
+}
+
+fn release_source_watermark(
+    source_type: &str,
+    source_path: &str,
+    adapter_profile: &str,
+    content_manifest_sha256: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"mainrag.storage-v2.source-watermark.v1\0");
+    for component in [
+        source_type,
+        source_path,
+        adapter_profile,
+        content_manifest_sha256,
+    ] {
+        digest.update((component.len() as u64).to_be_bytes());
+        digest.update(component.as_bytes());
     }
     hex::encode(digest.finalize())
+}
+
+fn release_adapter_profile(source_type: &str) -> Result<String> {
+    if source_type != "pdf" {
+        return Ok(format!("mainrag.{source_type}-release-candidate.v1"));
+    }
+    let backend = match plugins::pdf::backend_name() {
+        "MuPDF" => "mupdf",
+        "pdf-extract fallback" => "pdf-extract",
+        value => bail!("unsupported PDF adapter backend: {value}"),
+    };
+    Ok(format!("mainrag.pdf-release-candidate.v1.{backend}"))
 }
 
 fn search_exact_identifiers(text: &str) -> Vec<String> {
@@ -1413,6 +1557,61 @@ fn validate_hits(path: &str, hits: &[ComparableHit]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestDirectory(PathBuf);
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_source_reader_fails_closed_on_content_drift() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-storage-v2-drift-{}", Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&directory.0).expect("create test directory");
+        let source_path = directory.0.join("sample.rs");
+        std::fs::write(&source_path, "fn before() {}\n").expect("write initial source");
+        let mut files = vec![SliceFile::from(plugins::RawFile {
+            path: "sample.rs".into(),
+            content: String::new(),
+            size: 15,
+            language: Some("rs".into()),
+            last_modified: None,
+            source_path: Some(source_path.clone()),
+        })];
+
+        let (_, input_bytes) = canonical_fixture_hash(&mut files)
+            .await
+            .expect("capture candidate watermark");
+        assert_eq!(input_bytes, 15);
+        std::fs::write(&source_path, "fn after() {}\n").expect("mutate source");
+
+        let error = files[0]
+            .load_verified_bytes()
+            .await
+            .expect_err("content drift must fail");
+        assert!(error.to_string().contains("drifted"));
+    }
+
+    #[test]
+    fn release_watermark_binds_source_configuration_and_content() {
+        let base = release_source_watermark("fs", "/opaque/a", "adapter.v1", &"a".repeat(64));
+        assert_ne!(
+            base,
+            release_source_watermark("fs", "/opaque/b", "adapter.v1", &"a".repeat(64))
+        );
+        assert_ne!(
+            base,
+            release_source_watermark("fs", "/opaque/a", "adapter.v2", &"a".repeat(64))
+        );
+        assert_ne!(
+            base,
+            release_source_watermark("fs", "/opaque/a", "adapter.v1", &"b".repeat(64))
+        );
+    }
 
     fn hit(id: &str, rank: usize, score: f64) -> ComparableHit {
         ComparableHit {

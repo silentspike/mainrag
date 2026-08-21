@@ -50,6 +50,14 @@ pub trait SourcePlugin: Send + Sync {
     /// Sync source and return files
     async fn sync(&self, source_path: &str) -> anyhow::Result<SyncResult>;
 
+    /// Discover source items for storage-v2 construction. Implementations may
+    /// return `source_path` without eagerly materializing `content` so a full
+    /// source never has to reside in memory at once.
+    #[allow(dead_code)]
+    async fn sync_for_storage_v2(&self, source_path: &str) -> anyhow::Result<SyncResult> {
+        self.sync(source_path).await
+    }
+
     /// Get source type name (e.g., "git", "web", "fs")
     #[allow(dead_code)]
     fn source_type(&self) -> &'static str;
