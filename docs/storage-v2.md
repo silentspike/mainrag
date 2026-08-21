@@ -534,6 +534,19 @@ builds and verifies one immutable generation, and leaves qualification separate.
 The production path does not inject the fixture's controlled parser retry and
 does not infer or update an active generation.
 
+Filesystem candidate discovery is metadata-only. Candidate construction reads
+one file at a time, captures its content identity in the canonical watermark,
+and verifies that identity on every later content-store, reconstruction, and
+analysis pass. Immediately before sealing, it rediscovers and rehashes the
+complete source so additions, removals, and late changes fail the run. This
+bounds source-content memory by the largest accepted file plus
+pack/reconstruction buffers; drift after watermark capture never becomes a
+mixed candidate. The production watermark is domain-separated over source
+type, registered path, adapter profile, and the content manifest, so a source
+configuration recut cannot silently reuse an older candidate. Adapters that
+cannot provide a lazy source path remain bounded by their own complete adapter
+result and must pass the per-source resource gate before qualification.
+
 The qualification surface accepts protected evidence only after supported
 current and named-generation reads have produced accepted dual-read evidence.
 One transaction records an opaque evidence UUID and manifest hash, rechecks
