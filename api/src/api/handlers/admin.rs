@@ -93,6 +93,82 @@ pub async fn admin_run_shadow_slice(
 }
 
 #[cfg(feature = "storage-v2-retrieval")]
+pub async fn admin_build_release_candidate(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
+    Path(source_id): Path<i64>,
+    JsonBody(request): JsonBody<ShadowSliceRequest>,
+) -> Result<Json<crate::services::shadow_slice::ShadowSliceResult>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
+    let commit_sha = request.commit_sha;
+    let pack_root = state.config.storage_v2_pack_root.clone();
+    let pack_io_buffer_bytes = state.config.storage_v2_pack_io_buffer_bytes;
+    state
+        .rls_client
+        .with_rls(user_id, true, move |transaction| {
+            Box::pin(async move {
+                let source = transaction
+                    .query_opt(
+                        "SELECT type, path FROM sources WHERE id = $1",
+                        &[&source_id],
+                    )
+                    .await?
+                    .ok_or_else(|| AppError::NotFound(format!("Source {source_id} not found")))?;
+                let source_type: String = source.get("type");
+                let source_path: String = source.get("path");
+                let result = crate::services::shadow_slice::run_release_candidate_build(
+                    &**transaction,
+                    source_id,
+                    &source_type,
+                    std::path::Path::new(&source_path),
+                    &pack_root,
+                    pack_io_buffer_bytes,
+                    &commit_sha,
+                )
+                .await
+                .map_err(|error| {
+                    AppError::Internal(format!(
+                        "storage-v2 release-candidate build failed: {error}"
+                    ))
+                })?;
+                Ok(Json(result))
+            })
+        })
+        .await
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
+pub async fn admin_qualify_release_candidate(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
+    Path(source_id): Path<i64>,
+    JsonBody(request): JsonBody<crate::services::shadow_slice::ReleaseCandidateEvidenceInput>,
+) -> Result<Json<crate::services::shadow_slice::ReleaseCandidateEvidenceResult>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
+    state
+        .rls_client
+        .with_rls(user_id, true, move |transaction| {
+            Box::pin(async move {
+                let result = crate::services::shadow_slice::qualify_release_candidate(
+                    &**transaction,
+                    source_id,
+                    &request,
+                )
+                .await
+                .map_err(|error| {
+                    AppError::BadRequest(format!(
+                        "invalid storage-v2 release-candidate evidence: {error}"
+                    ))
+                })?;
+                Ok(Json(result))
+            })
+        })
+        .await
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
 pub async fn admin_record_dual_read(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Arc<crate::auth::Claims>>,

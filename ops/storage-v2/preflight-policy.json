@@ -13,7 +13,8 @@
     "migrations/032_storage_v2_shadow_ingest.sql",
     "migrations/033_storage_v2_intelligence.sql",
     "migrations/034_storage_v2_retrieval.sql",
-    "migrations/035_storage_v2_shadow_slice.sql"
+    "migrations/035_storage_v2_shadow_slice.sql",
+    "migrations/036_storage_v2_release_candidates.sql"
   ],
   "required_extensions": {
     "vector": "0.8.2"

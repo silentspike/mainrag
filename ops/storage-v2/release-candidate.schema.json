@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/silentspike/mainrag/ops/storage-v2/release-candidate.schema.json",
+  "title": "MainRAG protected storage-v2 release-candidate qualification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "evidence_id",
+    "generation_id",
+    "commit_sha",
+    "source_watermark_sha256",
+    "adapter_profile_id",
+    "analysis_profile_id",
+    "search_profile_id",
+    "manifest"
+  ],
+  "properties": {
+    "evidence_id": {"type": "string", "format": "uuid"},
+    "generation_id": {"type": "integer", "minimum": 1},
+    "commit_sha": {"$ref": "#/$defs/gitSha"},
+    "source_watermark_sha256": {"$ref": "#/$defs/sha256"},
+    "adapter_profile_id": {"type": "string", "minLength": 1},
+    "analysis_profile_id": {"type": "string", "minLength": 1},
+    "search_profile_id": {"type": "string", "minLength": 1},
+    "manifest": {
+      "type": "object",
+      "required": ["status", "checks"],
+      "properties": {
+        "status": {"const": "PASS"},
+        "checks": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "artifact_root",
+            "authorization",
+            "body_pack_integrity",
+            "dual_read",
+            "intelligence",
+            "intervals",
+            "legacy_intelligence_export",
+            "resource_budget",
+            "restart_resume",
+            "search_quality"
+          ],
+          "properties": {
+            "artifact_root": {"const": "PASS"},
+            "authorization": {"const": "PASS"},
+            "body_pack_integrity": {"const": "PASS"},
+            "dual_read": {"const": "PASS"},
+            "intelligence": {"const": "PASS"},
+            "intervals": {"const": "PASS"},
+            "legacy_intelligence_export": {"const": "PASS"},
+            "resource_budget": {"const": "PASS"},
+            "restart_resume": {"const": "PASS"},
+            "search_quality": {"const": "PASS"}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
