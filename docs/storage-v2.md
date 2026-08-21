@@ -520,8 +520,9 @@ semantic, and rerank stages remain explicitly `unavailable`, not silently zero.
 
 Dual-read evidence is submitted through the supported admin API after both
 search APIs have returned. The server recomputes query-set identity, binds the
-artifact to the verified generation witness, classifies every difference into
-the closed taxonomy, and rejects unexplained differences. Abandoned test-only
+artifact to the verified generation witness and its recorded production or
+explicit-test scope, classifies every difference into the closed taxonomy, and
+rejects unexplained differences. Abandoned test-only
 building runs may be cancelled and marked with an unreadable lifecycle
 tombstone; immutable staging rows remain as audit evidence and no membership or
 active pointer is changed.
@@ -549,6 +550,8 @@ result and must pass the per-source resource gate before qualification.
 
 The qualification surface accepts protected evidence only after supported
 current and named-generation reads have produced accepted dual-read evidence.
+The same evidence endpoint accepts registered production candidates and
+explicitly scoped test candidates; it never changes the default read selector.
 One transaction records an opaque evidence UUID and manifest hash, rechecks
 source/generation ownership, watermark and profile identity, item/membership
 reconciliation, complete analysis, resource and quality gates, and active-pointer

@@ -348,7 +348,7 @@ enum SourceAction {
 
     /// Classify and persist a redacted dual-read evidence envelope
     DualRead {
-        /// Test source name
+        /// Registered source name
         name: String,
 
         /// JSON file containing results returned by both supported search APIs
