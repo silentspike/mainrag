@@ -108,3 +108,39 @@ Stop on drift or failure. Do not begin candidate construction (#66) until the
 final manifest is PASS and its evidence boundary has been accepted. Search/read
 availability during an adapter is determined by that reviewed adapter; the
 preflight does not silently claim it.
+
+## Source release candidates
+
+Candidate construction is source-bounded and never changes an active pointer.
+Run it only with an exact deployed commit and a protected source inventory:
+
+```bash
+mainrag source build-candidate SOURCE --commit-sha FULL_DEPLOYED_SHA
+```
+
+The response identifies a `verified` generation and includes phase telemetry.
+Repeat the same command after a client or service restart to prove idempotent
+resume: the generation identity must be reused and semantic row counts must not
+increase.
+
+Current and explicitly named generation reads must then be compared through the
+supported APIs. Record the accepted, fully classified dual-read envelope before
+qualification:
+
+```bash
+mainrag source dual-read SOURCE --evidence PROTECTED_DUAL_READ_JSON
+mainrag source qualify-candidate SOURCE --evidence PROTECTED_QUALIFICATION_JSON
+```
+
+Qualification requires all of these checks to be `PASS`: artifact-root
+reconstruction, authorization, body/pack integrity, dual-read classification,
+intelligence, membership intervals, legacy-intelligence exportability,
+resource budget, restart/resume, and search quality. The database independently
+checks the sealed ingest identity, item and membership counts, complete analysis,
+accepted dual-read evidence, unchanged active pointer, and the one-current-RC
+invariant before transitioning `verified` to `release_candidate`.
+
+Source names, IDs, paths, watermarks, queries, result sets, and raw resource
+measurements are protected operational evidence. Public progress may contain
+only source counts, type counts, aggregate sizes, hashes, outcomes, and opaque
+evidence UUIDs. A candidate is not activation authority.

@@ -326,6 +326,26 @@ enum SourceAction {
         commit_sha: String,
     },
 
+    /// Build and verify a pointer-neutral storage-v2 source candidate
+    BuildCandidate {
+        /// Source name
+        name: String,
+
+        /// Exact implementation commit SHA
+        #[arg(long)]
+        commit_sha: String,
+    },
+
+    /// Attach accepted evidence and transition a verified generation to RC
+    QualifyCandidate {
+        /// Source name
+        name: String,
+
+        /// Protected JSON qualification envelope
+        #[arg(long)]
+        evidence: std::path::PathBuf,
+    },
+
     /// Classify and persist a redacted dual-read evidence envelope
     DualRead {
         /// Test source name

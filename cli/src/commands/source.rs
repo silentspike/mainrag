@@ -21,6 +21,12 @@ pub async fn run(
         SourceAction::ShadowSlice { name, commit_sha } => {
             shadow_slice(client, &name, &commit_sha, json_output).await
         }
+        SourceAction::BuildCandidate { name, commit_sha } => {
+            build_candidate(client, &name, &commit_sha).await
+        }
+        SourceAction::QualifyCandidate { name, evidence } => {
+            qualify_candidate(client, &name, &evidence).await
+        }
         SourceAction::DualRead { name, evidence } => dual_read(client, &name, &evidence).await,
         SourceAction::CleanupShadow { name, run_id } => {
             if run_id <= 0 {
@@ -64,6 +70,36 @@ async fn shadow_slice(
     }
     let result = client.run_shadow_slice(name, commit_sha).await?;
     println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+async fn build_candidate(client: &ApiClient, name: &str, commit_sha: &str) -> anyhow::Result<()> {
+    validate_commit_sha(commit_sha)?;
+    let result = client.build_release_candidate(name, commit_sha).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+async fn qualify_candidate(
+    client: &ApiClient,
+    name: &str,
+    evidence: &std::path::Path,
+) -> anyhow::Result<()> {
+    let bytes = std::fs::read(evidence)?;
+    let request: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let result = client.qualify_release_candidate(name, &request).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+fn validate_commit_sha(commit_sha: &str) -> anyhow::Result<()> {
+    if commit_sha.len() != 40
+        || !commit_sha
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        anyhow::bail!("--commit-sha must be a full lowercase Git SHA");
+    }
     Ok(())
 }
 

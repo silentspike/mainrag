@@ -1034,6 +1034,66 @@ impl ApiClient {
             .context("parse storage-v2 shadow-slice response")
     }
 
+    pub async fn build_release_candidate(
+        &self,
+        source: &str,
+        commit_sha: &str,
+    ) -> Result<serde_json::Value> {
+        let source_id = self.get_source_id_by_name(source).await?;
+        let url = format!(
+            "{}/api/v1/admin/sources/{}/storage-v2-release-candidate-build",
+            self.base_url, source_id
+        );
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .json(&serde_json::json!({"commit_sha": commit_sha}))
+            .send()
+            .await
+            .context("storage-v2 release-candidate build request failed")?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "storage-v2 release-candidate build failed: {}",
+                response.status()
+            ));
+        }
+        response
+            .json()
+            .await
+            .context("parse storage-v2 release-candidate build response")
+    }
+
+    pub async fn qualify_release_candidate(
+        &self,
+        source: &str,
+        evidence: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let source_id = self.get_source_id_by_name(source).await?;
+        let url = format!(
+            "{}/api/v1/admin/sources/{}/storage-v2-release-candidate-qualify",
+            self.base_url, source_id
+        );
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .json(evidence)
+            .send()
+            .await
+            .context("storage-v2 release-candidate qualification request failed")?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "storage-v2 release-candidate qualification failed: {}",
+                response.status()
+            ));
+        }
+        response
+            .json()
+            .await
+            .context("parse storage-v2 release-candidate qualification response")
+    }
+
     pub async fn record_dual_read(
         &self,
         source: &str,
