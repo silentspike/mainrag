@@ -427,12 +427,15 @@ pub struct ShadowIngestMeasurements {
     pub reused_nodes: u64,
     pub reused_views: u64,
     pub reused_analysis: u64,
+    pub reused_generation: u64,
     pub parser_passes: u64,
+    pub analysis_retries: u64,
     pub artifacts_created: u64,
     pub occurrences_created: u64,
     pub intervals_opened: u64,
     pub intervals_closed: u64,
     pub errors: u64,
+    pub io_buffer_bytes: u64,
     pub peak_buffer_bytes: u64,
     pub writer_concurrency: u64,
 }
@@ -502,12 +505,15 @@ impl ShadowIngestMeasurements {
                 "reuse_nodes": self.reused_nodes,
                 "reuse_views": self.reused_views,
                 "reuse_analysis": self.reused_analysis,
+                "reuse_generation": self.reused_generation,
                 "parser_passes": self.parser_passes,
+                "analysis_retries": self.analysis_retries,
                 "artifacts_created": self.artifacts_created,
                 "occurrences_created": self.occurrences_created,
                 "intervals_opened": self.intervals_opened,
                 "intervals_closed": self.intervals_closed,
                 "errors": self.errors,
+                "io_buffer_bytes": self.io_buffer_bytes,
                 "peak_buffer_bytes": self.peak_buffer_bytes,
                 "writer_concurrency": self.writer_concurrency,
             },
@@ -807,11 +813,13 @@ mod tests {
             reused_views: 4,
             reused_analysis: 5,
             parser_passes: 1,
+            analysis_retries: 1,
             artifacts_created: 1,
             occurrences_created: 1,
             intervals_opened: 1,
             intervals_closed: 0,
             errors: 0,
+            io_buffer_bytes: 8192,
             peak_buffer_bytes: 8192,
             writer_concurrency: 2,
             ..ShadowIngestMeasurements::default()
@@ -825,6 +833,8 @@ mod tests {
         assert_eq!(json["ablauf"]["eingang_bytes"], 100);
         assert_eq!(json["ablauf"]["unique_bytes"], 60);
         assert_eq!(json["ablauf"]["stored_bytes"], 30);
+        assert_eq!(json["ablauf"]["analysis_retries"], 1);
+        assert_eq!(json["ablauf"]["io_buffer_bytes"], 8192);
         assert_eq!(json["phase"].as_object().unwrap().len(), 7);
         assert_eq!(json["phase"]["lesen_hashen_ms"], 1.0);
         assert_eq!(json["phase"]["sealing_ms"], 7.0);

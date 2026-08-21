@@ -33,6 +33,9 @@ pub struct SearchRequest {
     pub graph_profile: Option<String>,
     pub semantic_profile: Option<String>,
     pub rerank_profile: Option<String>,
+    /// Explicit admin-only scope for permanent synthetic/benchmark sources.
+    #[serde(default)]
+    pub include_test: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -288,6 +291,7 @@ fn validate_current_selector(req: &SearchRequest) -> Result<()> {
     ]
     .iter()
     .any(|value| value.is_some())
+        || req.include_test
     {
         return Err(AppError::BadRequest(
             "storage-v2 filters require read_path=storage_v2".to_string(),
@@ -368,10 +372,29 @@ async fn storage_v2_search(
         filters: serde_json::Value::Object(filters),
         limit: i64::from(limit),
     };
+    let include_test = req.include_test;
     let envelope = state
         .rls_client
         .with_rls(user_id, claims.is_admin, move |transaction| {
             Box::pin(async move {
+                transaction
+                    .execute(
+                        "SELECT storage_v2_require_test_scope($1, $2)",
+                        &[&source_id, &include_test],
+                    )
+                    .await
+                    .map_err(|error| {
+                        if error.code()
+                            == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+                        {
+                            AppError::Forbidden(
+                                "storage_v2 test source requires explicit admin test scope"
+                                    .to_string(),
+                            )
+                        } else {
+                            AppError::Database(error)
+                        }
+                    })?;
                 PostgresExactRetrievalBackend::new(transaction)
                     .search(&request)
                     .await

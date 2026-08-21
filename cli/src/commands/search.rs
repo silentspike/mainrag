@@ -1,6 +1,7 @@
 use crate::client::ApiClient;
 use serde_json::json;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     client: &ApiClient,
     query: &str,
@@ -17,6 +18,7 @@ pub async fn run(
     graph_profile: Option<&str>,
     semantic_profile: Option<&str>,
     rerank_profile: Option<&str>,
+    include_test: bool,
     json_output: bool,
 ) -> anyhow::Result<()> {
     if read_path == "storage_v2" {
@@ -40,6 +42,7 @@ pub async fn run(
         || graph_profile.is_some()
         || semantic_profile.is_some()
         || rerank_profile.is_some()
+        || include_test
     {
         anyhow::bail!("storage-v2 generation and filters require --read-path storage_v2");
     }
@@ -57,6 +60,7 @@ pub async fn run(
         graph_profile,
         semantic_profile,
         rerank_profile,
+        include_test,
     };
     let all_results = client
         .search_with_options(query, mode, fetch_limit, source, &options)

@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::env;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -9,6 +10,11 @@ pub struct Config {
     pub tei: TeiConfig,
     pub jwt: JwtConfig,
     pub ocr: OcrConfig,
+    /// Durable root for storage-v2 pack files. The shadow endpoint is the only
+    /// caller until activation is approved separately.
+    pub storage_v2_pack_root: PathBuf,
+    /// Bounded pack read/write buffer for the storage-v2 shadow slice.
+    pub storage_v2_pack_io_buffer_bytes: usize,
 }
 
 /// OCR Service configuration (GPU-only PaddleOCR microservice)
@@ -94,6 +100,14 @@ pub struct JwtConfig {
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         dotenvy::dotenv().ok();
+        let storage_v2_pack_io_buffer_bytes = env::var("MAINRAG_STORAGE_V2_PACK_IO_BUFFER_BYTES")
+            .unwrap_or_else(|_| (64 * 1024).to_string())
+            .parse::<usize>()?;
+        if !(4096..=1024 * 1024).contains(&storage_v2_pack_io_buffer_bytes) {
+            anyhow::bail!(
+                "MAINRAG_STORAGE_V2_PACK_IO_BUFFER_BYTES must be between 4096 and 1048576"
+            );
+        }
 
         Ok(Config {
             server: ServerConfig {
@@ -245,6 +259,10 @@ impl Config {
                     .map(|v| v == "true" || v == "1")
                     .unwrap_or(false),
             },
+            storage_v2_pack_root: env::var("MAINRAG_STORAGE_V2_PACK_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("data/storage-v2/packs")),
+            storage_v2_pack_io_buffer_bytes,
         })
     }
 

@@ -79,7 +79,10 @@ INSERT INTO sources(id, name, type, path) VALUES
     (4, 'synthetic-intelligence-export', 'fixture', 'synthetic-intelligence-export'),
     (5, 'synthetic-intelligence-import', 'fixture', 'synthetic-intelligence-import'),
     (6, 'synthetic-retrieval', 'fixture', 'synthetic-retrieval'),
-    (7, 'synthetic-retrieval-denied', 'fixture', 'synthetic-retrieval-denied');
+    (7, 'synthetic-retrieval-denied', 'fixture', 'synthetic-retrieval-denied'),
+    (8, 'synthetic-test-scope', 'fixture', 'synthetic-test-scope'),
+    (9, 'synthetic-generation-occurrences', 'fixture', 'synthetic-generation-occurrences');
+UPDATE sources SET is_test = TRUE WHERE id = 8;
 INSERT INTO fixture_source_access VALUES
     ('{WRITER_ID}', 1, TRUE, TRUE), ('{WRITER_ID}', 3, TRUE, TRUE),
     ('{WRITER_ID}', 6, TRUE, TRUE),
@@ -300,6 +303,14 @@ SELECT (storage_v2_finish_analysis_attempt(
 
         self.assertEqual(
             self.sql(
+                "SELECT COUNT(*) FROM generation_item_version WHERE source_id = 1 "
+                "AND valid_to_seq = 1"
+            ),
+            "0",
+            "the initial generation must not report newly opened intervals as closed",
+        )
+        self.assertEqual(
+            self.sql(
                 "SELECT generation.status || ':' || generation.item_count "
                 "FROM source_generation generation JOIN storage_v2_ingest_run run "
                 f"ON run.generation_id = generation.id WHERE run.id = {run_one}"
@@ -337,10 +348,23 @@ SELECT (storage_v2_finish_analysis_attempt(
             "added.txt,one.txt",
         )
 
-        run_three = self.begin(1, "4" * 64, "e" * 64)
+        run_three = self.begin(1, "4" * 64, "a" * 64)
+        self.assertNotEqual(
+            run_three,
+            run_one,
+            "A -> B -> A must allocate a new generation rather than reuse historical A",
+        )
         self.stage(run_three, "one.txt", "alpha", node_a, view_a, digest_a)
         self.stage(run_three, "added.txt", "alpha", node_a, view_a, digest_a)
         self.commit(run_three, 2)
+        self.assertEqual(
+            self.sql(
+                "SELECT COUNT(*) FROM generation_item_version WHERE source_id = 1 "
+                "AND valid_to_seq = 3"
+            ),
+            "1",
+            "only the changed item interval must close in the third generation",
+        )
         returned_artifact = self.sql(
             "SELECT artifact_version_id FROM generation_item_version membership "
             "JOIN source_item item ON item.id = membership.source_item_id "
@@ -498,6 +522,175 @@ SELECT storage_v2_update_append_frontier(
                 f"(1, {run_id}, '{'a' * 64}', '{'b' * 64}', 'bypass');",
             ),
             "controlled function",
+        )
+
+    def test_test_scope_and_dual_read_evidence_fail_closed(self) -> None:
+        pack_id = "00000000-0000-4000-8000-000000000035"
+        build_nonce = "00000000-0000-4000-8000-000000000036"
+        self.sql(
+            self.admin(
+                f"SELECT storage_v2_create_pack('{pack_id}', '{pack_id}.pack', "
+                f"'{build_nonce}');"
+            )
+        )
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    "SELECT (storage_v2_put_packed_body("
+                    f"'{pack_id}', 0, digest(convert_to('packed','UTF8'),'sha256'), 6, 0, 6, "
+                    "'identity', digest(convert_to('packed','UTF8'),'sha256'))).pack_id;"
+                )
+            ),
+            pack_id,
+        )
+        self.sql(
+            self.admin(
+                f"SELECT storage_v2_verify_pack('{pack_id}', "
+                "digest(convert_to('manifest','UTF8'),'sha256'), 6);"
+            )
+        )
+        self.assertEqual(
+            self.sql(self.admin(f"SELECT (storage_v2_publish_pack('{pack_id}')).status;")),
+            "published",
+        )
+        self.assert_sql_fails(
+            self.actor(OTHER_ID, "SELECT storage_v2_require_test_scope(8, FALSE);"),
+            "source access denied",
+        )
+        self.assert_sql_fails(
+            self.admin("SELECT storage_v2_require_test_scope(8, FALSE);"),
+            "test source requires explicit test scope",
+        )
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    "SELECT storage_v2_require_test_scope(8, TRUE); SELECT 1;"
+                )
+            ).splitlines()[-1],
+            "1",
+        )
+        generation_id = self.sql(
+            self.admin(
+                "SELECT (storage_v2_allocate_generation("
+                "8, 'synthetic-shadow-slice', '{\"is_test\":true}'::JSONB)).id;"
+            )
+        )
+        self.sql(self.admin(f"SELECT storage_v2_seal_generation({generation_id}, 0);"))
+        self.sql(
+            self.admin(
+                f"SELECT storage_v2_verify_generation({generation_id}, "
+                f"'{('ab' * 32)}');"
+            )
+        )
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    "SELECT storage_v2_shadow_source_state(8, '1', TRUE) "
+                    "->> 'status';"
+                )
+            ),
+            "verified",
+        )
+        artifact = (
+            "{\"status\":\"PASS\",\"unexplained_count\":0,"
+            "\"comparisons\":[{\"classification\":\"score_order\"}]}"
+        )
+        evidence_id = "00000000-0000-4000-8000-000000000035"
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    "SELECT (storage_v2_record_dual_read_evidence("
+                    f"'{evidence_id}', 8, {generation_id}, '{('cd' * 20)}', "
+                    f"'{('ef' * 32)}', '{('12' * 32)}', '{artifact}'::JSONB)).id;"
+                )
+            ),
+            evidence_id,
+        )
+        self.assert_sql_fails(
+            self.admin(
+                "SELECT storage_v2_record_dual_read_evidence("
+                f"'00000000-0000-4000-8000-000000000036', 8, {generation_id}, "
+                f"'{('cd' * 20)}', '{('ef' * 32)}', '{('34' * 32)}', "
+                "'{\"status\":\"FAIL\",\"unexplained_count\":1,"
+                "\"comparisons\":[{\"classification\":\"unknown\"}]}'::JSONB);"
+            ),
+            "dual-read artifact contains unexplained differences",
+        )
+        abandoned_run = self.begin(8, "9" * 64, "8" * 64, force=True)
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    "SELECT storage_v2_cleanup_abandoned_shadow_ingest("
+                    f"{abandoned_run}) ->> 'generation_status';"
+                )
+            ),
+            "abandoned",
+        )
+        self.assertEqual(
+            self.sql(
+                "SELECT CASE WHEN generation.abandoned_at IS NOT NULL THEN 'abandoned' "
+                "ELSE generation.status::TEXT END || ':' || run.status || ':' || "
+                "COALESCE(source.active_generation_id::TEXT, 'none') "
+                "FROM storage_v2_ingest_run run "
+                "JOIN source_generation generation ON generation.id=run.generation_id "
+                "JOIN logical_source source ON source.id=run.source_id "
+                f"WHERE run.id={abandoned_run};"
+            ),
+            "abandoned:cancelled:none",
+        )
+        self.assert_sql_fails(
+            self.admin("SELECT (storage_v2_resolve_generation(8, '2')).id;"),
+            "selected generation is not readable",
+        )
+
+    def test_source_state_fails_closed_without_generation_run_items(self) -> None:
+        node_id, _view_id, digest_hex = self.make_projection("unreconciled")
+        generation_id = self.sql(
+            self.admin(
+                "SELECT (storage_v2_allocate_generation("
+                "9, 'unreconciled-fixture', '{\"fixture\":true}'::JSONB)).id;"
+            )
+        )
+        self.sql(
+            self.admin(
+                f"""
+WITH item AS (
+    INSERT INTO source_item(source_id, item_key, item_kind)
+    VALUES (9, 'unreconciled.txt', 'document')
+    RETURNING id
+), artifact AS (
+    INSERT INTO artifact_version(
+        item_id, source_id, witness_type, witness, adapter_profile_id,
+        content_root_node_id, expected_content_hash, byte_length
+    )
+    SELECT id, 9, 'unreconciled-item', '{{"fixture":true}}'::JSONB,
+           'fixture-adapter-v1', {node_id}, '{digest_hex}', 12
+      FROM item
+    RETURNING id, item_id
+)
+INSERT INTO generation_item_version(
+    source_id, source_item_id, artifact_version_id, valid_from_seq
+)
+SELECT 9, item_id, id, 1 FROM artifact;
+SELECT storage_v2_seal_generation({generation_id}, 1);
+SELECT storage_v2_verify_generation({generation_id}, '{'31' * 32}');
+"""
+            )
+        )
+        state = json.loads(
+            self.sql(
+                self.admin(
+                    "SELECT storage_v2_shadow_source_state(9, '1', FALSE)::TEXT;"
+                )
+            )
+        )
+        self.assertEqual(state["item_count"], 1)
+        self.assertEqual(state["occurrence_count"], 0)
+        self.assertEqual(state["view_count"], 0)
+        self.assertEqual(
+            state["analysis_incomplete_count"],
+            1,
+            "a visible membership without the named generation run item must fail closed",
         )
 
     def test_authorized_writer_can_use_source_local_shadow_functions(self) -> None:

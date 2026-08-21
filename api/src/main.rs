@@ -22,6 +22,8 @@ use services::intelligence::IntelligenceService;
 use services::{OutboxWorker, QdrantClient, RerankerService, SearchService, TeiClient};
 
 pub struct AppState {
+    /// Ephemeral boot identity used only to prove a read occurred after restart.
+    pub instance_id: uuid::Uuid,
     /// Raw pool — ONLY for service construction (IndexService, OutboxWorker, AuthLayer).
     /// Handlers MUST NOT use this directly. Use `rls_client` instead.
     pub db: db::PostgresPool,
@@ -254,6 +256,7 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
 
     // Create app state
     let state = Arc::new(AppState {
+        instance_id: uuid::Uuid::new_v4(),
         db: db_pool,
         rls_client,
         health_pool,

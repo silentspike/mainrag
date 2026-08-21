@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use tokio_postgres::{Client, Error, Row};
+use tokio_postgres::{Client, Error, GenericClient, Row};
 
 #[derive(Debug, Clone)]
 pub struct ContentNodeRecord {
@@ -96,12 +96,15 @@ impl From<Row> for LegacyMappingRecord {
     }
 }
 
-pub async fn put_leaf_node(
-    client: &Client,
+pub async fn put_leaf_node<C>(
+    client: &C,
     domain: &str,
     node_type: &str,
     body_id: i64,
-) -> Result<ContentNodeRecord, Error> {
+) -> Result<ContentNodeRecord, Error>
+where
+    C: GenericClient + Sync,
+{
     client
         .query_one(
             "SELECT id, domain, node_type, logical_length, body_id, node_digest \
@@ -137,8 +140,8 @@ pub async fn put_internal_node(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn put_retrieval_view(
-    client: &Client,
+pub async fn put_retrieval_view<C>(
+    client: &C,
     view_type: &str,
     profile_id: &str,
     language_id: &str,
@@ -149,7 +152,10 @@ pub async fn put_retrieval_view(
     component_ids: &[i64],
     relative_starts: &[i64],
     relative_ends: &[i64],
-) -> Result<RetrievalViewRecord, Error> {
+) -> Result<RetrievalViewRecord, Error>
+where
+    C: GenericClient + Sync,
+{
     client
         .query_one(
             "SELECT id, view_type, profile_id, language_id, tokenizer_version, \

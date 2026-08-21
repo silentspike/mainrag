@@ -13,11 +13,78 @@ pub async fn run(
 
     match action {
         SourceAction::List => list_sources(client, json_output).await,
+        SourceAction::State {
+            name,
+            generation,
+            include_test,
+        } => source_state(client, &name, &generation, include_test, json_output).await,
+        SourceAction::ShadowSlice { name, commit_sha } => {
+            shadow_slice(client, &name, &commit_sha, json_output).await
+        }
+        SourceAction::DualRead { name, evidence } => dual_read(client, &name, &evidence).await,
+        SourceAction::CleanupShadow { name, run_id } => {
+            if run_id <= 0 {
+                anyhow::bail!("--run-id must be positive");
+            }
+            let result = client.cleanup_shadow_slice(&name, run_id).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
         SourceAction::Sync { name } => sync_source(client, &name, json_output).await,
         SourceAction::Delete { name, force } => {
             delete_source(client, &name, force, json_output).await
         }
     }
+}
+
+async fn dual_read(
+    client: &ApiClient,
+    name: &str,
+    evidence: &std::path::Path,
+) -> anyhow::Result<()> {
+    let bytes = std::fs::read(evidence)?;
+    let request: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let result = client.record_dual_read(name, &request).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+async fn shadow_slice(
+    client: &ApiClient,
+    name: &str,
+    commit_sha: &str,
+    _json_output: bool,
+) -> anyhow::Result<()> {
+    if commit_sha.len() != 40
+        || !commit_sha
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        anyhow::bail!("--commit-sha must be a full lowercase Git SHA");
+    }
+    let result = client.run_shadow_slice(name, commit_sha).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+async fn source_state(
+    client: &ApiClient,
+    name: &str,
+    generation: &str,
+    include_test: bool,
+    _json_output: bool,
+) -> anyhow::Result<()> {
+    if generation.is_empty()
+        || generation.starts_with('0')
+        || !generation.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        anyhow::bail!("--generation must be a positive storage-v2 generation sequence");
+    }
+    let state = client
+        .shadow_source_state(name, generation, include_test)
+        .await?;
+    println!("{}", serde_json::to_string_pretty(&state)?);
+    Ok(())
 }
 
 async fn list_sources(client: &ApiClient, json_output: bool) -> anyhow::Result<()> {

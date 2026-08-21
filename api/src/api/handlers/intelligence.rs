@@ -27,6 +27,8 @@ pub struct ShadowIntelligenceQuery {
     pub layer: Option<String>,
     pub resource: Option<String>,
     pub side_effect: Option<String>,
+    #[serde(default)]
+    pub include_test: bool,
 }
 
 #[cfg(feature = "storage-v2-intelligence")]
@@ -53,6 +55,7 @@ pub async fn shadow_intelligence_command(
     let source_id = req.source_id;
     let generation = req.generation;
     let command = req.command;
+    let include_test = req.include_test;
     let query = serde_json::json!({
         "name": req.name,
         "layer": req.layer,
@@ -63,6 +66,23 @@ pub async fn shadow_intelligence_command(
         .rls_client
         .with_rls(user_id, claims.is_admin, move |transaction| {
             Box::pin(async move {
+                transaction
+                    .execute(
+                        "SELECT storage_v2_require_test_scope($1, $2)",
+                        &[&source_id, &include_test],
+                    )
+                    .await
+                    .map_err(|error| {
+                        if error.code()
+                            == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+                        {
+                            crate::error::AppError::Forbidden(
+                                "shadow test source requires explicit admin test scope".to_string(),
+                            )
+                        } else {
+                            crate::error::AppError::Database(error)
+                        }
+                    })?;
                 let row = transaction
                     .query_one(
                         "SELECT storage_v2_intelligence_command($1, $2, $3, $4)",
