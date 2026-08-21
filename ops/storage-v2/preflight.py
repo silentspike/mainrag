@@ -414,7 +414,11 @@ def evaluate(
         "extensions": snapshot["extensions"],
         "collation": collation,
         "activity": activity,
-        "capacity": capacity,
+        "capacity": {
+            "database_bytes": capacity["database_bytes"],
+            "index_bytes": capacity["index_bytes"],
+            "headroom_passed": capacity_passed,
+        },
         "backend": snapshot["backend"],
         "units_state_sha256": units["state_sha256"],
         "backup_evidence_sha256": backup.get("evidence_sha256"),

@@ -149,6 +149,19 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(result["checks"]["capacity"], "BLOCKED")
         self.assertEqual(result["checks"]["backend_index"], "BLOCKED")
 
+    def test_state_identity_ignores_safe_capacity_noise_but_binds_gate_crossing(self) -> None:
+        first = evaluate()
+        noisy = passing_snapshot()
+        noisy["capacity"]["filesystem_free_bytes"] += 123_456_789
+        noisy["capacity"]["wal_bytes"] += 987_654
+        second = evaluate(noisy)
+        self.assertEqual(first["state_sha256"], second["state_sha256"])
+
+        blocked = passing_snapshot()
+        blocked["capacity"]["filesystem_free_bytes"] = 1
+        third = evaluate(blocked)
+        self.assertNotEqual(first["state_sha256"], third["state_sha256"])
+
     def test_wrong_accepted_backend_digest_fails_closed(self) -> None:
         policy = deepcopy(POLICY)
         policy["accepted_backend_lock_sha256"] = "0" * 64
