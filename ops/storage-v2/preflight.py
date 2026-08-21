@@ -155,6 +155,20 @@ def combined_hash(paths: list[Path]) -> str:
     return digest.hexdigest()
 
 
+def normalize_schema_dump(value: bytes) -> bytes:
+    """Remove PostgreSQL 18's per-dump psql safety token, not schema content."""
+    lines = []
+    for line in value.splitlines(keepends=True):
+        ending = b"\r\n" if line.endswith(b"\r\n") else (b"\n" if line.endswith(b"\n") else b"")
+        content = line[: -len(ending)] if ending else line
+        if content.startswith(b"\\restrict "):
+            content = b"\\restrict <TOKEN>"
+        elif content.startswith(b"\\unrestrict "):
+            content = b"\\unrestrict <TOKEN>"
+        lines.append(content + ending)
+    return b"".join(lines)
+
+
 def run(command: list[str], *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         command,
@@ -226,7 +240,7 @@ def collect_database(
     else:
         usage = shutil.disk_usage(data_directory)
         snapshot["capacity"]["filesystem_free_bytes"] = usage.free
-    return snapshot, parse_version(client), sha256_bytes(schema)
+    return snapshot, parse_version(client), sha256_bytes(normalize_schema_dump(schema))
 
 
 def unit_state(name: str) -> dict[str, str]:

@@ -105,6 +105,17 @@ def evaluate(snapshot: dict | None = None, units: dict | None = None, backup_val
 
 
 class PreflightTests(unittest.TestCase):
+    def test_schema_dump_identity_ignores_only_postgres_safety_token(self) -> None:
+        first = b"-- schema\n\\restrict alpha\nCREATE TABLE t(id int);\n\\unrestrict alpha\n"
+        second = b"-- schema\n\\restrict beta\nCREATE TABLE t(id int);\n\\unrestrict beta\n"
+        changed = b"-- schema\n\\restrict beta\nCREATE TABLE t(id bigint);\n\\unrestrict beta\n"
+        self.assertEqual(
+            preflight.normalize_schema_dump(first), preflight.normalize_schema_dump(second)
+        )
+        self.assertNotEqual(
+            preflight.normalize_schema_dump(first), preflight.normalize_schema_dump(changed)
+        )
+
     def test_complete_fixture_passes_without_claiming_restore(self) -> None:
         result = evaluate()
         self.assertEqual(result["overall_status"], "PASS")
