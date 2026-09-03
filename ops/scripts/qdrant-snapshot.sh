@@ -5,7 +5,11 @@
 set -euo pipefail
 
 QDRANT_URL="${QDRANT_URL:-http://localhost:6333}"
-API_KEY="${QDRANT_API_KEY:?QDRANT_API_KEY must be set}"
+if [[ -z "${QDRANT_API_KEY:-}" ]]; then
+    echo "[$(date)] ERROR: QDRANT_API_KEY is not set" >&2
+    exit 1
+fi
+API_KEY="${QDRANT_API_KEY}"
 SNAPSHOT_DIR="/data/qdrant/snapshots"
 RETENTION_DAYS=7
 
@@ -31,8 +35,42 @@ for COLLECTION in $COLLECTIONS; do
     fi
 done
 
-# List snapshots
-echo "[$(date)] Current snapshots:"
+# Cleanup old snapshots (retention policy)
+echo "[$(date)] Cleaning up snapshots older than ${RETENTION_DAYS} days..."
+CUTOFF_DATE=$(date -d "${RETENTION_DAYS} days ago" +%Y-%m-%dT%H:%M:%S)
+
+for COLLECTION in $COLLECTIONS; do
+    # Get list of snapshots with their creation times
+    SNAPSHOTS=$(curl -s -H "api-key: ${API_KEY}" "${QDRANT_URL}/collections/${COLLECTION}/snapshots" \
+        | jq -r '.result[] | "\(.name) \(.creation_time // "unknown")"' 2>/dev/null || true)
+
+    if [[ -n "$SNAPSHOTS" ]]; then
+        while IFS=' ' read -r SNAP_NAME SNAP_TIME; do
+            # Skip if creation_time is unknown or empty
+            if [[ "$SNAP_TIME" == "unknown" || -z "$SNAP_TIME" ]]; then
+                continue
+            fi
+
+            # Compare dates (Qdrant uses ISO 8601 format)
+            SNAP_DATE="${SNAP_TIME:0:19}"
+            if [[ "$SNAP_DATE" < "$CUTOFF_DATE" ]]; then
+                echo "[$(date)] Deleting old snapshot: ${SNAP_NAME} (created: ${SNAP_DATE})"
+                DELETE_RESP=$(curl -s -X DELETE \
+                    -H "api-key: ${API_KEY}" \
+                    "${QDRANT_URL}/collections/${COLLECTION}/snapshots/${SNAP_NAME}")
+
+                if echo "$DELETE_RESP" | jq -e '.result == true' > /dev/null 2>&1; then
+                    echo "[$(date)] Successfully deleted: ${SNAP_NAME}"
+                else
+                    echo "[$(date)] WARNING: Failed to delete ${SNAP_NAME}: ${DELETE_RESP}"
+                fi
+            fi
+        done <<< "$SNAPSHOTS"
+    fi
+done
+
+# List remaining snapshots
+echo "[$(date)] Current snapshots after cleanup:"
 for COLLECTION in $COLLECTIONS; do
     echo "  ${COLLECTION}:"
     curl -s -H "api-key: ${API_KEY}" "${QDRANT_URL}/collections/${COLLECTION}/snapshots" \

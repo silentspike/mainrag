@@ -257,6 +257,18 @@ pub async fn execute_mcp_tool(
 
             let search_results = match search_type {
                 "semantic" => {
+                    if state.config.server.cpu_mode {
+                        return Ok(Json(ExecuteToolResponse {
+                            tool_name: "search_code".to_string(),
+                            result: json!(null),
+                            success: false,
+                            error: Some(
+                                "semantic search unavailable in CPU mode - use keyword or hybrid"
+                                    .to_string(),
+                            ),
+                        }));
+                    }
+
                     state
                         .search
                         .semantic_search(&search_req.query, search_req.source_id, limit, &tenant)

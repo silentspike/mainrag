@@ -36,6 +36,25 @@ impl IntelligenceService {
         Ok(client)
     }
 
+    async fn record_analysis_result(
+        client: &deadpool_postgres::Client,
+        file_id: i64,
+        symbols_count: usize,
+        calls_count: usize,
+    ) -> Result<()> {
+        client
+            .execute(
+                "UPDATE files
+                 SET intelligence_analyzed_at = NOW(),
+                     intelligence_symbols_count = $2,
+                     intelligence_calls_count = $3
+                 WHERE id = $1",
+                &[&file_id, &(symbols_count as i32), &(calls_count as i32)],
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Parse a file and store symbols + call graph in database.
     /// Thread-safe: CodeParser uses per-language Mutex internally.
     ///
@@ -49,12 +68,37 @@ impl IntelligenceService {
         // Per-language locking: only the parser for this file's language is locked
         let result = self.parser.parse_file(path, content)?;
 
-        if result.symbols.is_empty() && result.calls.is_empty() {
-            return Ok(result);
-        }
-
         // Single DB connection for all operations
         let client = self.get_rls_client().await?;
+
+        // Re-analysis is file-replace semantics: remove stale graph edges and symbols
+        // before inserting the current parser result. Without this, call_graph rows
+        // accumulate because the table has no uniqueness constraint.
+        let deleted_calls = client
+            .execute(
+                "DELETE FROM call_graph
+                 WHERE caller_symbol_id IN (SELECT id FROM symbols WHERE file_id = $1)
+                    OR callee_symbol_id IN (SELECT id FROM symbols WHERE file_id = $1)",
+                &[&file_id],
+            )
+            .await?;
+        let deleted_symbols = client
+            .execute("DELETE FROM symbols WHERE file_id = $1", &[&file_id])
+            .await?;
+
+        if deleted_calls > 0 || deleted_symbols > 0 {
+            tracing::debug!(
+                file_id,
+                deleted_calls,
+                deleted_symbols,
+                "Cleaned stale intelligence rows before re-analysis"
+            );
+        }
+
+        if result.symbols.is_empty() && result.calls.is_empty() {
+            Self::record_analysis_result(&client, file_id, 0, 0).await?;
+            return Ok(result);
+        }
 
         // --- Batch INSERT symbols via UNNEST ---
         let symbol_ids = if !result.symbols.is_empty() {
@@ -160,6 +204,9 @@ impl IntelligenceService {
                 &[&caller_ids, &callee_names, &callee_ids, &call_types, &call_lines],
             ).await?;
         }
+
+        Self::record_analysis_result(&client, file_id, result.symbols.len(), result.calls.len())
+            .await?;
 
         Ok(result)
     }
@@ -296,7 +343,7 @@ impl IntelligenceService {
         source_id: Option<i64>,
     ) -> Result<Vec<CallChainEntry>> {
         let client = self.get_rls_client().await?;
-        let max_depth = max_depth.min(10).max(1) as usize;
+        let max_depth = max_depth.clamp(1, 10) as usize;
 
         let mut results: Vec<CallChainEntry> = Vec::new();
         let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();

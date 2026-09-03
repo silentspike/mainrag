@@ -124,6 +124,190 @@ pub struct ReleaseCandidateEvidenceResult {
     pub active_generation_id: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReleaseCandidateVerifyInput {
+    pub generation_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CandidateQuerySeed {
+    pub id: String,
+    pub query: String,
+    pub expected_path_sha256: String,
+    pub expects_match: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReleaseCandidateVerifyResult {
+    pub source_id: i64,
+    pub generation_id: i64,
+    pub generation_seq: i64,
+    pub run_id: i64,
+    pub status: String,
+    pub source_watermark_sha256: String,
+    pub adapter_profile_id: String,
+    pub analysis_profile_id: String,
+    pub search_profile_id: String,
+    pub generation_root_sha256: String,
+    pub verification_manifest_sha256: String,
+    pub active_generation_id: Option<i64>,
+    pub item_count: i64,
+    pub verified_body_count: usize,
+    pub verified_logical_bytes: u64,
+    pub intelligence_export: serde_json::Value,
+    pub query_seeds: Vec<CandidateQuerySeed>,
+    pub checks: BTreeMap<String, String>,
+}
+
+/// Re-read a completed candidate after construction. This is deliberately
+/// separate from qualification: it reconstructs every stored body, recomputes
+/// the generation root, and returns protected query seeds without changing
+/// generation or pointer state.
+pub async fn verify_release_candidate<C>(
+    client: &C,
+    source_id: i64,
+    input: &ReleaseCandidateVerifyInput,
+    pack_root: &Path,
+    io_buffer_bytes: usize,
+) -> Result<ReleaseCandidateVerifyResult>
+where
+    C: GenericClient + Sync,
+{
+    if input.generation_id <= 0 {
+        bail!("release-candidate verification requires a positive generation id");
+    }
+    client
+        .execute(
+            "SELECT storage_v2_require_test_scope($1, TRUE)",
+            &[&source_id],
+        )
+        .await?;
+    let identity = client
+        .query_opt(
+            "SELECT generation.generation_seq, generation.status::TEXT AS status, \
+                    generation.verification_manifest_sha256, source.active_generation_id, \
+                    run.id AS run_id, run.semantic_manifest_sha256, run.adapter_profile_id, \
+                    run.expected_active_generation_id, run.expected_item_count, \
+                    run.generation_root_sha256 \
+               FROM source_generation generation \
+               JOIN logical_source source ON source.id=generation.source_id \
+               JOIN storage_v2_ingest_run run ON run.generation_id=generation.id \
+              WHERE generation.id=$1 AND generation.source_id=$2 AND run.status='sealed'",
+            &[&input.generation_id, &source_id],
+        )
+        .await?
+        .context("verified generation and sealed ingest run not found")?;
+    let status: String = identity.get("status");
+    if !matches!(status.as_str(), "verified" | "release_candidate") {
+        bail!("release-candidate verification requires a verified generation");
+    }
+    let active_generation_id: Option<i64> = identity.get("active_generation_id");
+    let expected_active_generation_id: Option<i64> = identity.get("expected_active_generation_id");
+    if active_generation_id != expected_active_generation_id {
+        bail!("active pointer drifted after candidate construction");
+    }
+    let run_id: i64 = identity.get("run_id");
+    let expected_root: String = identity.get("generation_root_sha256");
+    let reconstructed_root: String = client
+        .query_one("SELECT storage_v2_shadow_generation_root($1)", &[&run_id])
+        .await?
+        .get(0);
+    if reconstructed_root != expected_root {
+        bail!("candidate generation root reconstruction failed");
+    }
+
+    let body_rows = client
+        .query(
+            "SELECT DISTINCT body.id, body.digest_algorithm, body.digest, body.logical_length, \
+                    body.inline_bytes, body.pack_id, pack.storage_key, pack.stored_bytes, \
+                    pack.status::TEXT AS pack_status, entry.ordinal, entry.pack_offset, \
+                    entry.stored_length, entry.codec::TEXT AS codec, entry.entry_digest, \
+                    dictionary.id AS dictionary_id, dictionary.digest AS dictionary_digest, \
+                    dictionary.dictionary_bytes \
+               FROM storage_v2_ingest_run_item item \
+               JOIN artifact_version artifact ON artifact.id=item.artifact_version_id \
+               JOIN content_node node ON node.id=artifact.content_root_node_id \
+               JOIN content_body body ON body.id=node.body_id \
+               LEFT JOIN content_pack pack ON pack.id=body.pack_id \
+               LEFT JOIN content_pack_entry entry ON entry.pack_id=body.pack_id AND entry.body_id=body.id \
+               LEFT JOIN content_dictionary dictionary ON dictionary.id=entry.dictionary_id \
+              WHERE item.run_id=$1 ORDER BY body.id",
+            &[&run_id],
+        )
+        .await?;
+    let mut verified_logical_bytes = 0_u64;
+    for row in &body_rows {
+        verified_logical_bytes = verified_logical_bytes
+            .checked_add(verify_stored_body_row(row, pack_root, io_buffer_bytes)?)
+            .context("verified candidate byte count overflow")?;
+    }
+
+    let generation_seq: i64 = identity.get("generation_seq");
+    let state: serde_json::Value = client
+        .query_one(
+            "SELECT storage_v2_shadow_source_state($1,$2,TRUE)",
+            &[&source_id, &generation_seq.to_string()],
+        )
+        .await?
+        .get(0);
+    let expected_item_count: i64 = identity.get("expected_item_count");
+    for field in ["declared_item_count", "item_count", "occurrence_count"] {
+        if state[field].as_i64() != Some(expected_item_count) {
+            bail!("candidate item, membership, and occurrence counts differ");
+        }
+    }
+    if state["view_count"] != state["search_document_count"]
+        || state["analysis_incomplete_count"].as_i64() != Some(0)
+        || state["active_generation_id"].as_i64() != active_generation_id
+    {
+        bail!("candidate view, analysis, or active-pointer state differs");
+    }
+    let intelligence_export: serde_json::Value = client
+        .query_one(
+            "SELECT storage_v2_export_intelligence($1,$2,'public')",
+            &[&source_id, &generation_seq.to_string()],
+        )
+        .await?
+        .get(0);
+    if intelligence_export["schema_version"] != "mainrag.storage-v2-intelligence-export.v1"
+        || intelligence_export["redaction"] != "public"
+    {
+        bail!("candidate intelligence export contract failed");
+    }
+    let query_seeds = candidate_query_seeds(client, source_id, input.generation_id).await?;
+    let mut checks = BTreeMap::new();
+    for check in [
+        "artifact_root",
+        "authorization",
+        "body_pack_integrity",
+        "intelligence",
+        "intervals",
+        "legacy_intelligence_export",
+    ] {
+        checks.insert(check.to_string(), "PASS".to_string());
+    }
+    Ok(ReleaseCandidateVerifyResult {
+        source_id,
+        generation_id: input.generation_id,
+        generation_seq,
+        run_id,
+        status,
+        source_watermark_sha256: identity.get("semantic_manifest_sha256"),
+        adapter_profile_id: identity.get("adapter_profile_id"),
+        analysis_profile_id: GENERIC_ANALYSIS_PROFILE.to_string(),
+        search_profile_id: RELEASE_SEARCH_PROFILE.to_string(),
+        generation_root_sha256: expected_root,
+        verification_manifest_sha256: identity.get("verification_manifest_sha256"),
+        active_generation_id,
+        item_count: expected_item_count,
+        verified_body_count: body_rows.len(),
+        verified_logical_bytes,
+        intelligence_export,
+        query_seeds,
+        checks,
+    })
+}
+
 pub async fn qualify_release_candidate<C>(
     client: &C,
     source_id: i64,
@@ -242,6 +426,7 @@ where
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_storage_v2_slice<C>(
     client: &C,
     source_id: i64,
@@ -1157,6 +1342,201 @@ where
         bail!("existing packed body failed full-byte equality verification");
     }
     Ok(Some(body))
+}
+
+fn verify_stored_body_row(
+    row: &tokio_postgres::Row,
+    pack_root: &Path,
+    io_buffer_bytes: usize,
+) -> Result<u64> {
+    if row.get::<_, String>("digest_algorithm") != "sha256-v1" {
+        bail!("candidate body uses an unsupported digest algorithm");
+    }
+    let digest: [u8; 32] = row
+        .get::<_, Vec<u8>>("digest")
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("candidate body has an invalid digest"))?;
+    let logical_length = u64::try_from(row.get::<_, i64>("logical_length"))?;
+    if let Some(bytes) = row.get::<_, Option<Vec<u8>>>("inline_bytes") {
+        if bytes.len() as u64 != logical_length
+            || <[u8; 32]>::from(Sha256::digest(&bytes)) != digest
+        {
+            bail!("candidate inline body failed full digest verification");
+        }
+        return Ok(logical_length);
+    }
+    if row.get::<_, Option<String>>("pack_status").as_deref() != Some("published") {
+        bail!("candidate packed body is not in a published pack");
+    }
+    let pack_id: Uuid = row
+        .get::<_, Option<Uuid>>("pack_id")
+        .context("candidate packed body omitted its pack identity")?;
+    let codec = match row
+        .get::<_, Option<String>>("codec")
+        .context("candidate packed body omitted its codec")?
+        .as_str()
+    {
+        "identity" => BodyCodec::Identity,
+        "zstd" => BodyCodec::Zstd,
+        value => bail!("unsupported stored body codec: {value}"),
+    };
+    let dictionary_id: Option<i64> = row.get("dictionary_id");
+    let dictionary_digest: Option<Vec<u8>> = row.get("dictionary_digest");
+    let dictionary_bytes: Option<Vec<u8>> = row.get("dictionary_bytes");
+    let dictionary = match (
+        dictionary_id,
+        dictionary_digest.as_deref(),
+        dictionary_bytes.as_deref(),
+    ) {
+        (Some(id), Some(dictionary_digest), Some(bytes)) => Some((
+            DictionaryIdentity {
+                id,
+                digest: dictionary_digest
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("invalid dictionary digest"))?,
+            },
+            bytes,
+        )),
+        (None, None, None) => None,
+        _ => bail!("candidate packed body has an incomplete dictionary identity"),
+    };
+    let entry = PackEntry {
+        pack_id,
+        ordinal: u64::try_from(
+            row.get::<_, Option<i64>>("ordinal")
+                .context("candidate packed body omitted its ordinal")?,
+        )?,
+        body: BodyIdentity {
+            digest_algorithm: "sha256-v1",
+            digest,
+            logical_length,
+        },
+        pack_offset: u64::try_from(
+            row.get::<_, Option<i64>>("pack_offset")
+                .context("candidate packed body omitted its offset")?,
+        )?,
+        stored_length: u64::try_from(
+            row.get::<_, Option<i64>>("stored_length")
+                .context("candidate packed body omitted its stored length")?,
+        )?,
+        codec,
+        dictionary: dictionary.as_ref().map(|(identity, _)| identity.clone()),
+        entry_digest: row
+            .get::<_, Option<Vec<u8>>>("entry_digest")
+            .context("candidate packed body omitted its entry digest")?
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid pack entry digest"))?,
+    };
+    let storage_key = row
+        .get::<_, Option<String>>("storage_key")
+        .context("candidate packed body omitted its storage key")?;
+    if storage_key != format!("{pack_id}.pack") {
+        bail!("candidate pack storage key does not match its identity");
+    }
+    let reader = PackReader::new(
+        pack_root.join(storage_key),
+        pack_id,
+        u64::try_from(
+            row.get::<_, Option<i64>>("stored_bytes")
+                .context("candidate packed body omitted its pack length")?,
+        )?,
+    );
+    let verified = reader.verify_to_staging(
+        &entry,
+        dictionary.as_ref().map(|(_, bytes)| *bytes),
+        pack_root,
+        io_buffer_bytes,
+    )?;
+    verified.copy_to(std::io::sink())?;
+    Ok(logical_length)
+}
+
+async fn candidate_query_seeds<C>(
+    client: &C,
+    source_id: i64,
+    generation_id: i64,
+) -> Result<Vec<CandidateQuerySeed>>
+where
+    C: GenericClient + Sync,
+{
+    let legacy = client
+        .query(
+            "SELECT file.path, chunk.content_text \
+               FROM chunks chunk JOIN files file ON file.id=chunk.file_id \
+              WHERE file.source_id=$1 AND chunk.content_text IS NOT NULL \
+              ORDER BY chunk.id LIMIT 64",
+            &[&source_id],
+        )
+        .await?;
+    let mut candidates = BTreeSet::new();
+    for row in legacy {
+        let path: String = row.get("path");
+        let content: String = row.get("content_text");
+        let mut preferred = search_exact_identifiers(&content);
+        preferred.extend(
+            content
+                .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+                .map(str::to_lowercase)
+                .filter(|token| token.len() >= 12),
+        );
+        for token in preferred.into_iter().filter(|token| token.len() <= 128) {
+            candidates.insert((token, path.clone()));
+            if candidates.len() >= 256 {
+                break;
+            }
+        }
+    }
+    let mut seeds = Vec::new();
+    for (query, path) in candidates {
+        let found = client
+            .query_one(
+                "SELECT EXISTS ( \
+                    SELECT 1 FROM source_generation generation \
+                    JOIN generation_item_version membership ON membership.source_id=generation.source_id \
+                     AND membership.valid_from_seq <= generation.generation_seq \
+                     AND (membership.valid_to_seq IS NULL OR membership.valid_to_seq > generation.generation_seq) \
+                    JOIN artifact_version artifact ON artifact.id=membership.artifact_version_id \
+                    JOIN occurrence occurrence_row ON occurrence_row.artifact_version_id=artifact.id \
+                     AND occurrence_row.source_id=generation.source_id \
+                    JOIN storage_v2_search_view_document binding ON binding.view_id=occurrence_row.view_id \
+                    JOIN storage_v2_search_document document ON document.id=binding.document_id \
+                   WHERE generation.id=$1 AND generation.source_id=$2 \
+                     AND occurrence_row.source_path=$3 \
+                     AND document.fts_simple @@ plainto_tsquery('simple',$4) \
+                )",
+                &[&generation_id, &source_id, &path, &query],
+            )
+            .await?
+            .get::<_, bool>(0);
+        if !found {
+            continue;
+        }
+        let expected_path_sha256 = hex::encode(Sha256::digest(path.as_bytes()));
+        let id = hex::encode(Sha256::digest(
+            format!("mainrag.storage-v2.query-seed.v1\0{query}\0{expected_path_sha256}").as_bytes(),
+        ));
+        seeds.push(CandidateQuerySeed {
+            id,
+            query,
+            expected_path_sha256,
+            expects_match: true,
+        });
+        if seeds.len() == 5 {
+            break;
+        }
+    }
+    if seeds.is_empty() {
+        let query = format!("mainrag_no_match_{source_id}_{generation_id}");
+        seeds.push(CandidateQuerySeed {
+            id: hex::encode(Sha256::digest(query.as_bytes())),
+            query,
+            expected_path_sha256: hex::encode(Sha256::digest([])),
+            expects_match: false,
+        });
+    }
+    Ok(seeds)
 }
 
 async fn active_generation<C>(client: &C, source_id: i64) -> Result<Option<i64>>

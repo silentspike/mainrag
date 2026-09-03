@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::db::models::SearchResult;
 use crate::db::PostgresPool;
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use crate::services::circuit_breaker::CircuitBreaker;
 use crate::services::gpu_semaphore::GpuSemaphores;
 pub use crate::services::qdrant::TenantContext;
@@ -272,6 +272,10 @@ fn fts_weight_for_query(query_type: QueryType) -> f32 {
 pub struct SearchResults {
     pub results: Vec<SearchResult>,
     pub total: usize,
+    /// Effective search mode used for this request.
+    pub search_mode: SearchMode,
+    /// Whether reranking was actually applied.
+    pub reranked: bool,
     /// Expanded FTS query (if query expansion was applied)
     pub expanded_query: Option<String>,
     /// Expansion terms (if query expansion was applied)
@@ -329,6 +333,22 @@ impl SearchMode {
     }
 }
 
+fn mode_after_vector_failure(current: SearchMode) -> SearchMode {
+    match current {
+        SearchMode::Full => SearchMode::DegradedNoVectors,
+        SearchMode::DegradedNoRerank => SearchMode::DegradedFtsOnly,
+        SearchMode::DegradedNoVectors | SearchMode::DegradedFtsOnly => current,
+    }
+}
+
+fn mode_after_rerank_failure(current: SearchMode) -> SearchMode {
+    match current {
+        SearchMode::Full => SearchMode::DegradedNoRerank,
+        SearchMode::DegradedNoVectors => SearchMode::DegradedFtsOnly,
+        SearchMode::DegradedNoRerank | SearchMode::DegradedFtsOnly => current,
+    }
+}
+
 pub struct SearchService {
     db: PostgresPool,
     tei: Arc<TeiClient>,
@@ -345,6 +365,8 @@ pub struct SearchService {
     backfill_active: bool,
     /// K4: Oversampling factor for post-filter (fetch N*factor from Qdrant, then trim)
     backfill_oversampling_factor: u64,
+    /// CPU-only mode forces FTS-only behavior without TEI/Qdrant calls.
+    cpu_mode: bool,
     /// Domain-scoped ranking: source names that have enriched symbol cards.
     /// Populated from DomainProfileRegistry at startup. Empty = no domain boost.
     domain_source_names: std::collections::HashSet<String>,
@@ -361,6 +383,7 @@ impl SearchService {
         query_expander: Arc<QueryExpander>,
         backfill_active: bool,
         backfill_oversampling_factor: u64,
+        cpu_mode: bool,
         domain_source_names: std::collections::HashSet<String>,
     ) -> Self {
         let cb_threshold: u32 = std::env::var("CB_FAILURE_THRESHOLD")
@@ -392,12 +415,17 @@ impl SearchService {
             semaphores: Arc::new(GpuSemaphores::from_env()),
             backfill_active,
             backfill_oversampling_factor,
+            cpu_mode,
             domain_source_names,
         }
     }
 
     /// Sprint 7.6: Determine current search mode based on circuit breaker states
     fn current_search_mode(&self) -> SearchMode {
+        if self.cpu_mode {
+            return SearchMode::DegradedFtsOnly;
+        }
+
         let embed_ok = self.cb_tei_embed.should_allow();
         let qdrant_ok = self.cb_qdrant.should_allow();
         let rerank_ok = self.cb_tei_rerank.should_allow();
@@ -413,6 +441,15 @@ impl SearchService {
     /// Get current search mode (for response header)
     pub fn search_mode(&self) -> SearchMode {
         self.current_search_mode()
+    }
+
+    fn record_expansion_failure(&self, error: &AppError) {
+        let err = error.to_string();
+        if err.contains("Qdrant") || err.contains("qdrant") {
+            self.cb_qdrant.record_failure();
+        } else {
+            self.cb_tei_embed.record_failure();
+        }
     }
 
     /// True hybrid search using RRF (Reciprocal Rank Fusion)
@@ -448,7 +485,7 @@ impl SearchService {
 
         // Sprint 7.6: Determine search mode FIRST — before any TEI calls
         // This prevents 500 errors when TEI is down (expand() needs TEI embed)
-        let search_mode = self.current_search_mode();
+        let mut search_mode = self.current_search_mode();
         if search_mode != SearchMode::Full {
             tracing::info!(mode = ?search_mode, "Search operating in degraded mode");
             metrics::counter!("mainrag_search_mode", "mode" => search_mode.header_value())
@@ -462,19 +499,32 @@ impl SearchService {
             let _embed_permit = self.semaphores.embed.acquire().await.map_err(|_| {
                 crate::error::AppError::Internal("Embed semaphore closed".to_string())
             })?;
-            let result = self.query_expander.expand(&clean_query, agent_id).await?;
+            let result = self.query_expander.expand(&clean_query, agent_id).await;
             drop(_embed_permit);
 
-            // Log expansion for debugging
-            if !result.synonyms.is_empty() {
-                tracing::debug!(
-                    "Query expansion: '{}' -> FTS: '{}', {} synonyms found",
-                    clean_query,
-                    result.fts_query,
-                    result.synonyms.len()
-                );
+            match result {
+                Ok(result) => {
+                    // Log expansion for debugging
+                    if !result.synonyms.is_empty() {
+                        tracing::debug!(
+                            "Query expansion: '{}' -> FTS: '{}', {} synonyms found",
+                            clean_query,
+                            result.fts_query,
+                            result.synonyms.len()
+                        );
+                    }
+                    result
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Query expansion/embedding failed, degrading to FTS-only: {}",
+                        e
+                    );
+                    self.record_expansion_failure(&e);
+                    search_mode = mode_after_vector_failure(search_mode);
+                    self.query_expander.expand_fts_only(&clean_query).await
+                }
             }
-            result
         } else {
             // TEI down — skip expansion, use plain query with empty embedding
             tracing::debug!(
@@ -498,7 +548,8 @@ impl SearchService {
 
         // Sprint 7.6: Conditional search paths based on service availability
         let can_do_semantic =
-            matches!(search_mode, SearchMode::Full | SearchMode::DegradedNoRerank);
+            matches!(search_mode, SearchMode::Full | SearchMode::DegradedNoRerank)
+                && !expanded.embedding.is_empty();
 
         // Wave 2a: Wire expanded FTS query instead of clean_query
         // Phrase queries bypass expansion (they need exact sequence matching)
@@ -530,6 +581,7 @@ impl SearchService {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!("Semantic search failed (degrading to FTS-only): {}", e);
+                    search_mode = mode_after_vector_failure(search_mode);
                     vec![]
                 }
             };
@@ -585,7 +637,7 @@ impl SearchService {
 
         // Apply overlap boost: results found in BOTH FTS and semantic are more trustworthy
         // Multiplicative: preserves rank ordering instead of dominating scores
-        for (_chunk_id, (score, sem_rank, fts_rank)) in rrf_scores.iter_mut() {
+        for (score, sem_rank, fts_rank) in rrf_scores.values_mut() {
             if sem_rank.is_some() && fts_rank.is_some() {
                 *score *= OVERLAP_MULTIPLIER;
             }
@@ -615,6 +667,8 @@ impl SearchService {
             return Ok(SearchResults {
                 results: vec![],
                 total: 0,
+                search_mode,
+                reranked: false,
                 expanded_query,
                 expansion_terms,
             });
@@ -915,6 +969,8 @@ impl SearchService {
                     return Ok(SearchResults {
                         results: reranked,
                         total: total_found,
+                        search_mode,
+                        reranked: true,
                         expanded_query: expanded_query.clone(),
                         expansion_terms: expansion_terms.clone(),
                     });
@@ -922,6 +978,7 @@ impl SearchService {
                 Err(e) => {
                     // Log error but don't fail - fall back to RRF results
                     tracing::warn!("Reranking failed, using RRF results: {}", e);
+                    search_mode = mode_after_rerank_failure(search_mode);
                 }
             }
         }
@@ -935,6 +992,8 @@ impl SearchService {
         Ok(SearchResults {
             results,
             total: total_found,
+            search_mode,
+            reranked: false,
             expanded_query,
             expansion_terms,
         })
@@ -1099,6 +1158,13 @@ impl SearchService {
         // The GIN index scan + ts_rank_cd is the expensive part — we limit to top 500
         // candidates per channel BEFORE joining to files/sources for tenant filtering.
         const FTS_CHANNEL_LIMIT: i64 = 500;
+        let tsquery_en = if is_expanded {
+            "to_tsquery('english', $1)"
+        } else if is_phrase {
+            "phraseto_tsquery('english', $1)"
+        } else {
+            "websearch_to_tsquery('english', $1)"
+        };
         let base_query = format!(
             r#"
             SELECT dual.chunk_id, MAX(dual.score)::real as score,
@@ -1123,13 +1189,7 @@ impl SearchService {
             "#,
             channel_limit = FTS_CHANNEL_LIMIT,
             tsquery = tsquery,
-            tsquery_en = if is_expanded {
-                "to_tsquery('english', $1)".to_string()
-            } else if is_phrase {
-                "phraseto_tsquery('english', $1)".to_string()
-            } else {
-                "websearch_to_tsquery('english', $1)".to_string()
-            }
+            tsquery_en = tsquery_en
         );
 
         // Source-diversity: limit results per source to prevent one large repo from
@@ -1141,6 +1201,16 @@ impl SearchService {
         // - Still allows 100 results from the queried codebase (enough for recall)
         // - Caps mega-repos (kubernetes 391K chunks) from drowning other sources
         const FTS_PER_SOURCE_LIMIT: i64 = 100;
+        let diversity_inner_query = format!(
+            "(SELECT c.id as chunk_id, ts_rank_cd(c.fts_vector, {tsquery}, 1)::real as score, c.file_id \
+             FROM chunks c WHERE c.fts_vector @@ {tsquery} ORDER BY score DESC LIMIT {cl}) \
+             UNION ALL \
+             (SELECT c.id as chunk_id, (ts_rank_cd(c.fts_vector_english, {tsquery_en}, 1) * 0.8)::real as score, c.file_id \
+             FROM chunks c WHERE c.fts_vector_english @@ {tsquery_en} ORDER BY score DESC LIMIT {cl})",
+            tsquery = tsquery,
+            tsquery_en = tsquery_en,
+            cl = FTS_CHANNEL_LIMIT
+        );
 
         // Tenant/source filters applied on the outer wrapper after JOINs.
         let rows = match tenant {
@@ -1162,22 +1232,7 @@ impl SearchService {
                             JOIN sources s ON s.id = f.source_id \
                             WHERE s.user_id = $2 GROUP BY dual.chunk_id, f.source_id\
                         ) sub WHERE rn <= $3 ORDER BY score DESC LIMIT $4",
-                        inner = format!(
-                            "(SELECT c.id as chunk_id, ts_rank_cd(c.fts_vector, {tsquery}, 1)::real as score, c.file_id \
-                             FROM chunks c WHERE c.fts_vector @@ {tsquery} ORDER BY score DESC LIMIT {cl}) \
-                             UNION ALL \
-                             (SELECT c.id as chunk_id, (ts_rank_cd(c.fts_vector_english, {tsquery_en}, 1) * 0.8)::real as score, c.file_id \
-                             FROM chunks c WHERE c.fts_vector_english @@ {tsquery_en} ORDER BY score DESC LIMIT {cl})",
-                            tsquery = tsquery,
-                            tsquery_en = if is_expanded {
-                                "to_tsquery('english', $1)".to_string()
-                            } else if is_phrase {
-                                "phraseto_tsquery('english', $1)".to_string()
-                            } else {
-                                "websearch_to_tsquery('english', $1)".to_string()
-                            },
-                            cl = FTS_CHANNEL_LIMIT
-                        )
+                        inner = diversity_inner_query
                     );
                     client
                         .query(
@@ -1205,22 +1260,7 @@ impl SearchService {
                             JOIN sources s ON s.id = f.source_id \
                             GROUP BY dual.chunk_id, f.source_id\
                         ) sub WHERE rn <= $2 ORDER BY score DESC LIMIT $3",
-                        inner = format!(
-                            "(SELECT c.id as chunk_id, ts_rank_cd(c.fts_vector, {tsquery}, 1)::real as score, c.file_id \
-                             FROM chunks c WHERE c.fts_vector @@ {tsquery} ORDER BY score DESC LIMIT {cl}) \
-                             UNION ALL \
-                             (SELECT c.id as chunk_id, (ts_rank_cd(c.fts_vector_english, {tsquery_en}, 1) * 0.8)::real as score, c.file_id \
-                             FROM chunks c WHERE c.fts_vector_english @@ {tsquery_en} ORDER BY score DESC LIMIT {cl})",
-                            tsquery = tsquery,
-                            tsquery_en = if is_expanded {
-                                "to_tsquery('english', $1)".to_string()
-                            } else if is_phrase {
-                                "phraseto_tsquery('english', $1)".to_string()
-                            } else {
-                                "websearch_to_tsquery('english', $1)".to_string()
-                            },
-                            cl = FTS_CHANNEL_LIMIT
-                        )
+                        inner = diversity_inner_query
                     );
                     client
                         .query(
@@ -1253,6 +1293,13 @@ impl SearchService {
         limit: u32,
         tenant: &TenantContext,
     ) -> Result<SearchResults> {
+        if self.cpu_mode {
+            return Err(AppError::BadRequest(
+                "semantic search unavailable in CPU mode".to_string(),
+            ));
+        }
+
+        let search_mode = self.current_search_mode();
         let embedding = self.tei.embed(query).await?;
 
         // K4: Use tenant-aware search
@@ -1265,6 +1312,8 @@ impl SearchService {
             return Ok(SearchResults {
                 results: vec![],
                 total: 0,
+                search_mode,
+                reranked: false,
                 expanded_query: None,
                 expansion_terms: vec![],
             });
@@ -1339,6 +1388,8 @@ impl SearchService {
         Ok(SearchResults {
             results,
             total,
+            search_mode,
+            reranked: false,
             expanded_query: None,
             expansion_terms: vec![],
         })
@@ -1451,6 +1502,8 @@ impl SearchService {
         Ok(SearchResults {
             results,
             total,
+            search_mode: self.current_search_mode(),
+            reranked: false,
             expanded_query: None,
             expansion_terms: vec![],
         })
@@ -1752,4 +1805,49 @@ fn deduplicate_results(
     }
 
     kept.into_iter().map(|i| results[i].clone()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vector_failure_updates_effective_search_mode() {
+        assert_eq!(
+            mode_after_vector_failure(SearchMode::Full),
+            SearchMode::DegradedNoVectors
+        );
+        assert_eq!(
+            mode_after_vector_failure(SearchMode::DegradedNoRerank),
+            SearchMode::DegradedFtsOnly
+        );
+        assert_eq!(
+            mode_after_vector_failure(SearchMode::DegradedNoVectors),
+            SearchMode::DegradedNoVectors
+        );
+        assert_eq!(
+            mode_after_vector_failure(SearchMode::DegradedFtsOnly),
+            SearchMode::DegradedFtsOnly
+        );
+    }
+
+    #[test]
+    fn rerank_failure_updates_effective_search_mode() {
+        assert_eq!(
+            mode_after_rerank_failure(SearchMode::Full),
+            SearchMode::DegradedNoRerank
+        );
+        assert_eq!(
+            mode_after_rerank_failure(SearchMode::DegradedNoVectors),
+            SearchMode::DegradedFtsOnly
+        );
+        assert_eq!(
+            mode_after_rerank_failure(SearchMode::DegradedNoRerank),
+            SearchMode::DegradedNoRerank
+        );
+        assert_eq!(
+            mode_after_rerank_failure(SearchMode::DegradedFtsOnly),
+            SearchMode::DegradedFtsOnly
+        );
+    }
 }
