@@ -19,6 +19,22 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ReleaseCandidateOperatorTests(unittest.TestCase):
+    def test_release_candidate_telemetry_requires_fragment_bounds(self) -> None:
+        telemetry = {
+            "phase": {name: 1.0 for name in MODULE.TELEMETRY_PHASES},
+            "ablauf": {name: 0 for name in MODULE.TELEMETRY_COUNTERS},
+        }
+        telemetry["ablauf"].update(
+            eingang_bytes=1024,
+            io_buffer_bytes=65536,
+            largest_item_bytes=512,
+            fragments_created=2,
+        )
+        MODULE.validate_telemetry(telemetry, 3)
+        telemetry["ablauf"]["fragments_created"] = 4
+        with self.assertRaisesRegex(RuntimeError, "fragment count"):
+            MODULE.validate_telemetry(telemetry, 3)
+
     def test_query_set_identity_is_order_independent(self) -> None:
         first = {"fixture": {"id": "a", "query": "alpha", "phrase": False, "k": 10}}
         second = {"fixture": {"id": "b", "query": "beta", "phrase": False, "k": 10}}

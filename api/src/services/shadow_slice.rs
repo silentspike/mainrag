@@ -38,10 +38,12 @@ enum SliceMode {
 }
 
 struct SliceFile {
+    item_key: String,
     path: String,
     language: Option<String>,
     inline_bytes: Option<Vec<u8>>,
     source_path: Option<PathBuf>,
+    source_range: Option<plugins::RawFileRange>,
     content_sha256: Option<[u8; 32]>,
     logical_length: u64,
 }
@@ -49,11 +51,23 @@ struct SliceFile {
 impl From<plugins::RawFile> for SliceFile {
     fn from(file: plugins::RawFile) -> Self {
         let lazy = file.content.is_empty() && file.source_path.is_some();
+        let item_key = match file.source_range {
+            Some(range) => format!(
+                "mainrag.fragment.v1:{}:{}:{}:{}",
+                file.path.len(),
+                range.start,
+                range.end,
+                file.path
+            ),
+            None => file.path.clone(),
+        };
         Self {
+            item_key,
             path: file.path,
             language: file.language,
             inline_bytes: (!lazy).then(|| file.content.into_bytes()),
             source_path: file.source_path,
+            source_range: file.source_range,
             content_sha256: None,
             logical_length: 0,
         }
@@ -69,7 +83,25 @@ impl SliceFile {
             .source_path
             .as_ref()
             .context("storage-v2 adapter omitted both content and source path")?;
-        Ok(Cow::Owned(tokio::fs::read(path).await?))
+        if let Some(range) = self.source_range {
+            use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+            let length = range
+                .end
+                .checked_sub(range.start)
+                .context("storage-v2 source range is inverted")?;
+            let capacity = usize::try_from(length).context("source fragment is too large")?;
+            let mut source = tokio::fs::File::open(path).await?;
+            source.seek(std::io::SeekFrom::Start(range.start)).await?;
+            let mut bytes = Vec::with_capacity(capacity);
+            source.take(length).read_to_end(&mut bytes).await?;
+            if bytes.len() != capacity {
+                bail!("storage-v2 source fragment ended before its declared boundary");
+            }
+            Ok(Cow::Owned(bytes))
+        } else {
+            Ok(Cow::Owned(tokio::fs::read(path).await?))
+        }
     }
 
     async fn load_verified_bytes(&self) -> Result<Cow<'_, [u8]>> {
@@ -79,6 +111,16 @@ impl SliceFile {
             bail!("source content drifted after the candidate watermark was captured");
         }
         Ok(bytes)
+    }
+
+    fn byte_start(&self) -> u64 {
+        self.source_range.map(|range| range.start).unwrap_or(0)
+    }
+
+    fn byte_end(&self) -> u64 {
+        self.source_range
+            .map(|range| range.end)
+            .unwrap_or(self.logical_length)
     }
 }
 
@@ -488,9 +530,21 @@ where
         .into_iter()
         .map(SliceFile::from)
         .collect::<Vec<_>>();
-    files.sort_by(|left, right| left.path.cmp(&right.path));
+    files.sort_by(|left, right| left.item_key.cmp(&right.item_key));
+    validate_slice_layout(&files)?;
     let (fixture_sha256, input_bytes) = canonical_fixture_hash(&mut files).await?;
     measurements.input_bytes = input_bytes;
+    measurements.fragments_created = u64::try_from(
+        files
+            .iter()
+            .filter(|file| file.source_range.is_some())
+            .count(),
+    )?;
+    measurements.largest_item_bytes = files
+        .iter()
+        .map(|file| file.logical_length)
+        .max()
+        .unwrap_or(0);
     measurements.record_stage(ShadowIngestStage::ReadAndHash, adapter_started.elapsed());
     let adapter_profile = match mode {
         SliceMode::PublicFixture => FIXTURE_ADAPTER_PROFILE.to_string(),
@@ -747,6 +801,7 @@ where
     let mut controlled_retry_done = false;
     for (file, body) in files.iter().zip(&bodies) {
         let path = &file.path;
+        let item_key = &file.item_key;
         let language = &file.language;
         let bytes = file.load_verified_bytes().await?;
         let projection_started = Instant::now();
@@ -849,25 +904,33 @@ where
             measurements.parser_passes = measurements.parser_passes.saturating_add(1);
             (parsed, 1_i16)
         };
-        let cards = generic_structural_cards(path, &parsed)?;
+        let cards = generic_structural_cards(item_key, &parsed)?;
         measurements.record_stage(ShadowIngestStage::Analysis, analysis_started.elapsed());
 
         let database_started = Instant::now();
+        let fragmented = file.source_range.is_some();
         let locator = json!({
-            "byte_start": 0,
-            "byte_end": bytes.len(),
-            "line_start": 1,
-            "line_end": text.lines().count().max(1),
+            "byte_start": file.byte_start(),
+            "byte_end": file.byte_end(),
+            "line_start": (!fragmented).then_some(1),
+            "line_end": (!fragmented).then_some(text.lines().count().max(1)),
+            "line_scope": if fragmented { "unknown" } else { "source" },
             "language": language.as_deref().unwrap_or("text"),
             "level": 0,
+            "fragmented": fragmented,
         });
-        let item_witness = json!({"path": path, "sha256": hex::encode(&body.digest)});
+        let item_witness = json!({
+            "path": path,
+            "byte_start": file.byte_start(),
+            "byte_end": file.byte_end(),
+            "sha256": hex::encode(&body.digest),
+        });
         let expected_content_hash = hex::encode(&body.digest);
         let staged = generation_ingest::stage_shadow_item(
             client,
             &generation_ingest::StageItem {
                 run_id: run.id,
-                item_key: path,
+                item_key,
                 item_kind: "document",
                 witness_type: match mode {
                     SliceMode::PublicFixture => "public-fixture-item",
@@ -1021,7 +1084,8 @@ where
         .into_iter()
         .map(SliceFile::from)
         .collect::<Vec<_>>();
-    final_files.sort_by(|left, right| left.path.cmp(&right.path));
+    final_files.sort_by(|left, right| left.item_key.cmp(&right.item_key));
+    validate_slice_layout(&final_files)?;
     let (final_fixture_sha256, final_input_bytes) =
         canonical_fixture_hash(&mut final_files).await?;
     if final_fixture_sha256 != fixture_sha256
@@ -1156,6 +1220,10 @@ async fn canonical_fixture_hash(files: &mut [SliceFile]) -> Result<(String, u64)
         let (content_sha256, logical_length) = {
             let bytes = file.load_bytes().await?;
             let logical_length = bytes.len() as u64;
+            if file.source_range.is_some() {
+                digest.update((file.item_key.len() as u64).to_be_bytes());
+                digest.update(file.item_key.as_bytes());
+            }
             digest.update((file.path.len() as u64).to_be_bytes());
             digest.update(file.path.as_bytes());
             digest.update(logical_length.to_be_bytes());
@@ -1169,6 +1237,50 @@ async fn canonical_fixture_hash(files: &mut [SliceFile]) -> Result<(String, u64)
             .context("source byte count overflow")?;
     }
     Ok((hex::encode(digest.finalize()), input_bytes))
+}
+
+fn validate_slice_layout(files: &[SliceFile]) -> Result<()> {
+    let mut item_keys = BTreeSet::new();
+    let mut by_path: BTreeMap<&str, Vec<&SliceFile>> = BTreeMap::new();
+    for file in files {
+        if !item_keys.insert(file.item_key.as_str()) {
+            bail!("storage-v2 adapter produced a duplicate source item key");
+        }
+        by_path.entry(file.path.as_str()).or_default().push(file);
+    }
+    for same_path in by_path.values_mut() {
+        let fragmented = same_path.iter().any(|file| file.source_range.is_some());
+        if !fragmented {
+            if same_path.len() != 1 {
+                bail!("storage-v2 adapter produced duplicate unfragmented paths");
+            }
+            continue;
+        }
+        if same_path.iter().any(|file| file.source_range.is_none()) {
+            bail!("storage-v2 adapter mixed fragmented and whole source items");
+        }
+        same_path.sort_by_key(|file| file.source_range.expect("checked range").start);
+        let source_path = same_path[0]
+            .source_path
+            .as_ref()
+            .context("fragmented source item omitted its physical path")?;
+        let source_length = std::fs::metadata(source_path)?.len();
+        let mut expected_start = 0_u64;
+        for file in same_path.iter() {
+            if file.source_path.as_ref() != Some(source_path) {
+                bail!("one fragmented source path refers to multiple physical files");
+            }
+            let range = file.source_range.expect("checked range");
+            if range.start != expected_start || range.end <= range.start {
+                bail!("fragmented source byte ranges contain a gap or overlap");
+            }
+            expected_start = range.end;
+        }
+        if expected_start != source_length {
+            bail!("fragmented source byte ranges do not cover the complete file");
+        }
+    }
+    Ok(())
 }
 
 fn release_source_watermark(
@@ -1192,6 +1304,9 @@ fn release_source_watermark(
 }
 
 fn release_adapter_profile(source_type: &str) -> Result<String> {
+    if source_type == "fs" {
+        return Ok("mainrag.fs-release-candidate.v2.fragment-1048576-newline-65536".to_string());
+    }
     if source_type != "pdf" {
         return Ok(format!("mainrag.{source_type}-release-candidate.v1"));
     }
@@ -1961,6 +2076,7 @@ mod tests {
             language: Some("rs".into()),
             last_modified: None,
             source_path: Some(source_path.clone()),
+            source_range: None,
         })];
 
         let (_, input_bytes) = canonical_fixture_hash(&mut files)
@@ -1974,6 +2090,134 @@ mod tests {
             .await
             .expect_err("content drift must fail");
         assert!(error.to_string().contains("drifted"));
+    }
+
+    #[tokio::test]
+    async fn source_fragment_reads_only_its_declared_utf8_range() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-storage-v2-fragment-{}", Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&directory.0).expect("create test directory");
+        let source_path = directory.0.join("sample.jsonl");
+        std::fs::write(&source_path, "before\nselected €\nafter\n").expect("write source");
+        let bytes = std::fs::read(&source_path).expect("read source fixture");
+        let start = "before\n".len() as u64;
+        let end = ("before\n".len() + "selected €\n".len()) as u64;
+        let mut file = SliceFile::from(plugins::RawFile {
+            path: "sample.jsonl".into(),
+            content: String::new(),
+            size: usize::try_from(end - start).unwrap(),
+            language: Some("jsonl".into()),
+            last_modified: None,
+            source_path: Some(source_path),
+            source_range: Some(plugins::RawFileRange { start, end }),
+        });
+
+        let selected = file.load_bytes().await.expect("read fragment").into_owned();
+        assert_eq!(selected.as_slice(), &bytes[start as usize..end as usize]);
+        file.content_sha256 = Some(Sha256::digest(&selected).into());
+        file.logical_length = end - start;
+        assert_eq!(
+            file.load_verified_bytes().await.unwrap().as_ref(),
+            selected.as_slice()
+        );
+    }
+
+    #[test]
+    fn fragment_item_keys_keep_structural_identities_distinct() {
+        let first = SliceFile::from(plugins::RawFile {
+            path: "sample.rs".into(),
+            content: String::new(),
+            size: 10,
+            language: Some("rs".into()),
+            last_modified: None,
+            source_path: Some(PathBuf::from("/source/sample.rs")),
+            source_range: Some(plugins::RawFileRange { start: 0, end: 10 }),
+        });
+        let second = SliceFile::from(plugins::RawFile {
+            path: "sample.rs".into(),
+            content: String::new(),
+            size: 10,
+            language: Some("rs".into()),
+            last_modified: None,
+            source_path: Some(PathBuf::from("/source/sample.rs")),
+            source_range: Some(plugins::RawFileRange { start: 10, end: 20 }),
+        });
+        let parsed = ParseResult {
+            symbols: vec![ExtractedSymbol {
+                name: "same".into(),
+                qualified_name: Some("same".into()),
+                symbol_type: crate::services::parser::SymbolType::Function,
+                line_start: 1,
+                line_end: 1,
+                column_start: 1,
+                column_end: 5,
+                signature: Some("fn same()".into()),
+                doc_comment: None,
+                visibility: None,
+                language: "rust".into(),
+            }],
+            calls: Vec::new(),
+            language: "rust".into(),
+        };
+
+        let first_card = generic_structural_cards(&first.item_key, &parsed).unwrap();
+        let second_card = generic_structural_cards(&second.item_key, &parsed).unwrap();
+
+        assert_ne!(first.item_key, second.item_key);
+        assert_ne!(first_card[0].symbol_key, second_card[0].symbol_key);
+        assert_eq!(first_card[0].structure["item_key"], first.item_key);
+        assert_eq!(second_card[0].structure["item_key"], second.item_key);
+    }
+
+    #[tokio::test]
+    async fn unfragmented_manifest_hash_keeps_the_v1_encoding() {
+        let path = "sample.txt";
+        let content = b"stable bytes";
+        let mut files = vec![SliceFile::from(plugins::RawFile {
+            path: path.into(),
+            content: String::from_utf8(content.to_vec()).unwrap(),
+            size: content.len(),
+            language: Some("txt".into()),
+            last_modified: None,
+            source_path: None,
+            source_range: None,
+        })];
+        let (actual, input_bytes) = canonical_fixture_hash(&mut files).await.unwrap();
+        let mut expected = Sha256::new();
+        expected.update((path.len() as u64).to_be_bytes());
+        expected.update(path.as_bytes());
+        expected.update((content.len() as u64).to_be_bytes());
+        expected.update(content);
+
+        assert_eq!(actual, hex::encode(expected.finalize()));
+        assert_eq!(input_bytes, content.len() as u64);
+    }
+
+    #[test]
+    fn fragmented_layout_requires_exact_contiguous_coverage() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-storage-v2-layout-{}", Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&directory.0).expect("create test directory");
+        let source_path = directory.0.join("sample.txt");
+        std::fs::write(&source_path, b"123456").expect("write source");
+        let make = |start, end| {
+            SliceFile::from(plugins::RawFile {
+                path: "sample.txt".into(),
+                content: String::new(),
+                size: usize::try_from(end - start).unwrap(),
+                language: Some("txt".into()),
+                last_modified: None,
+                source_path: Some(source_path.clone()),
+                source_range: Some(plugins::RawFileRange { start, end }),
+            })
+        };
+
+        assert!(validate_slice_layout(&[make(0, 3), make(3, 6)]).is_ok());
+        assert!(validate_slice_layout(&[make(0, 2), make(3, 6)]).is_err());
+        assert!(validate_slice_layout(&[make(0, 4), make(3, 6)]).is_err());
+        assert!(validate_slice_layout(&[make(0, 5)]).is_err());
     }
 
     #[test]

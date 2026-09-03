@@ -438,6 +438,8 @@ pub struct ShadowIngestMeasurements {
     pub io_buffer_bytes: u64,
     pub peak_buffer_bytes: u64,
     pub writer_concurrency: u64,
+    pub fragments_created: u64,
+    pub largest_item_bytes: u64,
 }
 
 impl ShadowIngestMeasurements {
@@ -516,6 +518,8 @@ impl ShadowIngestMeasurements {
                 "io_buffer_bytes": self.io_buffer_bytes,
                 "peak_buffer_bytes": self.peak_buffer_bytes,
                 "writer_concurrency": self.writer_concurrency,
+                "fragments_created": self.fragments_created,
+                "largest_item_bytes": self.largest_item_bytes,
             },
             "phase": phases,
         })
@@ -822,6 +826,8 @@ mod tests {
             io_buffer_bytes: 8192,
             peak_buffer_bytes: 8192,
             writer_concurrency: 2,
+            fragments_created: 3,
+            largest_item_bytes: 4096,
             ..ShadowIngestMeasurements::default()
         };
         for (index, stage) in ShadowIngestStage::ALL.into_iter().enumerate() {
@@ -835,6 +841,8 @@ mod tests {
         assert_eq!(json["ablauf"]["stored_bytes"], 30);
         assert_eq!(json["ablauf"]["analysis_retries"], 1);
         assert_eq!(json["ablauf"]["io_buffer_bytes"], 8192);
+        assert_eq!(json["ablauf"]["fragments_created"], 3);
+        assert_eq!(json["ablauf"]["largest_item_bytes"], 4096);
         assert_eq!(json["phase"].as_object().unwrap().len(), 7);
         assert_eq!(json["phase"]["lesen_hashen_ms"], 1.0);
         assert_eq!(json["phase"]["sealing_ms"], 7.0);

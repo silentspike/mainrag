@@ -39,9 +39,20 @@ pub struct RawFile {
     pub language: Option<String>, // Programming language if detected
     #[allow(dead_code)]
     pub last_modified: Option<String>, // ISO 8601 timestamp
-    /// Absolute path on disk. For large files (>LARGE_FILE_THRESHOLD), content is empty
-    /// and the index service must stream from this path.
+    /// Absolute path on disk. Legacy large-file sync and storage-v2 deferred
+    /// discovery leave content empty and read from this path.
     pub source_path: Option<std::path::PathBuf>,
+    /// Exact source byte range represented by this item. Storage v2 uses this
+    /// for bounded, lossless fragments of very large text files. Legacy
+    /// indexing leaves it unset and continues to treat one RawFile as one file.
+    #[cfg_attr(not(feature = "storage-v2-retrieval"), allow(dead_code))]
+    pub source_range: Option<RawFileRange>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawFileRange {
+    pub start: u64,
+    pub end: u64,
 }
 
 /// Plugin trait for source handling

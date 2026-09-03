@@ -134,6 +134,8 @@ class ShadowSliceHarnessTests(unittest.TestCase):
                 "io_buffer_bytes": 100,
                 "peak_buffer_bytes": 100,
                 "writer_concurrency": 1,
+                "fragments_created": 0,
+                "largest_item_bytes": 20,
             },
         }
         with tempfile.TemporaryDirectory() as temporary:
@@ -172,6 +174,8 @@ class ShadowSliceHarnessTests(unittest.TestCase):
                     "io_buffer_bytes": 65536,
                     "peak_buffer_bytes": 65536,
                     "writer_concurrency": 1,
+                    "fragments_created": 0,
+                    "largest_item_bytes": 10,
                 }
             },
         }
@@ -233,6 +237,8 @@ class ShadowSliceHarnessTests(unittest.TestCase):
                     "io_buffer_bytes": 65536,
                     "peak_buffer_bytes": 65536,
                     "writer_concurrency": 1,
+                    "fragments_created": 0,
+                    "largest_item_bytes": 10,
                 }
             },
         }
