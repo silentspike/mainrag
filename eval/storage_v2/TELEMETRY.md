@@ -16,6 +16,7 @@ run. Its shape is directly consumable by `ops/telemetry/run.sh` and
 - body, node, view, analysis, and complete-generation reuse counts
 - parser passes, analysis retries, created artifacts and occurrences, opened and closed intervals
 - errors, configured and managed peak buffer bytes, and writer concurrency
+- source fragments created and the largest post-fragmentation ingest item
 
 The command under measurement must write this file to the path supplied in
 `TM_KENNZAHLEN`. The supported `shadow_slice.py --phase ingest` command now
@@ -92,6 +93,13 @@ configured value is emitted as `ablauf.io_buffer_bytes`; the largest buffer
 actually used during the run remains separately visible as
 `ablauf.peak_buffer_bytes`. Change only one tuning dimension per comparison
 series.
+
+Filesystem release-candidate runs additionally expose
+`ablauf.fragments_created` and `ablauf.largest_item_bytes`. Together with the
+API process-tree RSS/PSS series, these distinguish a genuinely bounded source
+reader from a writer whose pack buffer alone is bounded. The public fixture is
+never fragmented and therefore reports zero fragments while still reporting
+its largest item.
 
 Accepted CPU, I/O, and proportional-memory comparisons require root collection
 so `/proc/<pid>/io` and `smaps_rollup` are available for the complete API and

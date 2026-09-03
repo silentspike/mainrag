@@ -536,14 +536,27 @@ The production path does not inject the fixture's controlled parser retry and
 does not infer or update an active generation.
 
 Filesystem candidate discovery is metadata-only. Candidate construction reads
-one file at a time, captures its content identity in the canonical watermark,
+one item at a time, captures its content identity in the canonical watermark,
 and verifies that identity on every later content-store, reconstruction, and
-analysis pass. Immediately before sealing, it rediscovers and rehashes the
-complete source so additions, removals, and late changes fail the run. This
-bounds source-content memory by the largest accepted file plus
-pack/reconstruction buffers; drift after watermark capture never becomes a
-mixed candidate. The production watermark is domain-separated over source
-type, registered path, adapter profile, and the content manifest, so a source
+analysis pass. Accepted filesystem text files above one MiB are represented as
+deterministic, contiguous, UTF-8-aligned byte ranges of no more than one MiB
+plus three UTF-8 continuation bytes. Where possible, the boundary moves
+backward within a bounded 64-KiB window to retain complete lines. The ranges
+retain the original source path, cover
+every byte exactly once, and receive stable source-item keys that include their
+byte boundaries. A gap, overlap, mixed whole-file/fragment layout, truncated
+read, or changed physical length fails closed. Byte offsets remain exact;
+fragment locators deliberately leave global line numbers unknown instead of
+reporting fragment-local lines as source-global locations.
+
+Immediately before sealing, candidate construction rediscovers and rehashes
+the complete source so additions, removals, and late changes fail the run. This
+bounds filesystem source-content memory by the largest accepted unfragmented
+file or one fragment, plus pack/reconstruction buffers; drift after watermark
+capture never becomes a mixed candidate. The filesystem adapter profile binds
+the fragment size, and telemetry reports both the fragment count and largest
+item size. The production watermark is domain-separated over source type,
+registered path, adapter profile, and the content manifest, so a source
 configuration recut cannot silently reuse an older candidate. Adapters that
 cannot provide a lazy source path remain bounded by their own complete adapter
 result and must pass the per-source resource gate before qualification.

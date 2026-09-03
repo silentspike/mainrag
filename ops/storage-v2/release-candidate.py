@@ -31,6 +31,38 @@ CHECKS = (
     "restart_resume",
     "search_quality",
 )
+TELEMETRY_PHASES = {
+    "lesen_hashen_ms",
+    "content_store_ms",
+    "strukturprojektion_ms",
+    "analyse_ms",
+    "db_staging_ms",
+    "intervall_delta_ms",
+    "sealing_ms",
+}
+TELEMETRY_COUNTERS = {
+    "latenz_ms",
+    "eingang_bytes",
+    "unique_bytes",
+    "stored_bytes",
+    "reuse_bodies",
+    "reuse_nodes",
+    "reuse_views",
+    "reuse_analysis",
+    "reuse_generation",
+    "parser_passes",
+    "analysis_retries",
+    "artifacts_created",
+    "occurrences_created",
+    "intervals_opened",
+    "intervals_closed",
+    "errors",
+    "io_buffer_bytes",
+    "peak_buffer_bytes",
+    "writer_concurrency",
+    "fragments_created",
+    "largest_item_bytes",
+}
 
 
 def request(api_url: str, token: str, method: str, path: str, body: object | None = None) -> Any:
@@ -76,6 +108,34 @@ def publish_telemetry(value: object) -> None:
         atomic_private_json(Path(destination), value)
 
 
+def validate_telemetry(value: object, item_count: int) -> None:
+    if not isinstance(value, dict):
+        raise RuntimeError("release-candidate response has no telemetry object")
+    phases = value.get("phase")
+    counters = value.get("ablauf")
+    if not isinstance(phases, dict) or set(phases) != TELEMETRY_PHASES:
+        raise RuntimeError("release-candidate telemetry has incomplete or unknown phase keys")
+    if not isinstance(counters, dict) or not TELEMETRY_COUNTERS.issubset(counters):
+        raise RuntimeError("release-candidate telemetry has incomplete optimization counters")
+    values = [*phases.values(), *(counters[key] for key in TELEMETRY_COUNTERS)]
+    if any(
+        isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0
+        for value in values
+    ):
+        raise RuntimeError("release-candidate telemetry values must be non-negative numbers")
+    if any(
+        isinstance(counters[key], bool) or not isinstance(counters[key], int)
+        for key in TELEMETRY_COUNTERS - {"latenz_ms"}
+    ):
+        raise RuntimeError("release-candidate telemetry counters must be integers")
+    if counters["errors"] != 0 or counters["io_buffer_bytes"] <= 0:
+        raise RuntimeError("release-candidate telemetry reports errors or no I/O buffer")
+    if counters["fragments_created"] > item_count:
+        raise RuntimeError("release-candidate fragment count exceeds its item count")
+    if item_count > 0 and not 0 < counters["largest_item_bytes"] <= counters["eingang_bytes"]:
+        raise RuntimeError("release-candidate telemetry has invalid source item bounds")
+
+
 def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
@@ -90,6 +150,7 @@ def build(arguments: argparse.Namespace, token: str) -> None:
     )
     if result["active_generation_before"] != result["active_generation_after"]:
         raise RuntimeError("candidate construction changed the active pointer")
+    validate_telemetry(result.get("telemetry"), int(result["item_count"]))
     state = source_state(arguments.api_url, token, arguments.source_id, int(result["generation_seq"]))
     checkpoint = {
         "schema_version": 1,
@@ -200,6 +261,7 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
         or repeated["active_generation_after"] != checkpoint["active_generation_id"]
     ):
         raise RuntimeError("restart/resume did not reproduce the completed candidate identity")
+    validate_telemetry(repeated.get("telemetry"), int(repeated["item_count"]))
     verified = request(
         arguments.api_url,
         token,
