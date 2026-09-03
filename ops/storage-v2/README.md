@@ -109,6 +109,16 @@ final manifest is PASS and its evidence boundary has been accepted. Search/read
 availability during an adapter is determined by that reviewed adapter; the
 preflight does not silently claim it.
 
+Apply the storage-v2 migrations as the database runtime/table owner. The
+controlled-write triggers deliberately require the table owner and the
+`SECURITY DEFINER` functions to have the same identity. Applying migrations as
+a superuser while leaving the new tables and functions owned by that superuser
+will make the ordinary API runtime fail closed. Before candidate construction,
+verify that the storage-v2 base tables, sequences, enum types, view, and all
+`storage_v2_*` functions have the same owner as the existing `sources` table.
+Do not work around an ownership mismatch by running the API with a privileged
+database account.
+
 ## Source release candidates
 
 Candidate construction is source-bounded and never changes an active pointer.
