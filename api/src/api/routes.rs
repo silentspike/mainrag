@@ -131,10 +131,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             post(handlers::admin_backfill_qdrant_user_ids),
         );
     #[cfg(feature = "storage-v2-retrieval")]
-    let long_running_routes = long_running_routes.route(
-        "/api/v1/admin/sources/:id/storage-v2-release-candidate-build",
-        post(handlers::admin_build_release_candidate),
-    );
+    let long_running_routes = long_running_routes
+        .route(
+            "/api/v1/admin/sources/:id/storage-v2-release-candidate-build",
+            post(handlers::admin_build_release_candidate),
+        )
+        .route(
+            "/api/v1/admin/sources/:id/storage-v2-release-candidate-verify",
+            post(handlers::admin_verify_release_candidate),
+        );
     let long_running_routes = long_running_routes
         .layer(middleware::from_fn(admin_middleware))
         .layer(middleware::from_fn({

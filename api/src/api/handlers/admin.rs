@@ -141,6 +141,40 @@ pub async fn admin_build_release_candidate(
 }
 
 #[cfg(feature = "storage-v2-retrieval")]
+pub async fn admin_verify_release_candidate(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
+    Path(source_id): Path<i64>,
+    JsonBody(request): JsonBody<crate::services::shadow_slice::ReleaseCandidateVerifyInput>,
+) -> Result<Json<crate::services::shadow_slice::ReleaseCandidateVerifyResult>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
+    let pack_root = state.config.storage_v2_pack_root.clone();
+    let pack_io_buffer_bytes = state.config.storage_v2_pack_io_buffer_bytes;
+    state
+        .rls_client
+        .with_rls(user_id, true, move |transaction| {
+            Box::pin(async move {
+                let result = crate::services::shadow_slice::verify_release_candidate(
+                    &**transaction,
+                    source_id,
+                    &request,
+                    &pack_root,
+                    pack_io_buffer_bytes,
+                )
+                .await
+                .map_err(|error| {
+                    AppError::BadRequest(format!(
+                        "storage-v2 release-candidate verification failed: {error}"
+                    ))
+                })?;
+                Ok(Json(result))
+            })
+        })
+        .await
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
 pub async fn admin_qualify_release_candidate(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Arc<crate::auth::Claims>>,
