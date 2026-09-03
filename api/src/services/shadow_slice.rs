@@ -734,33 +734,10 @@ where
     } else {
         result_pack_stored_bytes
     };
-    let inline_bytes = files.iter().try_fold(0_u64, |total, file| {
-        total
-            .checked_add(
-                file.inline_bytes
-                    .as_ref()
-                    .map_or(0, |bytes| bytes.len() as u64),
-            )
-            .context("inline source byte count overflow")
-    })?;
-    let largest_lazy_file = files
-        .iter()
-        .filter(|file| file.inline_bytes.is_none())
-        .map(|file| file.logical_length)
-        .max()
-        .unwrap_or(0);
-    let largest_file = files
-        .iter()
-        .map(|file| file.logical_length)
-        .max()
-        .unwrap_or(0);
-    let io_buffer_bytes_u64 = u64::try_from(io_buffer_bytes)?;
-    measurements.peak_buffer_bytes = inline_bytes
-        .checked_add(largest_lazy_file)
-        .and_then(|bytes| bytes.checked_add(largest_file))
-        .and_then(|bytes| bytes.checked_add(io_buffer_bytes_u64))
-        .context("peak source buffer byte count overflow")?
-        .max(io_buffer_bytes_u64);
+    // This counter describes memory managed by the bounded pack writer. Source
+    // adapter allocations are observed by the process-tree RSS/PSS collector
+    // and must not be folded into this writer-specific tuning dimension.
+    measurements.peak_buffer_bytes = managed_writer_peak(io_buffer_bytes)?;
     measurements.writer_concurrency = 1;
     measurements.record_stage(ShadowIngestStage::ContentStore, content_started.elapsed());
 
@@ -1559,6 +1536,10 @@ fn is_git_sha(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+fn managed_writer_peak(io_buffer_bytes: usize) -> Result<u64> {
+    Ok(u64::try_from(io_buffer_bytes)?)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComparableHit {
     pub hit_id: String,
@@ -2010,6 +1991,16 @@ mod tests {
             base,
             release_source_watermark("fs", "/opaque/a", "adapter.v1", &"b".repeat(64))
         );
+    }
+
+    #[test]
+    fn writer_peak_tracks_only_the_bounded_pack_buffer() {
+        for configured in [4096, 65536, 1024 * 1024] {
+            assert_eq!(
+                managed_writer_peak(configured).expect("supported buffer size"),
+                configured as u64
+            );
+        }
     }
 
     #[test]
