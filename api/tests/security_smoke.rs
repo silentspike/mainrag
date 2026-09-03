@@ -86,7 +86,7 @@ fn test_jwt_weak_secret_blocklist() {
     // All must be recognized as weak
     for weak in WEAK_SECRETS {
         assert!(
-            WEAK_SECRETS.iter().any(|w| *w == *weak),
+            WEAK_SECRETS.contains(weak),
             "Known weak secret '{}' should be in the blocklist",
             weak
         );
@@ -95,7 +95,7 @@ fn test_jwt_weak_secret_blocklist() {
     // A strong random secret should NOT be in the blocklist
     let strong = "xK9#mP2$vL5nQ8wR3jF6hT0yB4cA7eD!ZuSoGi";
     assert!(
-        !WEAK_SECRETS.iter().any(|w| *w == strong),
+        !WEAK_SECRETS.contains(&strong),
         "Strong secret should NOT be in the blocklist"
     );
 }

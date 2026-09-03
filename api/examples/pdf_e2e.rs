@@ -64,7 +64,7 @@ async fn main() {
     println!("\n=== EXTRACTION BENCHMARK RESULTS ===");
     println!(
         "File: {} ({:.2} MB)",
-        pdf_path.split('/').last().unwrap_or(&pdf_path),
+        pdf_path.split('/').next_back().unwrap_or(&pdf_path),
         file_size as f64 / 1024.0 / 1024.0
     );
     println!("Min: {:.2} ms", min_ms);

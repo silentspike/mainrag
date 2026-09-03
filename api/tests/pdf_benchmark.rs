@@ -55,7 +55,7 @@ async fn benchmark_mupdf_throughput() {
         let _ = plugin.sync(pdf_path).await.unwrap();
         let elapsed = start.elapsed();
         times.push(elapsed);
-        print!("    [{}/{}] {:?}\n", i + 1, iterations, elapsed);
+        println!("    [{}/{}] {:?}", i + 1, iterations, elapsed);
     }
 
     // Calculate statistics
@@ -85,7 +85,7 @@ async fn benchmark_mupdf_throughput() {
     println!("    P50:    {} ms", p50);
     println!("    P95:    {} ms", p95);
     println!("    Max:    {} ms", max_ms);
-    println!("");
+    println!();
     println!("  Throughput:");
     println!("    MB/s:       {:.2}", mb_per_sec);
     println!("    chars/s:    {:.0}", chars_per_sec);
