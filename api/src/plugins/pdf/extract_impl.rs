@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn test_default_impl() {
-        let plugin = PdfPlugin::default();
+        let plugin = PdfPlugin;
         assert_eq!(plugin.source_type(), "pdf");
     }
 }

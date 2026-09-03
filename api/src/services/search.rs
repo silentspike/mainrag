@@ -637,7 +637,7 @@ impl SearchService {
 
         // Apply overlap boost: results found in BOTH FTS and semantic are more trustworthy
         // Multiplicative: preserves rank ordering instead of dominating scores
-        for (_chunk_id, (score, sem_rank, fts_rank)) in rrf_scores.iter_mut() {
+        for (score, sem_rank, fts_rank) in rrf_scores.values_mut() {
             if sem_rank.is_some() && fts_rank.is_some() {
                 *score *= OVERLAP_MULTIPLIER;
             }

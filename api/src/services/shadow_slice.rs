@@ -426,6 +426,7 @@ where
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_storage_v2_slice<C>(
     client: &C,
     source_id: i64,

@@ -790,9 +790,9 @@ public class Sample implements Drawable {
         // Verify we found interface (Class)
         let has_interface = chunks.iter().any(|c| {
             c.chunk_type == ChunkType::Class
-                && c.metadata.as_ref().map_or(false, |m| {
+                && c.metadata.as_ref().is_some_and(|m| {
                     m.get("semantic_unit")
-                        .map_or(false, |v| v == "interface_declaration")
+                        .is_some_and(|v| v == "interface_declaration")
                 })
         });
         assert!(has_interface, "No interface chunk found in Java file");
