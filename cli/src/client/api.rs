@@ -152,6 +152,8 @@ pub struct StatsResponse {
 #[derive(Deserialize, Debug, Clone)]
 pub struct HealthResponse {
     pub status: String,
+    #[serde(default)]
+    pub mode: Option<String>,
     pub services: HealthServices,
 }
 
@@ -297,13 +299,22 @@ impl ApiClient {
     // ========================================================================
 
     pub async fn health(&self) -> Result<HealthResponse> {
-        let url = format!("{}/health", self.base_url);
-        let response = self
-            .client
-            .get(&url)
+        let url = format!("{}/api/v1/health", self.base_url);
+        let mut request = self.client.get(&url);
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request
             .send()
             .await
             .context("Failed to connect to API server")?;
+
+        if response.status() == 401 {
+            return Err(anyhow!(
+                "Unauthorized. Please login first with: mainrag auth login"
+            ));
+        }
 
         if !response.status().is_success() {
             return Err(anyhow!("Health check failed: {}", response.status()));
@@ -894,6 +905,43 @@ impl ApiClient {
             .context("Failed to parse backfill response")
     }
 
+    /// Trigger code intelligence backfill (admin-only maintenance)
+    /// Finds files without symbols, or all matching files when force=true.
+    pub async fn backfill_intelligence(
+        &self,
+        request: &IntelligenceBackfillRequest,
+    ) -> Result<IntelligenceBackfillResult> {
+        let url = format!("{}/api/v1/admin/backfill/intelligence", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .json(request)
+            .send()
+            .await
+            .context("Failed to trigger intelligence backfill")?;
+
+        if response.status() == 401 {
+            return Err(anyhow!(
+                "Unauthorized. Please login first with: mainrag auth login"
+            ));
+        }
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(anyhow!("Intelligence backfill failed: {}", error_text));
+        }
+
+        response
+            .json::<IntelligenceBackfillResult>()
+            .await
+            .context("Failed to parse intelligence backfill response")
+    }
+
     // =================================================================
     // Intelligence Layer Methods
     // =================================================================
@@ -1303,6 +1351,36 @@ pub struct CallChainEntry {
 pub struct BackfillResult {
     pub processed: usize,
     pub batches: usize,
+    pub message: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct IntelligenceBackfillRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct IntelligenceBackfillFileResult {
+    pub file_id: i64,
+    pub path: String,
+    pub status: String,
+    pub symbols: usize,
+    pub calls: usize,
+    pub reason: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct IntelligenceBackfillResult {
+    pub processed: usize,
+    pub skipped: usize,
+    pub errors: usize,
+    pub candidates: usize,
+    pub files: Vec<IntelligenceBackfillFileResult>,
     pub message: String,
 }
 

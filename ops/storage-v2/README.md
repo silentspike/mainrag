@@ -123,6 +123,29 @@ Repeat the same command after a client or service restart to prove idempotent
 resume: the generation identity must be reused and semantic row counts must not
 increase.
 
+The protected operator drives that sequence without accepting unchecked PASS
+labels. Run `build` under `ops/telemetry/run.sh`, restart the exact API binary,
+then run `verify` under telemetry as well:
+
+```bash
+python3 ops/storage-v2/release-candidate.py build \
+  --source-id SOURCE_ID --commit-sha FULL_DEPLOYED_SHA \
+  --checkpoint PROTECTED_CHECKPOINT
+
+python3 ops/storage-v2/release-candidate.py verify \
+  --source-id SOURCE_ID --commit-sha FULL_DEPLOYED_SHA \
+  --checkpoint PROTECTED_CHECKPOINT --output PROTECTED_EVIDENCE
+```
+
+The server-side verification phase recomputes the generation root, decodes and
+hashes every referenced body/pack entry, reconciles membership/search/analysis
+counts and the active pointer, checks the public intelligence export contract,
+and returns protected query seeds. The operator then executes supported current
+and named-generation reads, the applicable intelligence commands, latency and
+resource gates, records accepted dual-read evidence, and only then submits the
+qualification envelope. Raw checkpoints, seeds, result sets, and evidence stay
+outside Git with mode `0600`.
+
 Filesystem discovery for this command returns metadata and file paths rather
 than retaining the entire corpus. The builder reads files serially, rechecks
 each content hash after the source watermark is captured, rediscovers and

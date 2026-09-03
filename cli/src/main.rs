@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use colored::Colorize;
 
 mod client;
@@ -12,6 +12,11 @@ use client::ApiClient;
 #[command(about = "MAINRAG CLI - Search and manage your knowledge base", long_about = None)]
 #[command(version = "0.1.0")]
 #[command(author = "obtFusi")]
+#[command(group(
+    ArgGroup::new("lifecycle")
+        .args(["stop", "cpu", "gpu"])
+        .multiple(false)
+))]
 struct Cli {
     /// API server URL (default: http://localhost:3001)
     #[arg(
@@ -30,8 +35,20 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
+    /// Stop all mainrag services, containers, timers, and the dedicated PostgreSQL instance
+    #[arg(long)]
+    stop: bool,
+
+    /// Start mainrag in CPU-only mode (PostgreSQL + API + frontend + watchers)
+    #[arg(long)]
+    cpu: bool,
+
+    /// Start mainrag in full GPU mode (TEI + Qdrant via docker compose)
+    #[arg(long)]
+    gpu: bool,
+
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -457,11 +474,44 @@ enum AdminAction {
 enum BackfillAction {
     /// Find and embed orphaned chunks (chunks without embeddings)
     Orphaned,
+
+    /// Rebuild code intelligence for files missing symbols/call graph rows
+    Intelligence {
+        /// Restrict backfill to one source id
+        #[arg(long)]
+        source_id: Option<i64>,
+
+        /// Maximum files to process in this run
+        #[arg(long, default_value = "100")]
+        limit: i64,
+
+        /// Re-analyze matching files even if symbols already exist
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    validate_lifecycle_args(&cli)?;
+
+    if cli.stop {
+        return commands::lifecycle::stop(cli.json).await;
+    }
+    if cli.cpu {
+        return commands::lifecycle::start_cpu(&cli.api_url, cli.json).await;
+    }
+    if cli.gpu {
+        return commands::lifecycle::start_gpu(&cli.api_url, cli.json).await;
+    }
+
+    let Some(command) = cli.command else {
+        let mut cmd = Cli::command();
+        cmd.print_help()?;
+        println!();
+        std::process::exit(2);
+    };
 
     // Create API client
     let mut client = ApiClient::new(&cli.api_url)?;
@@ -480,7 +530,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Execute command
-    match cli.command {
+    match command {
         Commands::Search {
             query,
             mode,
@@ -678,6 +728,20 @@ async fn main() -> anyhow::Result<()> {
                 BackfillAction::Orphaned => {
                     commands::backfill::run_orphaned(&client, cli.json).await
                 }
+                BackfillAction::Intelligence {
+                    source_id,
+                    limit,
+                    force,
+                } => {
+                    commands::backfill::run_intelligence(
+                        &client,
+                        source_id,
+                        Some(limit),
+                        force,
+                        cli.json,
+                    )
+                    .await
+                }
             },
         },
 
@@ -685,5 +749,51 @@ async fn main() -> anyhow::Result<()> {
             println!("mainrag {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+    }
+}
+
+fn validate_lifecycle_args(cli: &Cli) -> anyhow::Result<()> {
+    let lifecycle_selected = cli.stop || cli.cpu || cli.gpu;
+    if lifecycle_selected && cli.command.is_some() {
+        anyhow::bail!("Lifecycle flags (--stop, --cpu, --gpu) cannot be combined with subcommands");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn parses_lifecycle_flag_without_subcommand() {
+        let cli = Cli::try_parse_from(["mainrag", "--stop"]).expect("parse --stop");
+        assert!(cli.stop);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn rejects_multiple_lifecycle_flags() {
+        let err = match Cli::try_parse_from(["mainrag", "--stop", "--cpu"]) {
+            Ok(_) => panic!("expected lifecycle flag conflict"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn rejects_lifecycle_flag_with_subcommand() {
+        let cli = Cli::try_parse_from(["mainrag", "--stop", "health"]).expect("parse combo");
+        let err = validate_lifecycle_args(&cli).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("cannot be combined with subcommands"));
+    }
+
+    #[test]
+    fn keeps_global_json_subcommand_shape() {
+        let cli = Cli::try_parse_from(["mainrag", "--json", "health"]).expect("parse health");
+        assert!(cli.json);
+        assert!(matches!(cli.command, Some(Commands::Health)));
     }
 }

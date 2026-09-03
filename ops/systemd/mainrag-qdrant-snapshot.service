@@ -1,11 +1,11 @@
 [Unit]
 Description=MainRag Qdrant Snapshot
 Documentation=https://github.com/silentspike/mainrag
-After=qdrant.service
-Requires=qdrant.service
+After=docker.service
 
 [Service]
 Type=oneshot
+EnvironmentFile=/etc/mainrag/mainrag.env
 ExecStart=/opt/mainrag/scripts/qdrant-snapshot.sh
 StandardOutput=journal
 StandardError=journal

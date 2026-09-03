@@ -46,6 +46,7 @@ impl Default for WatchConfig {
             .unwrap_or(300);
 
         let min_sync_secs = std::env::var("MAINRAG_WATCH_MIN_SYNC_SECS")
+            .or_else(|_| std::env::var("MAINRAG_WATCH_MIN_SYNC_INTERVAL_S"))
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(15);
@@ -601,3 +602,4 @@ impl WatchServiceHandle {
 //   - Default: 15
 //   - Prevents re-syncing the same file repeatedly
 //   - Set higher for sources with frequent writes (e.g., JSONL logs)
+//   - MAINRAG_WATCH_MIN_SYNC_INTERVAL_S is accepted as a legacy fallback

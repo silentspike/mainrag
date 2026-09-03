@@ -106,9 +106,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             }
         }));
 
-    // Long-running admin routes with a 24h timeout. Source sync and resumable
-    // storage-v2 candidate construction are intentionally source-bounded but
-    // can exceed ten minutes for multi-gigabyte sources.
+    // Long-running admin routes with a 24h timeout. Large corpora and resumable
+    // storage-v2 candidate construction are source-bounded but can need hours;
+    // per-file timeouts still protect the ordinary indexing loop.
     let long_running_routes = Router::new()
         .route(
             "/api/v1/admin/sources/:id/sync",
@@ -123,14 +123,23 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             post(handlers::admin_backfill_orphaned),
         )
         .route(
+            "/api/v1/admin/backfill/intelligence",
+            post(handlers::admin_backfill_intelligence),
+        )
+        .route(
             "/api/v1/admin/backfill/qdrant-user-ids",
             post(handlers::admin_backfill_qdrant_user_ids),
         );
     #[cfg(feature = "storage-v2-retrieval")]
-    let long_running_routes = long_running_routes.route(
-        "/api/v1/admin/sources/:id/storage-v2-release-candidate-build",
-        post(handlers::admin_build_release_candidate),
-    );
+    let long_running_routes = long_running_routes
+        .route(
+            "/api/v1/admin/sources/:id/storage-v2-release-candidate-build",
+            post(handlers::admin_build_release_candidate),
+        )
+        .route(
+            "/api/v1/admin/sources/:id/storage-v2-release-candidate-verify",
+            post(handlers::admin_verify_release_candidate),
+        );
     let long_running_routes = long_running_routes
         .layer(middleware::from_fn(admin_middleware))
         .layer(middleware::from_fn({

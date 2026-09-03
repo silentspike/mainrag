@@ -1067,7 +1067,7 @@ impl CodeParser {
         let mut user_count = 0u32;
         let mut assistant_count = 0u32;
         let total_lines = content.lines().count();
-        let lines_per_msg = if messages.len() > 0 {
+        let lines_per_msg = if !messages.is_empty() {
             total_lines / messages.len()
         } else {
             1
