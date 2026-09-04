@@ -814,276 +814,314 @@ where
     let mut symbol_count = 0_usize;
     let mut controlled_retry_count = 0_usize;
     let mut controlled_retry_done = false;
-    for (file, body) in files.iter().zip(&bodies) {
-        let path = &file.path;
-        let item_key = &file.item_key;
-        let language = &file.language;
-        let bytes = file.load_verified_bytes().await?;
-        let projection_started = Instant::now();
-        let node_domain = match mode {
-            SliceMode::PublicFixture => "fixture",
-            SliceMode::ReleaseCandidate => "source",
-        };
-        let node = content_graph::put_leaf_node(client, node_domain, "artifact", body.id).await?;
-        let roles = vec!["content".to_string()];
-        let kinds = vec!["node".to_string()];
-        let component_ids = vec![node.id];
-        let starts = vec![0_i64];
-        let ends = vec![body.logical_length];
-        let view = content_graph::put_retrieval_view(
-            client,
-            "artifact",
-            match mode {
-                SliceMode::PublicFixture => FIXTURE_VIEW_PROFILE,
-                SliceMode::ReleaseCandidate => RELEASE_VIEW_PROFILE,
-            },
-            language.as_deref().unwrap_or("text"),
-            "whole-bytes-v1",
-            0,
-            &roles,
-            &kinds,
-            &component_ids,
-            &starts,
-            &ends,
-        )
-        .await?;
-        measurements.record_stage(
-            ShadowIngestStage::StructuralProjection,
-            projection_started.elapsed(),
-        );
-
-        let text = std::str::from_utf8(bytes.as_ref())
-            .context("fixture adapter produced non-UTF-8 text")?;
-        let analysis_started = Instant::now();
-        let content_digest = body.digest.as_slice();
-        let cached_analysis = client
-            .query_opt(
-                "SELECT result FROM storage_v2_analysis_cache \
-                 WHERE content_identity_sha256=$1 AND analysis_profile_id=$2 AND status='complete'",
-                &[&content_digest, &GENERIC_ANALYSIS_PROFILE],
+    let score_stages = vec![
+        "graph".to_string(),
+        "semantic".to_string(),
+        "rerank".to_string(),
+    ];
+    let score_profile = match mode {
+        SliceMode::PublicFixture => "fixture-unavailable-v1",
+        SliceMode::ReleaseCandidate => "candidate-unavailable-v1",
+    };
+    let score_evidence = json!({
+        "reason": match mode {
+            SliceMode::PublicFixture => "fixture-disabled",
+            SliceMode::ReleaseCandidate => "backend-not-applicable",
+        }
+    });
+    const ANALYSIS_PREFETCH_ITEMS: usize = 1024;
+    for (file_batch, body_batch) in files
+        .chunks(ANALYSIS_PREFETCH_ITEMS)
+        .zip(bodies.chunks(ANALYSIS_PREFETCH_ITEMS))
+    {
+        let analysis_prefetch_started = Instant::now();
+        let analysis_digests = body_batch
+            .iter()
+            .map(|body| body.digest.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut cached_analyses = client
+            .query(
+                "SELECT content_identity_sha256, result \
+                   FROM storage_v2_analysis_cache \
+                  WHERE content_identity_sha256=ANY($1) \
+                    AND analysis_profile_id=$2 AND status='complete'",
+                &[&analysis_digests, &GENERIC_ANALYSIS_PROFILE],
             )
-            .await?;
-        let (parsed, parser_pass_count) = if let Some(row) = cached_analysis {
-            let result: serde_json::Value = row.get("result");
-            measurements.reused_analysis = measurements.reused_analysis.saturating_add(1);
-            (
-                ParseResult {
-                    symbols: serde_json::from_value::<Vec<ExtractedSymbol>>(
-                        result["symbols"].clone(),
-                    )?,
-                    calls: serde_json::from_value::<Vec<ExtractedCall>>(result["calls"].clone())?,
-                    language: result["language"].as_str().unwrap_or("text").to_string(),
-                },
-                0_i16,
-            )
-        } else {
-            generation_ingest::begin_analysis_attempt(
-                client,
-                content_digest,
-                GENERIC_ANALYSIS_PROFILE,
-            )
-            .await?;
-            if mode == SliceMode::PublicFixture && !controlled_retry_done {
-                generation_ingest::finish_analysis_attempt(
-                    client,
-                    content_digest,
-                    GENERIC_ANALYSIS_PROFILE,
-                    None,
-                    Some("controlled_fixture_retry"),
+            .await?
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<_, Vec<u8>>("content_identity_sha256"),
+                    row.get::<_, serde_json::Value>("result"),
                 )
-                .await?;
+            })
+            .collect::<BTreeMap<_, _>>();
+        measurements.record_stage(
+            ShadowIngestStage::Analysis,
+            analysis_prefetch_started.elapsed(),
+        );
+        for (file, body) in file_batch.iter().zip(body_batch) {
+            let path = &file.path;
+            let item_key = &file.item_key;
+            let language = &file.language;
+            let bytes = file.load_verified_bytes().await?;
+            let projection_started = Instant::now();
+            let node_domain = match mode {
+                SliceMode::PublicFixture => "fixture",
+                SliceMode::ReleaseCandidate => "source",
+            };
+            let node =
+                content_graph::put_leaf_node(client, node_domain, "artifact", body.id).await?;
+            let roles = vec!["content".to_string()];
+            let kinds = vec!["node".to_string()];
+            let component_ids = vec![node.id];
+            let starts = vec![0_i64];
+            let ends = vec![body.logical_length];
+            let view = content_graph::put_retrieval_view(
+                client,
+                "artifact",
+                match mode {
+                    SliceMode::PublicFixture => FIXTURE_VIEW_PROFILE,
+                    SliceMode::ReleaseCandidate => RELEASE_VIEW_PROFILE,
+                },
+                language.as_deref().unwrap_or("text"),
+                "whole-bytes-v1",
+                0,
+                &roles,
+                &kinds,
+                &component_ids,
+                &starts,
+                &ends,
+            )
+            .await?;
+            measurements.record_stage(
+                ShadowIngestStage::StructuralProjection,
+                projection_started.elapsed(),
+            );
+
+            let text = std::str::from_utf8(bytes.as_ref())
+                .context("fixture adapter produced non-UTF-8 text")?;
+            let analysis_started = Instant::now();
+            let content_digest = body.digest.as_slice();
+            let cached_analysis = cached_analyses.get(content_digest).cloned();
+            let (parsed, parser_pass_count) = if let Some(result) = cached_analysis {
+                measurements.reused_analysis = measurements.reused_analysis.saturating_add(1);
+                (
+                    ParseResult {
+                        symbols: serde_json::from_value::<Vec<ExtractedSymbol>>(
+                            result["symbols"].clone(),
+                        )?,
+                        calls: serde_json::from_value::<Vec<ExtractedCall>>(
+                            result["calls"].clone(),
+                        )?,
+                        language: result["language"].as_str().unwrap_or("text").to_string(),
+                    },
+                    0_i16,
+                )
+            } else {
                 generation_ingest::begin_analysis_attempt(
                     client,
                     content_digest,
                     GENERIC_ANALYSIS_PROFILE,
                 )
                 .await?;
-                controlled_retry_count += 1;
-                measurements.analysis_retries = measurements.analysis_retries.saturating_add(1);
-                controlled_retry_done = true;
-            }
-            let parsed = parser.parse_file(Path::new(path), text)?;
-            let analysis_result = json!({
-                "symbols": &parsed.symbols,
-                "calls": &parsed.calls,
-                "language": &parsed.language,
-            });
-            generation_ingest::finish_analysis_attempt(
-                client,
-                content_digest,
-                GENERIC_ANALYSIS_PROFILE,
-                Some(&analysis_result),
-                None,
-            )
-            .await?;
-            measurements.parser_passes = measurements.parser_passes.saturating_add(1);
-            (parsed, 1_i16)
-        };
-        let cards = generic_structural_cards(item_key, &parsed)?;
-        measurements.record_stage(ShadowIngestStage::Analysis, analysis_started.elapsed());
+                if mode == SliceMode::PublicFixture && !controlled_retry_done {
+                    generation_ingest::finish_analysis_attempt(
+                        client,
+                        content_digest,
+                        GENERIC_ANALYSIS_PROFILE,
+                        None,
+                        Some("controlled_fixture_retry"),
+                    )
+                    .await?;
+                    generation_ingest::begin_analysis_attempt(
+                        client,
+                        content_digest,
+                        GENERIC_ANALYSIS_PROFILE,
+                    )
+                    .await?;
+                    controlled_retry_count += 1;
+                    measurements.analysis_retries = measurements.analysis_retries.saturating_add(1);
+                    controlled_retry_done = true;
+                }
+                let parsed = parser.parse_file(Path::new(path), text)?;
+                let analysis_result = json!({
+                    "symbols": &parsed.symbols,
+                    "calls": &parsed.calls,
+                    "language": &parsed.language,
+                });
+                generation_ingest::finish_analysis_attempt(
+                    client,
+                    content_digest,
+                    GENERIC_ANALYSIS_PROFILE,
+                    Some(&analysis_result),
+                    None,
+                )
+                .await?;
+                cached_analyses.insert(content_digest.to_vec(), analysis_result);
+                measurements.parser_passes = measurements.parser_passes.saturating_add(1);
+                (parsed, 1_i16)
+            };
+            let cards = generic_structural_cards(item_key, &parsed)?;
+            measurements.record_stage(ShadowIngestStage::Analysis, analysis_started.elapsed());
 
-        let database_started = Instant::now();
-        let fragmented = file.source_range.is_some();
-        let locator = json!({
-            "byte_start": file.byte_start(),
-            "byte_end": file.byte_end(),
-            "line_start": (!fragmented).then_some(1),
-            "line_end": (!fragmented).then_some(text.lines().count().max(1)),
-            "line_scope": if fragmented { "unknown" } else { "source" },
-            "language": language.as_deref().unwrap_or("text"),
-            "level": 0,
-            "fragmented": fragmented,
-        });
-        let item_witness = json!({
-            "path": path,
-            "byte_start": file.byte_start(),
-            "byte_end": file.byte_end(),
-            "sha256": hex::encode(&body.digest),
-        });
-        let expected_content_hash = hex::encode(&body.digest);
-        let staged = generation_ingest::stage_shadow_item(
-            client,
-            &generation_ingest::StageItem {
-                run_id: run.id,
-                item_key,
-                item_kind: "document",
-                witness_type: match mode {
-                    SliceMode::PublicFixture => "public-fixture-item",
-                    SliceMode::ReleaseCandidate => "release-candidate-item",
-                },
-                witness: &item_witness,
-                adapter_profile_id: &adapter_profile,
-                content_root_node_id: Some(node.id),
-                raw_body_id: None,
-                expected_content_hash: &expected_content_hash,
-                byte_length: body.logical_length,
-                content_identity_sha256: content_digest,
-                analysis_profile_id: GENERIC_ANALYSIS_PROFILE,
-                view_id: view.id,
-                source_path: path,
-                locator: &locator,
-                parser_pass_count,
-            },
-        )
-        .await?;
-        let identifiers = search_exact_identifiers(text);
-        let document_id: i64 = client
-            .query_one(
-                "SELECT id FROM storage_v2_put_search_document($1, 'node', $2, $3, $4)",
-                &[
-                    &match mode {
-                        SliceMode::PublicFixture => FIXTURE_SEARCH_PROFILE,
-                        SliceMode::ReleaseCandidate => RELEASE_SEARCH_PROFILE,
+            let database_started = Instant::now();
+            let fragmented = file.source_range.is_some();
+            let locator = json!({
+                "byte_start": file.byte_start(),
+                "byte_end": file.byte_end(),
+                "line_start": (!fragmented).then_some(1),
+                "line_end": (!fragmented).then_some(text.lines().count().max(1)),
+                "line_scope": if fragmented { "unknown" } else { "source" },
+                "language": language.as_deref().unwrap_or("text"),
+                "level": 0,
+                "fragmented": fragmented,
+            });
+            let item_witness = json!({
+                "path": path,
+                "byte_start": file.byte_start(),
+                "byte_end": file.byte_end(),
+                "sha256": hex::encode(&body.digest),
+            });
+            let expected_content_hash = hex::encode(&body.digest);
+            let staged = generation_ingest::stage_shadow_item(
+                client,
+                &generation_ingest::StageItem {
+                    run_id: run.id,
+                    item_key,
+                    item_kind: "document",
+                    witness_type: match mode {
+                        SliceMode::PublicFixture => "public-fixture-item",
+                        SliceMode::ReleaseCandidate => "release-candidate-item",
                     },
-                    &node.id,
-                    &text,
-                    &identifiers,
-                ],
-            )
-            .await?
-            .get(0);
-        client
-            .execute(
-                "SELECT storage_v2_bind_search_document($1, 0, $2, 1.0)",
-                &[&view.id, &document_id],
+                    witness: &item_witness,
+                    adapter_profile_id: &adapter_profile,
+                    content_root_node_id: Some(node.id),
+                    raw_body_id: None,
+                    expected_content_hash: &expected_content_hash,
+                    byte_length: body.logical_length,
+                    content_identity_sha256: content_digest,
+                    analysis_profile_id: GENERIC_ANALYSIS_PROFILE,
+                    view_id: view.id,
+                    source_path: path,
+                    locator: &locator,
+                    parser_pass_count,
+                },
             )
             .await?;
-        for card in cards {
-            let generic = json!({
-                "name": card.name,
-                "qualified_name": card.qualified_name,
-                "symbol_kind": card.symbol_kind,
-                "language": card.language,
-            });
-            let structure = serde_json::to_value(&card.structure)?;
-            let span = serde_json::to_value(&card.source_span)?;
-            let symbol_occurrence = client
+            let identifiers = search_exact_identifiers(text);
+            let _document_id: i64 = client
                 .query_one(
-                    "SELECT id FROM storage_v2_put_symbol_occurrence( \
-                     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+                    "WITH document AS MATERIALIZED ( \
+                    SELECT id FROM storage_v2_put_search_document($1, 'node', $2, $3, $4) \
+                 ), binding AS MATERIALIZED ( \
+                    SELECT storage_v2_bind_search_document($5, 0, document.id, 1.0) \
+                      FROM document \
+                 ) \
+                 SELECT document.id FROM document CROSS JOIN binding",
                     &[
-                        &source_id,
-                        &staged.artifact_version_id,
-                        &staged.occurrence_id,
-                        &card.symbol_key,
-                        &card.language,
-                        &card.symbol_kind,
-                        &card.qualified_name,
-                        &card.signature,
-                        &card.documentation,
-                        &card.visibility,
-                        &structure,
-                        &span,
+                        &match mode {
+                            SliceMode::PublicFixture => FIXTURE_SEARCH_PROFILE,
+                            SliceMode::ReleaseCandidate => RELEASE_SEARCH_PROFILE,
+                        },
+                        &node.id,
+                        &text,
+                        &identifiers,
+                        &view.id,
                     ],
                 )
-                .await?;
-            let symbol_occurrence_id: i64 = symbol_occurrence.get(0);
-            let output_sha = normalized_output_sha256(&card)?;
-            let output_sha_bytes: &[u8] = &output_sha;
-            let analysis = client
-                .query_one(
-                    "SELECT status, output_sha256 \
-                       FROM storage_v2_begin_intelligence_analysis($1,$2)",
-                    &[&symbol_occurrence_id, &card.analysis_profile_id],
-                )
-                .await?;
-            if analysis.get::<_, String>("status") == "pending" {
-                client
-                    .execute(
-                        "SELECT storage_v2_finish_intelligence_analysis($1,$2,$3,NULL)",
+                .await?
+                .get(0);
+            for card in cards {
+                let generic = json!({
+                    "name": card.name,
+                    "qualified_name": card.qualified_name,
+                    "symbol_kind": card.symbol_kind,
+                    "language": card.language,
+                });
+                let structure = serde_json::to_value(&card.structure)?;
+                let span = serde_json::to_value(&card.source_span)?;
+                let symbol_occurrence = client
+                    .query_one(
+                        "SELECT id FROM storage_v2_put_symbol_occurrence( \
+                     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
                         &[
-                            &symbol_occurrence_id,
-                            &card.analysis_profile_id,
-                            &output_sha_bytes,
+                            &source_id,
+                            &staged.artifact_version_id,
+                            &staged.occurrence_id,
+                            &card.symbol_key,
+                            &card.language,
+                            &card.symbol_kind,
+                            &card.qualified_name,
+                            &card.signature,
+                            &card.documentation,
+                            &card.visibility,
+                            &structure,
+                            &span,
                         ],
                     )
                     .await?;
-            } else if analysis
-                .get::<_, Option<Vec<u8>>>("output_sha256")
-                .as_deref()
-                != Some(output_sha_bytes)
-            {
-                bail!("complete intelligence analysis output differs from the fixture card");
+                let symbol_occurrence_id: i64 = symbol_occurrence.get(0);
+                let output_sha = normalized_output_sha256(&card)?;
+                let output_sha_bytes: &[u8] = &output_sha;
+                let analysis = client
+                    .query_one(
+                        "SELECT status, output_sha256 \
+                       FROM storage_v2_begin_intelligence_analysis($1,$2)",
+                        &[&symbol_occurrence_id, &card.analysis_profile_id],
+                    )
+                    .await?;
+                if analysis.get::<_, String>("status") == "pending" {
+                    client
+                        .execute(
+                            "SELECT storage_v2_finish_intelligence_analysis($1,$2,$3,NULL)",
+                            &[
+                                &symbol_occurrence_id,
+                                &card.analysis_profile_id,
+                                &output_sha_bytes,
+                            ],
+                        )
+                        .await?;
+                } else if analysis
+                    .get::<_, Option<Vec<u8>>>("output_sha256")
+                    .as_deref()
+                    != Some(output_sha_bytes)
+                {
+                    bail!("complete intelligence analysis output differs from the fixture card");
+                }
+                let domain = serde_json::to_value(&card.domain)?;
+                let provenance = serde_json::to_value(&card.field_provenance)?;
+                client
+                    .execute(
+                        "SELECT storage_v2_put_symbol_card($1,$2,$3,$4,$5,NULL,NULL)",
+                        &[
+                            &symbol_occurrence_id,
+                            &card.analysis_profile_id,
+                            &generic,
+                            &domain,
+                            &provenance,
+                        ],
+                    )
+                    .await?;
+                symbol_count += 1;
             }
-            let domain = serde_json::to_value(&card.domain)?;
-            let provenance = serde_json::to_value(&card.field_provenance)?;
-            client
-                .execute(
-                    "SELECT storage_v2_put_symbol_card($1,$2,$3,$4,$5,NULL,NULL)",
-                    &[
-                        &symbol_occurrence_id,
-                        &card.analysis_profile_id,
-                        &generic,
-                        &domain,
-                        &provenance,
-                    ],
-                )
-                .await?;
-            symbol_count += 1;
-        }
-        for stage in ["graph", "semantic", "rerank"] {
             client
                 .execute(
                     "SELECT storage_v2_put_occurrence_score_component( \
-                     $1,$2,$3,'unavailable',NULL,$4)",
+                    $1, stage, $2, 'unavailable', NULL, $3) \
+                   FROM unnest($4::TEXT[]) AS stage",
                     &[
                         &staged.occurrence_id,
-                        &stage,
-                        &match mode {
-                            SliceMode::PublicFixture => "fixture-unavailable-v1",
-                            SliceMode::ReleaseCandidate => "candidate-unavailable-v1",
-                        },
-                        &json!({
-                            "reason": match mode {
-                                SliceMode::PublicFixture => "fixture-disabled",
-                                SliceMode::ReleaseCandidate => "backend-not-applicable",
-                            }
-                        }),
+                        &score_profile,
+                        &score_evidence,
+                        &score_stages,
                     ],
                 )
                 .await?;
+            measurements.record_stage(ShadowIngestStage::DatabaseStage, database_started.elapsed());
         }
-        measurements.record_stage(ShadowIngestStage::DatabaseStage, database_started.elapsed());
     }
 
     let stabilization_started = Instant::now();

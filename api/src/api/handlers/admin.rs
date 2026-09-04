@@ -130,8 +130,9 @@ pub async fn admin_build_release_candidate(
                 )
                 .await
                 .map_err(|error| {
+                    let error_chain = format!("{error:#}");
                     tracing::error!(
-                        error = ?error,
+                        error = %error_chain,
                         "storage-v2 release-candidate build detail"
                     );
                     AppError::Internal(format!(
