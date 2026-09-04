@@ -19,7 +19,8 @@
     "migrations/038_storage_v2_commit_aware_reuse.sql",
     "migrations/039_storage_v2_unbounded_search_terms.sql",
     "migrations/040_storage_v2_sparse_search_documents.sql",
-    "migrations/041_storage_v2_structural_card_bundle.sql"
+    "migrations/041_storage_v2_structural_card_bundle.sql",
+    "migrations/042_storage_v2_oversized_search_documents.sql"
   ],
   "required_extensions": {
     "vector": "0.8.2"
