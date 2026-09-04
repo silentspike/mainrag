@@ -196,6 +196,7 @@ impl GitPlugin {
                         language: Some(ext.to_string()),
                         last_modified: None,
                         source_path: None,
+                        source_range: None,
                     });
                 }
                 Err(e) => {

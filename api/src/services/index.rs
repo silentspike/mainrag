@@ -589,6 +589,7 @@ impl IndexService {
                 language,
                 last_modified: None,
                 source_path: None,
+                source_range: None,
             };
 
             match self
