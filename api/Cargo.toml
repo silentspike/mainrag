@@ -145,7 +145,7 @@ dashmap = "6"  # Thread-safe HashMap for watch service caches (TODO: migrate to 
 rustc-hash = "2.1"
 
 # MCP Server (Phase 11)
-rmcp = "0.1"
+rmcp = "1.4"
 urlencoding = "2.1"
 
 # Semantic Chunking (Phase 12)
