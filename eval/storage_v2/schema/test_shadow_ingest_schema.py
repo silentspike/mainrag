@@ -87,7 +87,8 @@ INSERT INTO sources(id, name, type, path) VALUES
     (9, 'synthetic-generation-occurrences', 'fixture', 'synthetic-generation-occurrences'),
     (10, 'synthetic-release-candidate', 'fixture', 'synthetic-release-candidate'),
     (11, 'synthetic-commit-witness', 'fixture', 'synthetic-commit-witness'),
-    (12, 'synthetic-long-search-term', 'fixture', 'synthetic-long-search-term');
+    (12, 'synthetic-long-search-term', 'fixture', 'synthetic-long-search-term'),
+    (13, 'synthetic-sparse-and-bundle', 'fixture', 'synthetic-sparse-and-bundle');
 UPDATE sources SET is_test = TRUE WHERE id = 8;
 INSERT INTO fixture_source_access VALUES
     ('{WRITER_ID}', 1, TRUE, TRUE), ('{WRITER_ID}', 3, TRUE, TRUE),
@@ -1310,6 +1311,120 @@ SELECT id FROM storage_v2_put_search_document(
                 "SELECT document_id FROM storage_v2_search_posting "
                 f"WHERE term = ANY(ARRAY['{long_term}']);"
             ),
+        )
+
+    def test_sparse_search_documents_and_unbounded_exact_identifiers(self) -> None:
+        search_text = " \n\t!!! "
+        exact_identifier = "symbol_" + "x" * 12_500
+        node_id, view_id, _ = self.make_projection(search_text)
+        statement = self.admin(
+            f"SELECT id || ':' || token_count FROM storage_v2_put_search_document("
+            f"'native-gin-v1', 'node', {node_id}, E' \\n\\t!!! ', "
+            f"ARRAY['{exact_identifier}']);"
+        )
+        first = self.sql(statement)
+        self.assertEqual(self.sql(statement), first)
+        document_id, token_count = first.split(":")
+        self.assertEqual(token_count, "0")
+        self.assertEqual(
+            self.sql(
+                f"SELECT COUNT(*) FROM storage_v2_search_posting "
+                f"WHERE document_id={document_id};"
+            ),
+            "0",
+        )
+        self.assertEqual(
+            self.sql(
+                f"SELECT octet_length(exact_identifiers[1]) "
+                f"FROM storage_v2_search_document WHERE id={document_id};"
+            ),
+            "12507",
+        )
+        self.assertEqual(
+            self.sql("SELECT to_regclass('idx_storage_v2_search_document_exact') IS NULL;"),
+            "t",
+        )
+        self.sql(
+            self.admin(
+                f"SELECT storage_v2_bind_search_document({view_id}, 0, {document_id}, 1.0);"
+            )
+        )
+        self.assert_sql_fails(
+            self.admin(
+                f"SELECT storage_v2_put_search_document("
+                f"'native-gin-v1', 'node', {node_id}, 'different', "
+                f"ARRAY['{exact_identifier}']);"
+            ),
+            "search-document profile collision",
+        )
+        self.assert_sql_fails(
+            self.admin(
+                f"SELECT storage_v2_put_search_document("
+                f"'native-gin-v1', 'node', {node_id}, E' \\n\\t!!! ', ARRAY['different_1']);"
+            ),
+            "search-document profile collision",
+        )
+
+    def test_structural_card_bundle_is_atomic_and_idempotent(self) -> None:
+        node_id, view_id, digest_hex = self.make_projection("fn bundled() {}")
+        run_id = self.begin(13, "c3" * 32, "d4" * 32)
+        self.stage(
+            run_id,
+            "src/bundled.rs",
+            "fn bundled() {}",
+            node_id,
+            view_id,
+            digest_hex,
+        )
+        artifact_id, occurrence_id = map(
+            int,
+            self.sql(
+                f"SELECT artifact_version_id || ':' || occurrence_id "
+                f"FROM storage_v2_ingest_run_item WHERE run_id={run_id};"
+            ).split(":"),
+        )
+        bundle = self.admin(
+            "SELECT id FROM storage_v2_put_structural_card_bundle("
+            f"13, {artifact_id}, {occurrence_id}, 'rust:bundled:function', "
+            "'rust', 'function', 'crate::bundled', 'fn bundled()', NULL, "
+            "'private', '{\"kind\":\"function\"}'::JSONB, "
+            "'{\"line_start\":1,\"line_end\":1}'::JSONB, 'structural-v1', "
+            f"decode('{'aa' * 32}', 'hex'), '{{\"name\":\"bundled\"}}'::JSONB, "
+            "'{\"layer\":\"unknown\",\"side_effect\":\"unknown\","
+            "\"resource\":\"unknown\",\"delegation_target\":\"unknown\"}'::JSONB, "
+            "'{}'::JSONB);"
+        )
+        symbol_occurrence_id = self.sql(bundle)
+        self.assertEqual(self.sql(bundle), symbol_occurrence_id)
+        self.assertEqual(
+            self.sql(
+                "SELECT COUNT(*) || ':' || MIN(status) || ':' || MIN(attempt_count) "
+                "FROM storage_v2_intelligence_analysis "
+                f"WHERE symbol_occurrence_id={symbol_occurrence_id};"
+            ),
+            "1:complete:1",
+        )
+        self.assertEqual(
+            self.sql(
+                "SELECT COUNT(*) FROM storage_v2_symbol_card "
+                f"WHERE symbol_occurrence_id={symbol_occurrence_id};"
+            ),
+            "1",
+        )
+        self.assert_sql_fails(
+            bundle.replace(
+                "'{\"name\":\"bundled\"}'::JSONB",
+                "'{\"name\":\"different\"}'::JSONB",
+            ),
+            "analysis profile output collision",
+        )
+        self.assertEqual(
+            self.sql(
+                "SELECT COUNT(*) || ':' || MIN(attempt_count) "
+                "FROM storage_v2_intelligence_analysis "
+                f"WHERE symbol_occurrence_id={symbol_occurrence_id};"
+            ),
+            "1:1",
         )
 
     def test_intelligence_provenance_retry_and_round_trip(self) -> None:
