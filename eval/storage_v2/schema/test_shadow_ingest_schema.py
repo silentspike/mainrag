@@ -18,6 +18,9 @@ from eval.storage_v2.harness import TemporaryPostgres
 
 ROOT = Path(__file__).resolve().parents[3]
 SCHEMA = ROOT / "schema.sql"
+UNBOUNDED_SEARCH_TERMS_MIGRATION = (
+    ROOT / "migrations" / "039_storage_v2_unbounded_search_terms.sql"
+)
 ADMIN_ID = "00000000-0000-4000-8000-000000000031"
 WRITER_ID = "00000000-0000-4000-8000-000000000032"
 OTHER_ID = "00000000-0000-4000-8000-000000000033"
@@ -83,7 +86,8 @@ INSERT INTO sources(id, name, type, path) VALUES
     (8, 'synthetic-test-scope', 'fixture', 'synthetic-test-scope'),
     (9, 'synthetic-generation-occurrences', 'fixture', 'synthetic-generation-occurrences'),
     (10, 'synthetic-release-candidate', 'fixture', 'synthetic-release-candidate'),
-    (11, 'synthetic-commit-witness', 'fixture', 'synthetic-commit-witness');
+    (11, 'synthetic-commit-witness', 'fixture', 'synthetic-commit-witness'),
+    (12, 'synthetic-long-search-term', 'fixture', 'synthetic-long-search-term');
 UPDATE sources SET is_test = TRUE WHERE id = 8;
 INSERT INTO fixture_source_access VALUES
     ('{WRITER_ID}', 1, TRUE, TRUE), ('{WRITER_ID}', 3, TRUE, TRUE),
@@ -1240,6 +1244,72 @@ SELECT storage_v2_replace_legacy_hit_mapping(
             ),
             "0",
             "global analysis cache must not be readable through source authority",
+        )
+
+    def test_search_postings_preserve_and_find_multi_kilobyte_terms(self) -> None:
+        long_term = "term_" + "x" * 4096
+        node_id, view_id, digest_hex = self.make_projection(long_term)
+        run_id = self.begin(12, "a1" * 32, "b2" * 32)
+        self.stage(
+            run_id,
+            "long-token.txt",
+            long_term,
+            node_id,
+            view_id,
+            digest_hex,
+        )
+        self.complete_analysis(digest_hex)
+        self.commit(run_id, 1)
+        document_id = int(
+            self.sql(
+                self.admin(
+                    f"""
+SELECT id FROM storage_v2_put_search_document(
+    'native-gin-v1', 'node', {node_id}, '{long_term}', ARRAY[]::TEXT[]
+);
+"""
+                )
+            )
+        )
+        self.sql(
+            self.admin(
+                f"SELECT storage_v2_bind_search_document({view_id}, 0, {document_id}, 1.0);"
+            )
+        )
+        self.file(UNBOUNDED_SEARCH_TERMS_MIGRATION)
+        self.file(UNBOUNDED_SEARCH_TERMS_MIGRATION)
+
+        result = self.exact_search(
+            {"type": "term", "value": long_term}, source_id=12
+        )
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(
+            self.sql(
+                f"SELECT octet_length(term) || ':' || octet_length(term_sha256) "
+                f"FROM storage_v2_search_posting WHERE document_id={document_id};"
+            ),
+            "4101:32",
+        )
+        self.assertEqual(
+            self.sql(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conrelid='storage_v2_search_posting'::REGCLASS AND contype='p';"
+            ),
+            "PRIMARY KEY (document_id, term_sha256)",
+        )
+        self.assertIn(
+            "USING hash (term)",
+            self.sql(
+                "SELECT pg_get_indexdef('idx_storage_v2_search_posting_term'::REGCLASS);"
+            ),
+        )
+        self.assertIn(
+            "idx_storage_v2_search_posting_term",
+            self.sql(
+                "SET enable_seqscan=off; EXPLAIN (COSTS OFF) "
+                "SELECT document_id FROM storage_v2_search_posting "
+                f"WHERE term = ANY(ARRAY['{long_term}']);"
+            ),
         )
 
     def test_intelligence_provenance_retry_and_round_trip(self) -> None:
