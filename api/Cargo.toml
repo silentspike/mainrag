@@ -160,7 +160,7 @@ futures = "0.3"
 
 [dev-dependencies]
 # PDF Test Fixture Generation
-printpdf = "0.7"
+printpdf = "0.9"
 # Benchmarking
 criterion = { version = "0.5", features = ["async_tokio"] }
 # K3-FIX2: Compile-fail tests for RLS compile-time guard
