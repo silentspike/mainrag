@@ -683,28 +683,39 @@ where
 
     let content_started = Instant::now();
     let mut bodies = vec![None; files.len()];
-    let mut missing_indices = Vec::new();
-    for (index, file) in files.iter().enumerate() {
-        let bytes = file.load_verified_bytes().await?;
+    let mut missing_groups: Vec<(usize, Vec<usize>)> = Vec::new();
+    for group in group_body_indices(&files)? {
+        let representative = group[0];
+        let bytes = files[representative].load_verified_bytes().await?;
+        for index in group.iter().skip(1) {
+            files[*index].load_verified_bytes().await?;
+        }
         if let Some(body) =
             find_and_verify_existing_body(client, pack_root, bytes.as_ref(), io_buffer_bytes)
                 .await?
         {
-            bodies[index] = Some(body);
-            measurements.reused_bodies = measurements.reused_bodies.saturating_add(1);
+            for index in &group {
+                bodies[*index] = Some(body.clone());
+            }
+            measurements.reused_bodies = measurements
+                .reused_bodies
+                .saturating_add(u64::try_from(group.len())?);
         } else {
-            missing_indices.push(index);
+            measurements.reused_bodies = measurements
+                .reused_bodies
+                .saturating_add(u64::try_from(group.len().saturating_sub(1))?);
+            missing_groups.push((representative, group));
         }
     }
     let mut result_pack_id = bodies.iter().flatten().find_map(|body| body.pack_id);
     let mut result_pack_stored_bytes = 0_u64;
-    if !missing_indices.is_empty() {
+    if !missing_groups.is_empty() {
         let pack_id = Uuid::new_v4();
         let build_nonce = Uuid::new_v4();
         let mut pack_builder = PackBuilder::new(pack_root, pack_id, build_nonce, io_buffer_bytes)?;
-        let mut entries = Vec::with_capacity(missing_indices.len());
-        for index in &missing_indices {
-            let bytes = files[*index].load_verified_bytes().await?;
+        let mut entries = Vec::with_capacity(missing_groups.len());
+        for (representative, _) in &missing_groups {
+            let bytes = files[*representative].load_verified_bytes().await?;
             entries.push(pack_builder.add_reader(
                 Cursor::new(bytes.as_ref()),
                 BodyCodec::Zstd,
@@ -717,21 +728,22 @@ where
         }
         let storage_key = format!("{pack_id}.pack");
         content_body::create_pack(client, pack_id, &storage_key, build_nonce).await?;
-        for (index, entry) in missing_indices.iter().zip(&entries) {
-            bodies[*index] = Some(
-                content_body::put_packed_body(
-                    client,
-                    pack_id,
-                    i64::try_from(entry.ordinal)?,
-                    &entry.body.digest,
-                    i64::try_from(entry.body.logical_length)?,
-                    i64::try_from(entry.pack_offset)?,
-                    i64::try_from(entry.stored_length)?,
-                    entry.codec.database_name(),
-                    &entry.entry_digest,
-                )
-                .await?,
-            );
+        for ((_, group), entry) in missing_groups.iter().zip(&entries) {
+            let body = content_body::put_packed_body(
+                client,
+                pack_id,
+                i64::try_from(entry.ordinal)?,
+                &entry.body.digest,
+                i64::try_from(entry.body.logical_length)?,
+                i64::try_from(entry.pack_offset)?,
+                i64::try_from(entry.stored_length)?,
+                entry.codec.database_name(),
+                &entry.entry_digest,
+            )
+            .await?;
+            for index in group {
+                bodies[*index] = Some(body.clone());
+            }
         }
         content_body::verify_pack(
             client,
@@ -751,8 +763,8 @@ where
         }
         content_body::publish_pack(client, pack_id).await?;
         let published_reader = published_pack.reader();
-        for (index, entry) in missing_indices.iter().zip(&entries) {
-            let expected_bytes = files[*index].load_verified_bytes().await?;
+        for ((representative, _), entry) in missing_groups.iter().zip(&entries) {
+            let expected_bytes = files[*representative].load_verified_bytes().await?;
             let verified =
                 published_reader.verify_to_staging(entry, None, pack_root, io_buffer_bytes)?;
             let mut reconstructed = Vec::with_capacity(expected_bytes.len());
@@ -778,12 +790,15 @@ where
         .into_iter()
         .collect::<Option<Vec<_>>>()
         .context("shadow content store omitted a fixture body")?;
-    measurements.unique_bytes = missing_indices.iter().try_fold(0_u64, |total, index| {
-        total
-            .checked_add(files[*index].logical_length)
-            .context("unique fixture byte count overflow")
-    })?;
-    measurements.stored_bytes = if missing_indices.is_empty() {
+    measurements.unique_bytes =
+        missing_groups
+            .iter()
+            .try_fold(0_u64, |total, (representative, _)| {
+                total
+                    .checked_add(files[*representative].logical_length)
+                    .context("unique fixture byte count overflow")
+            })?;
+    measurements.stored_bytes = if missing_groups.is_empty() {
         0
     } else {
         result_pack_stored_bytes
@@ -1237,6 +1252,25 @@ async fn canonical_fixture_hash(files: &mut [SliceFile]) -> Result<(String, u64)
             .context("source byte count overflow")?;
     }
     Ok((hex::encode(digest.finalize()), input_bytes))
+}
+
+fn group_body_indices(files: &[SliceFile]) -> Result<Vec<Vec<usize>>> {
+    let mut group_by_identity: BTreeMap<([u8; 32], u64), usize> = BTreeMap::new();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        let identity = (
+            file.content_sha256
+                .context("candidate item omitted its captured content digest")?,
+            file.logical_length,
+        );
+        if let Some(group_index) = group_by_identity.get(&identity).copied() {
+            groups[group_index].push(index);
+        } else {
+            group_by_identity.insert(identity, groups.len());
+            groups.push(vec![index]);
+        }
+    }
+    Ok(groups)
 }
 
 fn validate_slice_layout(files: &[SliceFile]) -> Result<()> {
@@ -2192,6 +2226,33 @@ mod tests {
 
         assert_eq!(actual, hex::encode(expected.finalize()));
         assert_eq!(input_bytes, content.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn duplicate_candidate_bodies_share_one_pack_group() {
+        let mut files = ["same bytes", "different", "same bytes"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, content)| {
+                SliceFile::from(plugins::RawFile {
+                    path: format!("sample-{index}.txt"),
+                    content: content.into(),
+                    size: content.len(),
+                    language: Some("txt".into()),
+                    last_modified: None,
+                    source_path: None,
+                    source_range: None,
+                })
+            })
+            .collect::<Vec<_>>();
+        canonical_fixture_hash(&mut files)
+            .await
+            .expect("capture candidate identities");
+
+        assert_eq!(
+            group_body_indices(&files).unwrap(),
+            vec![vec![0, 2], vec![1]]
+        );
     }
 
     #[test]
