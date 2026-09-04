@@ -59,7 +59,7 @@ def passing_snapshot() -> dict:
             "wal_bytes": 100_000,
             "filesystem_free_bytes": 30_000_000_000,
         },
-        "backend": {"required_index_count": 2, "valid_required_index_count": 2},
+        "backend": {"required_index_count": 1, "valid_required_index_count": 1},
     }
 
 
@@ -162,7 +162,7 @@ class PreflightTests(unittest.TestCase):
     def test_low_space_and_wrong_backend_digest_inputs_block(self) -> None:
         snapshot = passing_snapshot()
         snapshot["capacity"]["filesystem_free_bytes"] = 1
-        snapshot["backend"]["valid_required_index_count"] = 1
+        snapshot["backend"]["valid_required_index_count"] = 0
         result = evaluate(snapshot)
         self.assertEqual(result["checks"]["capacity"], "BLOCKED")
         self.assertEqual(result["checks"]["backend_index"], "BLOCKED")

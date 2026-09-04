@@ -106,12 +106,9 @@ WITH settings AS (
     ) AS value
 ), backend AS (
     SELECT jsonb_build_object(
-        'required_index_count', 2,
+        'required_index_count', 1,
         'valid_required_index_count', count(*) FILTER (
-            WHERE c.relname IN (
-                'idx_storage_v2_search_document_fts',
-                'idx_storage_v2_search_document_exact'
-            )
+            WHERE c.relname = 'idx_storage_v2_search_document_fts'
               AND i.indisvalid
               AND i.indisready
               AND am.amname = 'gin'

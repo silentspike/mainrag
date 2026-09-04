@@ -1043,10 +1043,14 @@ where
                 });
                 let structure = serde_json::to_value(&card.structure)?;
                 let span = serde_json::to_value(&card.source_span)?;
-                let symbol_occurrence = client
+                let output_sha = normalized_output_sha256(&card)?;
+                let output_sha_bytes: &[u8] = &output_sha;
+                let domain = serde_json::to_value(&card.domain)?;
+                let provenance = serde_json::to_value(&card.field_provenance)?;
+                let _symbol_occurrence_id: i64 = client
                     .query_one(
-                        "SELECT id FROM storage_v2_put_symbol_occurrence( \
-                     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+                        "SELECT id FROM storage_v2_put_structural_card_bundle( \
+                     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
                         &[
                             &source_id,
                             &staged.artifact_version_id,
@@ -1060,51 +1064,15 @@ where
                             &card.visibility,
                             &structure,
                             &span,
-                        ],
-                    )
-                    .await?;
-                let symbol_occurrence_id: i64 = symbol_occurrence.get(0);
-                let output_sha = normalized_output_sha256(&card)?;
-                let output_sha_bytes: &[u8] = &output_sha;
-                let analysis = client
-                    .query_one(
-                        "SELECT status, output_sha256 \
-                       FROM storage_v2_begin_intelligence_analysis($1,$2)",
-                        &[&symbol_occurrence_id, &card.analysis_profile_id],
-                    )
-                    .await?;
-                if analysis.get::<_, String>("status") == "pending" {
-                    client
-                        .execute(
-                            "SELECT storage_v2_finish_intelligence_analysis($1,$2,$3,NULL)",
-                            &[
-                                &symbol_occurrence_id,
-                                &card.analysis_profile_id,
-                                &output_sha_bytes,
-                            ],
-                        )
-                        .await?;
-                } else if analysis
-                    .get::<_, Option<Vec<u8>>>("output_sha256")
-                    .as_deref()
-                    != Some(output_sha_bytes)
-                {
-                    bail!("complete intelligence analysis output differs from the fixture card");
-                }
-                let domain = serde_json::to_value(&card.domain)?;
-                let provenance = serde_json::to_value(&card.field_provenance)?;
-                client
-                    .execute(
-                        "SELECT storage_v2_put_symbol_card($1,$2,$3,$4,$5,NULL,NULL)",
-                        &[
-                            &symbol_occurrence_id,
                             &card.analysis_profile_id,
+                            &output_sha_bytes,
                             &generic,
                             &domain,
                             &provenance,
                         ],
                     )
-                    .await?;
+                    .await?
+                    .get(0);
                 symbol_count += 1;
             }
             client
