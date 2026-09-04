@@ -58,7 +58,24 @@ impl FilesystemPlugin {
 
 /// Check if a file is binary by examining its magic bytes
 /// Sprint 5.1: Uses tokio::fs for async I/O (avoids blocking the runtime)
-async fn check_if_binary(path: &Path) -> anyhow::Result<bool> {
+fn valid_utf8_stream_chunk(trailing: &mut Vec<u8>, bytes: &[u8]) -> bool {
+    let mut candidate = std::mem::take(trailing);
+    candidate.extend_from_slice(bytes);
+    match std::str::from_utf8(&candidate) {
+        Ok(_) => true,
+        Err(error) if error.error_len().is_some() => false,
+        Err(error) => {
+            let incomplete = &candidate[error.valid_up_to()..];
+            if incomplete.len() > 3 {
+                return false;
+            }
+            trailing.extend_from_slice(incomplete);
+            true
+        }
+    }
+}
+
+async fn check_if_binary(path: &Path, scan_full_text: bool) -> anyhow::Result<bool> {
     use tokio::io::AsyncReadExt;
 
     let mut file = tokio::fs::File::open(path).await?;
@@ -92,7 +109,25 @@ async fn check_if_binary(path: &Path) -> anyhow::Result<bool> {
         return Ok(true);
     }
 
-    Ok(false)
+    if !scan_full_text {
+        return Ok(false);
+    }
+
+    let mut trailing = Vec::with_capacity(3);
+    if !valid_utf8_stream_chunk(&mut trailing, header) {
+        return Ok(true);
+    }
+    let mut chunk = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok(!trailing.is_empty());
+        }
+        let bytes = &chunk[..read];
+        if bytes.contains(&0) || !valid_utf8_stream_chunk(&mut trailing, bytes) {
+            return Ok(true);
+        }
+    }
 }
 
 #[async_trait]
@@ -227,7 +262,7 @@ impl FilesystemPlugin {
             };
 
             // Binary check
-            match check_if_binary(&path).await {
+            match check_if_binary(&path, !load_content).await {
                 Ok(true) => continue, // Skip binary silently
                 Err(e) => {
                     let err = format!("Failed to check binary status {}: {}", path.display(), e);
@@ -421,6 +456,26 @@ mod tests {
             Some(source_file.as_path())
         );
         assert_eq!(result.files[0].source_range, None);
+    }
+
+    #[tokio::test]
+    async fn storage_v2_discovery_skips_nul_bytes_beyond_the_header_probe() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-storage-v2-fs-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&directory.0).expect("create test directory");
+        let source_file = directory.0.join("late-nul.txt");
+        let mut content = vec![b'a'; 1024];
+        content[900] = 0;
+        std::fs::write(&source_file, content).expect("write binary-looking source");
+
+        let result = FilesystemPlugin::new()
+            .sync_for_storage_v2(directory.0.to_str().expect("UTF-8 test path"))
+            .await
+            .expect("discover storage-v2 source");
+
+        assert!(result.errors.is_empty());
+        assert!(result.files.is_empty());
     }
 
     #[tokio::test]

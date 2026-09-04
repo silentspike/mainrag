@@ -122,29 +122,79 @@ pub fn generic_structural_cards(
     parsed: &ParseResult,
 ) -> Result<Vec<StableStructuralCard>> {
     let mut cards = Vec::with_capacity(parsed.symbols.len());
-    let mut identity_counts = BTreeMap::<String, usize>::new();
+    let mut identity_groups = BTreeMap::<String, Vec<&ExtractedSymbol>>::new();
     for symbol in &parsed.symbols {
-        *identity_counts
+        identity_groups
             .entry(stable_symbol_key(item_key, symbol)?)
-            .or_default() += 1;
+            .or_default()
+            .push(symbol);
     }
-    let mut seen = BTreeMap::<String, String>::new();
-    for symbol in &parsed.symbols {
-        let base_key = stable_symbol_key(item_key, symbol)?;
-        let discriminator = if identity_counts[&base_key] > 1 {
-            Some(normalized_signature(symbol)?)
-        } else {
-            None
-        };
-        let key = stable_symbol_key_with_discriminator(item_key, symbol, discriminator.as_deref())?;
-        if let Some(previous) = seen.insert(key.clone(), discriminator.clone().unwrap_or_default())
-        {
-            bail!("parser output has duplicate stable symbol identity: {previous}");
+
+    for symbols in identity_groups.into_values() {
+        if let [symbol] = symbols.as_slice() {
+            let key = stable_symbol_key(item_key, symbol)?;
+            cards.push(generic_structural_card_with_key(item_key, symbol, key)?);
+            continue;
         }
-        cards.push(generic_structural_card_with_key(item_key, symbol, key)?);
+
+        let mut signature_groups = BTreeMap::<String, Vec<&ExtractedSymbol>>::new();
+        for symbol in symbols {
+            signature_groups
+                .entry(normalized_signature(symbol)?)
+                .or_default()
+                .push(symbol);
+        }
+        for (signature, mut variants) in signature_groups {
+            variants.sort_by(|left, right| symbol_source_order(left, right));
+            variants.dedup_by(|left, right| symbols_equivalent(left, right));
+            let needs_occurrence = variants.len() > 1;
+            for (ordinal, symbol) in variants.into_iter().enumerate() {
+                let discriminator = if needs_occurrence {
+                    format!("{signature}\0occurrence:{ordinal}")
+                } else {
+                    signature.clone()
+                };
+                let key =
+                    stable_symbol_key_with_discriminator(item_key, symbol, Some(&discriminator))?;
+                cards.push(generic_structural_card_with_key(item_key, symbol, key)?);
+            }
+        }
     }
     cards.sort_by(|left, right| left.symbol_key.cmp(&right.symbol_key));
     Ok(cards)
+}
+
+fn symbol_source_order(left: &ExtractedSymbol, right: &ExtractedSymbol) -> std::cmp::Ordering {
+    left.line_start
+        .cmp(&right.line_start)
+        .then_with(|| left.column_start.cmp(&right.column_start))
+        .then_with(|| left.line_end.cmp(&right.line_end))
+        .then_with(|| left.column_end.cmp(&right.column_end))
+        .then_with(|| left.name.cmp(&right.name))
+        .then_with(|| left.qualified_name.cmp(&right.qualified_name))
+        .then_with(|| {
+            left.symbol_type
+                .to_string()
+                .cmp(&right.symbol_type.to_string())
+        })
+        .then_with(|| left.language.cmp(&right.language))
+        .then_with(|| left.signature.cmp(&right.signature))
+        .then_with(|| left.doc_comment.cmp(&right.doc_comment))
+        .then_with(|| left.visibility.cmp(&right.visibility))
+}
+
+fn symbols_equivalent(left: &ExtractedSymbol, right: &ExtractedSymbol) -> bool {
+    left.name == right.name
+        && left.qualified_name == right.qualified_name
+        && left.symbol_type == right.symbol_type
+        && left.line_start == right.line_start
+        && left.line_end == right.line_end
+        && left.column_start == right.column_start
+        && left.column_end == right.column_end
+        && left.signature == right.signature
+        && left.doc_comment == right.doc_comment
+        && left.visibility == right.visibility
+        && left.language == right.language
 }
 
 pub fn generic_structural_card(
@@ -575,14 +625,63 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_stable_identity_is_rejected() {
+    fn byte_identical_parser_duplicates_are_coalesced() {
         let duplicate = symbol("alpha", Some("crate::alpha"));
         let parsed = ParseResult {
             symbols: vec![duplicate.clone(), duplicate],
             calls: vec![],
             language: "rust".to_string(),
         };
-        assert!(generic_structural_cards("src/lib.rs", &parsed).is_err());
+        assert_eq!(
+            generic_structural_cards("src/lib.rs", &parsed)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn repeated_identical_signatures_use_stable_source_order() {
+        let mut first = symbol("next", Some("Iterator::next"));
+        first.line_start = 10;
+        first.line_end = 12;
+        let mut second = first.clone();
+        second.line_start = 40;
+        second.line_end = 42;
+        let forward = ParseResult {
+            symbols: vec![first.clone(), second.clone()],
+            calls: vec![],
+            language: "rust".to_string(),
+        };
+        let reversed = ParseResult {
+            symbols: vec![second.clone(), first.clone()],
+            calls: vec![],
+            language: "rust".to_string(),
+        };
+        let mut shifted_first = first;
+        shifted_first.line_start += 100;
+        shifted_first.line_end += 100;
+        let mut shifted_second = second;
+        shifted_second.line_start += 100;
+        shifted_second.line_end += 100;
+        let shifted = ParseResult {
+            symbols: vec![shifted_first, shifted_second],
+            calls: vec![],
+            language: "rust".to_string(),
+        };
+
+        let keys = |parsed: &ParseResult| {
+            generic_structural_cards("src/lib.rs", parsed)
+                .unwrap()
+                .into_iter()
+                .map(|card| card.symbol_key)
+                .collect::<Vec<_>>()
+        };
+        let forward_keys = keys(&forward);
+        assert_eq!(forward_keys.len(), 2);
+        assert_ne!(forward_keys[0], forward_keys[1]);
+        assert_eq!(forward_keys, keys(&reversed));
+        assert_eq!(forward_keys, keys(&shifted));
     }
 
     #[test]
