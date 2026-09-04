@@ -571,3 +571,4 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag;
 \ir migrations/036_storage_v2_release_candidates.sql
 \ir migrations/037_storage_v2_release_candidate_replacement.sql
 \ir migrations/038_storage_v2_commit_aware_reuse.sql
+\ir migrations/039_storage_v2_unbounded_search_terms.sql
