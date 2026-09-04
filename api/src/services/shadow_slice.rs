@@ -586,7 +586,7 @@ where
     };
     let idempotency_key = hex::encode(Sha256::digest(
         format!(
-            "{idempotency_domain}:{source_id}:{predecessor_generation_id}:{source_watermark_sha256}:{adapter_profile}"
+            "{idempotency_domain}:{source_id}:{predecessor_generation_id}:{source_watermark_sha256}:{adapter_profile}:{commit_sha}"
         )
         .as_bytes(),
     ));

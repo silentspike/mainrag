@@ -82,7 +82,8 @@ INSERT INTO sources(id, name, type, path) VALUES
     (7, 'synthetic-retrieval-denied', 'fixture', 'synthetic-retrieval-denied'),
     (8, 'synthetic-test-scope', 'fixture', 'synthetic-test-scope'),
     (9, 'synthetic-generation-occurrences', 'fixture', 'synthetic-generation-occurrences'),
-    (10, 'synthetic-release-candidate', 'fixture', 'synthetic-release-candidate');
+    (10, 'synthetic-release-candidate', 'fixture', 'synthetic-release-candidate'),
+    (11, 'synthetic-commit-witness', 'fixture', 'synthetic-commit-witness');
 UPDATE sources SET is_test = TRUE WHERE id = 8;
 INSERT INTO fixture_source_access VALUES
     ('{WRITER_ID}', 1, TRUE, TRUE), ('{WRITER_ID}', 3, TRUE, TRUE),
@@ -192,7 +193,12 @@ SELECT node_id || ':' || id || ':' || encode(digest, 'hex') FROM view_row;
         *,
         force: bool = False,
         user_id: str = ADMIN_ID,
+        commit_sha: str | None = None,
     ) -> int:
+        witness = {"fixture": True}
+        if commit_sha is not None:
+            witness["commit_sha"] = commit_sha
+        witness_json = json.dumps(witness, sort_keys=True).replace("'", "''")
         return int(
             self.sql(
                 self.actor(
@@ -200,11 +206,37 @@ SELECT node_id || ':' || id || ':' || encode(digest, 'hex') FROM view_row;
                     f"""
 SELECT (storage_v2_begin_shadow_ingest(
     {source_id}, '{key}', '{manifest}', 'fixture-adapter-v1',
-    'synthetic-snapshot', '{{"fixture":true}}'::JSONB, {str(force).lower()}
+    'synthetic-snapshot', '{witness_json}'::JSONB, {str(force).lower()}
 )).id;
 """
                 )
             )
+        )
+
+    def test_semantic_noop_reuse_requires_the_same_commit_witness(self) -> None:
+        manifest = "91" * 32
+        first_commit = "92" * 20
+        second_commit = "93" * 20
+        run_one = self.begin(11, "94" * 32, manifest, commit_sha=first_commit)
+        self.commit(run_one, 0)
+        self.assertEqual(
+            self.begin(11, "95" * 32, manifest, commit_sha=first_commit),
+            run_one,
+        )
+        self.assert_sql_fails(
+            self.admin(
+                "SELECT storage_v2_begin_shadow_ingest("
+                f"11, '{'94' * 32}', '{manifest}', 'fixture-adapter-v1', "
+                "'synthetic-snapshot', "
+                f"'{{\"commit_sha\":\"{second_commit}\"}}'::JSONB, FALSE);"
+            ),
+            "ingest idempotency key collision",
+        )
+        run_two = self.begin(11, "96" * 32, manifest, commit_sha=second_commit)
+        self.assertNotEqual(run_two, run_one)
+        self.assertEqual(
+            self.sql("SELECT COUNT(*) FROM source_generation WHERE source_id = 11"),
+            "2",
         )
 
     def stage(
