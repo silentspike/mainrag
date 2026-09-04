@@ -790,6 +790,94 @@ SELECT storage_v2_verify_generation({generation_id}, '{'31' * 32}');
             "release_candidate:none",
         )
 
+        replacement_node_id, replacement_view_id, replacement_digest = (
+            self.make_projection("replacement candidate evidence")
+        )
+        replacement_watermark = "46" * 32
+        replacement_run_id = self.begin(
+            10,
+            "47" * 32,
+            replacement_watermark,
+        )
+        self.stage(
+            replacement_run_id,
+            "candidate.txt",
+            "replacement candidate evidence",
+            replacement_node_id,
+            replacement_view_id,
+            replacement_digest,
+        )
+        self.complete_analysis(replacement_digest)
+        self.commit(replacement_run_id, 1)
+        replacement_generation_id = int(
+            self.sql(
+                "SELECT generation_id FROM storage_v2_ingest_run "
+                f"WHERE id={replacement_run_id};"
+            )
+        )
+        self.sql(
+            self.admin(
+                "SELECT storage_v2_verify_generation("
+                f"{replacement_generation_id}, '{'48' * 32}');"
+            )
+        )
+        replacement_dual_read_id = "00000000-0000-4000-8000-000000000040"
+        self.sql(
+            self.admin(
+                "SELECT storage_v2_record_dual_read_evidence("
+                f"'{replacement_dual_read_id}', 10, {replacement_generation_id}, "
+                f"'{'49' * 20}', '{replacement_watermark}', '{'50' * 32}', "
+                f"'{dual_read}'::JSONB);"
+            )
+        )
+        replacement_evidence_id = "00000000-0000-4000-8000-000000000041"
+        self.assert_sql_fails(
+            self.admin(
+                "SELECT storage_v2_replace_release_candidate("
+                f"'{replacement_evidence_id}', 10, {replacement_generation_id}, "
+                f"'{'49' * 20}', '{replacement_watermark}', "
+                "'fixture-adapter-v1', 'fixture-analysis-v1', "
+                f"'fixture-search-v1', '{incomplete}'::JSONB);"
+            ),
+            "all release-candidate qualification checks must pass",
+        )
+        self.assertEqual(
+            self.sql(
+                "SELECT string_agg(generation_seq || ':' || status::TEXT, ',' "
+                "ORDER BY generation_seq) FROM source_generation WHERE source_id=10;"
+            ),
+            "1:release_candidate,2:verified",
+            "a failed replacement must roll back the candidate demotion",
+        )
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    "SELECT (storage_v2_replace_release_candidate("
+                    f"'{replacement_evidence_id}', 10, {replacement_generation_id}, "
+                    f"'{'49' * 20}', '{replacement_watermark}', "
+                    "'fixture-adapter-v1', 'fixture-analysis-v1', "
+                    f"'fixture-search-v1', '{manifest}'::JSONB)).id;"
+                )
+            ),
+            replacement_evidence_id,
+        )
+        self.assertEqual(
+            self.sql(
+                "SELECT string_agg(generation_seq || ':' || status::TEXT, ',' "
+                "ORDER BY generation_seq) || ':' || "
+                "COALESCE((SELECT active_generation_id::TEXT FROM logical_source "
+                "WHERE id=10), 'none') FROM source_generation WHERE source_id=10;"
+            ),
+            "1:verified,2:release_candidate:none",
+        )
+        self.assertEqual(
+            self.sql(
+                "SELECT COUNT(*) FROM source_generation "
+                "WHERE source_id=10 AND status='release_candidate';"
+            ),
+            "1",
+        )
+
     def test_authorized_writer_can_use_source_local_shadow_functions(self) -> None:
         node_id, view_id, digest_hex = self.make_projection("writer-owned")
         run_id = self.begin(3, "d" * 64, "e" * 64, user_id=WRITER_ID)
