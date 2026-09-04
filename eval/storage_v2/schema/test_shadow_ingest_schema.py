@@ -18,6 +18,9 @@ from eval.storage_v2.harness import TemporaryPostgres
 
 ROOT = Path(__file__).resolve().parents[3]
 SCHEMA = ROOT / "schema.sql"
+OVERSIZED_SEARCH_MIGRATION = (
+    ROOT / "migrations" / "042_storage_v2_oversized_search_documents.sql"
+)
 UNBOUNDED_SEARCH_TERMS_MIGRATION = (
     ROOT / "migrations" / "039_storage_v2_unbounded_search_terms.sql"
 )
@@ -88,7 +91,8 @@ INSERT INTO sources(id, name, type, path) VALUES
     (10, 'synthetic-release-candidate', 'fixture', 'synthetic-release-candidate'),
     (11, 'synthetic-commit-witness', 'fixture', 'synthetic-commit-witness'),
     (12, 'synthetic-long-search-term', 'fixture', 'synthetic-long-search-term'),
-    (13, 'synthetic-sparse-and-bundle', 'fixture', 'synthetic-sparse-and-bundle');
+    (13, 'synthetic-sparse-and-bundle', 'fixture', 'synthetic-sparse-and-bundle'),
+    (14, 'synthetic-oversized-search', 'fixture', 'synthetic-oversized-search');
 UPDATE sources SET is_test = TRUE WHERE id = 8;
 INSERT INTO fixture_source_access VALUES
     ('{WRITER_ID}', 1, TRUE, TRUE), ('{WRITER_ID}', 3, TRUE, TRUE),
@@ -1363,6 +1367,73 @@ SELECT id FROM storage_v2_put_search_document(
                 f"'native-gin-v1', 'node', {node_id}, E' \\n\\t!!! ', ARRAY['different_1']);"
             ),
             "search-document profile collision",
+        )
+
+    def test_oversized_search_document_keeps_terms_and_tail_phrases(self) -> None:
+        node_id, view_id, digest_hex = self.make_projection("oversized search component")
+        run_id = self.begin(14, "e5" * 32, "f6" * 32)
+        self.stage(
+            run_id,
+            "oversized.txt",
+            "oversized search component",
+            node_id,
+            view_id,
+            digest_hex,
+        )
+        self.complete_analysis(digest_hex)
+        self.commit(run_id, 1)
+        document_id = int(
+            self.sql(
+                self.admin(
+                    f"""
+SELECT id FROM storage_v2_put_search_document(
+    'native-gin-v1', 'node', {node_id},
+    (SELECT string_agg('word' || value, ' ' ORDER BY value)
+              || ' tail phrase sentinel'
+       FROM generate_series(1, 100000) AS value),
+    ARRAY[]::TEXT[]
+);
+"""
+                )
+            )
+        )
+        self.sql(
+            self.admin(
+                f"SELECT storage_v2_bind_search_document({view_id}, 0, {document_id}, 1.0);"
+            )
+        )
+        self.assertEqual(
+            self.sql(
+                f"SELECT fts_simple IS NULL FROM storage_v2_search_document "
+                f"WHERE id={document_id};"
+            ),
+            "t",
+        )
+        self.assertEqual(
+            self.exact_search(
+                {"type": "term", "value": "word99999"}, source_id=14
+            )["total"],
+            1,
+        )
+        self.assertEqual(
+            self.exact_search(
+                {"type": "phrase", "value": "tail phrase sentinel"}, source_id=14
+            )["total"],
+            1,
+        )
+        self.assertEqual(
+            self.exact_search(
+                {"type": "phrase", "value": "sentinel phrase tail"}, source_id=14
+            )["total"],
+            0,
+        )
+        self.file(OVERSIZED_SEARCH_MIGRATION)
+        self.file(OVERSIZED_SEARCH_MIGRATION)
+        self.assertEqual(
+            self.exact_search(
+                {"type": "phrase", "value": "tail phrase sentinel"}, source_id=14
+            )["total"],
+            1,
         )
 
     def test_structural_card_bundle_is_atomic_and_idempotent(self) -> None:
