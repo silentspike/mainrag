@@ -14,7 +14,9 @@
     "migrations/033_storage_v2_intelligence.sql",
     "migrations/034_storage_v2_retrieval.sql",
     "migrations/035_storage_v2_shadow_slice.sql",
-    "migrations/036_storage_v2_release_candidates.sql"
+    "migrations/036_storage_v2_release_candidates.sql",
+    "migrations/037_storage_v2_release_candidate_replacement.sql",
+    "migrations/038_storage_v2_commit_aware_reuse.sql"
   ],
   "required_extensions": {
     "vector": "0.8.2"
