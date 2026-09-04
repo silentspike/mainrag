@@ -38,7 +38,7 @@ indicatif = { version = "0.17", features = ["rayon"] }
 anyhow = "1.0"
 
 # Password prompt (Sprint 4.5: secure terminal echo masking)
-rpassword = "5"
+rpassword = "7"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
