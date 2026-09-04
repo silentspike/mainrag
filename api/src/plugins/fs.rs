@@ -5,16 +5,20 @@
 
 use async_trait::async_trait;
 use ignore::WalkBuilder;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::task::spawn_blocking;
 use tracing::warn;
 
-use super::{RawFile, SourcePlugin, SyncResult};
+use super::{RawFile, RawFileRange, SourcePlugin, SyncResult};
 
-/// Maximum file size to index — configurable via MAX_FILE_SIZE_MB env var.
-/// Files larger than this are skipped entirely. Default: 50 MB.
-/// For 100GB+ files, a streaming pipeline (not yet implemented) would be needed.
+const STORAGE_V2_FRAGMENT_BYTES: u64 = 1024 * 1024;
+const STORAGE_V2_NEWLINE_WINDOW_BYTES: u64 = 64 * 1024;
+
+/// Maximum file size for the legacy eager/streaming sync path, configurable via
+/// MAX_FILE_SIZE_MB. Storage v2 applies its separate bounded fragmentation
+/// contract instead of dropping oversized text. Default: 50 MB.
 fn max_file_size() -> u64 {
     std::env::var("MAX_FILE_SIZE_MB")
         .ok()
@@ -209,7 +213,9 @@ impl FilesystemPlugin {
                 tracing::warn!("JSONL file passed extension check: {}", path.display());
             }
 
-            // Size check
+            // Metadata and binary checks happen before the size policy. A
+            // storage-v2 scan decomposes large accepted text files instead of
+            // dropping bytes or materializing the complete file in memory.
             let metadata = match path.metadata() {
                 Ok(m) => m,
                 Err(e) => {
@@ -219,20 +225,6 @@ impl FilesystemPlugin {
                     continue;
                 }
             };
-
-            let file_size = metadata.len();
-            let max_size = max_file_size();
-            if file_size > max_size {
-                let err = format!(
-                    "File too large ({}MB > {}MB limit): {} — adjust MAX_FILE_SIZE_MB to increase",
-                    file_size / (1024 * 1024),
-                    max_size / (1024 * 1024),
-                    path.display()
-                );
-                warn!("{}", err);
-                errors.push(err);
-                continue;
-            }
 
             // Binary check
             match check_if_binary(&path).await {
@@ -246,6 +238,20 @@ impl FilesystemPlugin {
                 Ok(false) => {} // Continue processing
             }
 
+            let file_size = metadata.len();
+            let max_size = max_file_size();
+            if load_content && file_size > max_size {
+                let err = format!(
+                    "File too large ({}MB > {}MB limit): {} — adjust MAX_FILE_SIZE_MB to increase",
+                    file_size / (1024 * 1024),
+                    max_size / (1024 * 1024),
+                    path.display()
+                );
+                warn!("{}", err);
+                errors.push(err);
+                continue;
+            }
+
             let relative_path = path
                 .strip_prefix(root_path)
                 .unwrap_or(&path)
@@ -253,14 +259,29 @@ impl FilesystemPlugin {
                 .to_string();
 
             if !load_content {
-                files.push(RawFile {
-                    path: relative_path,
-                    content: String::new(),
-                    size: file_size as usize,
-                    language: Some(ext),
-                    last_modified: None,
-                    source_path: Some(path),
-                });
+                if file_size > STORAGE_V2_FRAGMENT_BYTES {
+                    for source_range in storage_v2_fragment_ranges(&path, file_size)? {
+                        files.push(RawFile {
+                            path: relative_path.clone(),
+                            content: String::new(),
+                            size: usize::try_from(source_range.end - source_range.start)?,
+                            language: Some(ext.clone()),
+                            last_modified: None,
+                            source_path: Some(path.clone()),
+                            source_range: Some(source_range),
+                        });
+                    }
+                } else {
+                    files.push(RawFile {
+                        path: relative_path,
+                        content: String::new(),
+                        size: file_size as usize,
+                        language: Some(ext),
+                        last_modified: None,
+                        source_path: Some(path),
+                        source_range: None,
+                    });
+                }
                 continue;
             }
 
@@ -280,6 +301,7 @@ impl FilesystemPlugin {
                     language: Some(ext),
                     last_modified: None,
                     source_path: Some(path.clone()),
+                    source_range: None,
                 });
                 continue;
             }
@@ -303,6 +325,7 @@ impl FilesystemPlugin {
                         language: Some(ext),
                         last_modified: None,
                         source_path: None,
+                        source_range: None,
                     });
                 }
                 Err(e) => {
@@ -319,6 +342,48 @@ impl FilesystemPlugin {
 
         Ok(())
     }
+}
+
+fn storage_v2_fragment_ranges(path: &Path, length: u64) -> anyhow::Result<Vec<RawFileRange>> {
+    if length == 0 {
+        return Ok(vec![RawFileRange { start: 0, end: 0 }]);
+    }
+    let mut file = std::fs::File::open(path)?;
+    let mut ranges = Vec::new();
+    let mut start = 0_u64;
+    while start < length {
+        let target = start.saturating_add(STORAGE_V2_FRAGMENT_BYTES).min(length);
+        let end = if target == length {
+            length
+        } else {
+            let newline_window_start = target
+                .saturating_sub(STORAGE_V2_NEWLINE_WINDOW_BYTES)
+                .max(start);
+            file.seek(SeekFrom::Start(newline_window_start))?;
+            let mut newline_window = vec![0_u8; usize::try_from(target - newline_window_start)?];
+            file.read_exact(&mut newline_window)?;
+            if let Some(offset) = newline_window.iter().rposition(|byte| *byte == b'\n') {
+                newline_window_start + u64::try_from(offset)? + 1
+            } else {
+                file.seek(SeekFrom::Start(target))?;
+                let mut boundary = [0_u8; 4];
+                let read = file.read(&mut boundary)?;
+                let offset = boundary[..read]
+                    .iter()
+                    .position(|byte| byte & 0b1100_0000 != 0b1000_0000)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("large text file has no valid UTF-8 fragment boundary")
+                    })?;
+                target + u64::try_from(offset)?
+            }
+        };
+        if end <= start {
+            anyhow::bail!("large text file produced an invalid fragment range");
+        }
+        ranges.push(RawFileRange { start, end });
+        start = end;
+    }
+    Ok(ranges)
 }
 
 #[cfg(test)]
@@ -355,5 +420,72 @@ mod tests {
             result.files[0].source_path.as_deref(),
             Some(source_file.as_path())
         );
+        assert_eq!(result.files[0].source_range, None);
+    }
+
+    #[tokio::test]
+    async fn storage_v2_discovery_fragments_oversized_text_without_dropping_bytes() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-storage-v2-fs-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&directory.0).expect("create test directory");
+        let source_file = directory.0.join("large.jsonl");
+        let mut content = vec![b'a'; STORAGE_V2_FRAGMENT_BYTES as usize - 17];
+        content.extend_from_slice(" €\n".as_bytes());
+        content.extend_from_slice(&[b'b'; 100]);
+        std::fs::write(&source_file, &content).expect("write test source");
+        let mut files = Vec::new();
+        let mut errors = Vec::new();
+
+        FilesystemPlugin::new()
+            .collect_files(&directory.0, &directory.0, &mut files, &mut errors, false)
+            .await
+            .expect("discover fragmented storage-v2 source");
+
+        assert!(errors.is_empty());
+        assert_eq!(files.len(), 2);
+        assert!(files
+            .iter()
+            .all(|file| file.source_path.as_deref() == Some(source_file.as_path())));
+        let ranges = files
+            .iter()
+            .map(|file| file.source_range.expect("fragment range"))
+            .collect::<Vec<_>>();
+        assert_eq!(ranges[0].start, 0);
+        assert_eq!(ranges[1].start, ranges[0].end);
+        assert_eq!(ranges[1].end, content.len() as u64);
+        assert_eq!(content[ranges[0].end as usize - 1], b'\n');
+        assert_eq!(
+            files.iter().map(|file| file.size).sum::<usize>(),
+            content.len()
+        );
+    }
+
+    #[test]
+    fn large_file_fragment_ranges_are_contiguous_and_utf8_aligned() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-storage-v2-range-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&directory.0).expect("create test directory");
+        let source_file = directory.0.join("large.txt");
+        let mut content = vec![b'a'; STORAGE_V2_FRAGMENT_BYTES as usize - 1];
+        content.extend_from_slice("€".as_bytes());
+        content.extend_from_slice(&vec![b'b'; STORAGE_V2_FRAGMENT_BYTES as usize]);
+        std::fs::write(&source_file, &content).expect("write fragmented source");
+
+        let ranges = storage_v2_fragment_ranges(&source_file, content.len() as u64)
+            .expect("derive fragment ranges");
+
+        assert_eq!(ranges.first().map(|range| range.start), Some(0));
+        assert_eq!(
+            ranges.last().map(|range| range.end),
+            Some(content.len() as u64)
+        );
+        assert!(ranges.windows(2).all(|pair| pair[0].end == pair[1].start));
+        for range in ranges {
+            assert!(range.end - range.start <= STORAGE_V2_FRAGMENT_BYTES + 3);
+            std::str::from_utf8(&content[range.start as usize..range.end as usize])
+                .expect("each range is valid UTF-8");
+        }
     }
 }

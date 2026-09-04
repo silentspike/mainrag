@@ -300,6 +300,7 @@ fn chunks_to_raw_files(
                 language: Some("markdown".to_string()),
                 last_modified: None,
                 source_path: None,
+                source_range: None,
             }
         })
         .collect()

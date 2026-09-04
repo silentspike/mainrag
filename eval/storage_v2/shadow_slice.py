@@ -64,6 +64,8 @@ TELEMETRY_COUNTERS = {
     "io_buffer_bytes",
     "peak_buffer_bytes",
     "writer_concurrency",
+    "fragments_created",
+    "largest_item_bytes",
 }
 
 
@@ -155,6 +157,12 @@ def validate_fixture_ingest_result(result: Any) -> None:
     assert isinstance(counters, dict)
     if counters["io_buffer_bytes"] <= 0:
         raise RuntimeError("shadow ingest result has no configured I/O buffer")
+    if (
+        counters["fragments_created"] != 0
+        or counters["largest_item_bytes"] <= 0
+        or counters["largest_item_bytes"] > counters["eingang_bytes"]
+    ):
+        raise RuntimeError("public fixture reports invalid source item boundaries")
     reused_generation = result.get("reused_generation")
     if not isinstance(reused_generation, bool):
         raise RuntimeError("shadow ingest result has no generation reuse decision")

@@ -309,6 +309,7 @@ impl SourcePlugin for ExportPlugin {
                     language: Some("markdown".to_string()),
                     last_modified: None,
                     source_path: None,
+                    source_range: None,
                 }
             })
             .collect();

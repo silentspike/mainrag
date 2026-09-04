@@ -172,6 +172,7 @@ impl SourcePlugin for PdfPlugin {
                 language: Some("text".to_string()), // Plain text, not markdown
                 last_modified: None,
                 source_path: None,
+                source_range: None,
             }],
             errors: vec![],
         })

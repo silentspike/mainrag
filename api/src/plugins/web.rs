@@ -452,6 +452,7 @@ impl SourcePlugin for WebPlugin {
                                     language: Some("html".to_string()),
                                     last_modified: None,
                                     source_path: None,
+                                    source_range: None,
                                 });
                             }
 

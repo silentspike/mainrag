@@ -157,13 +157,20 @@ qualification envelope. Raw checkpoints, seeds, result sets, and evidence stay
 outside Git with mode `0600`.
 
 Filesystem discovery for this command returns metadata and file paths rather
-than retaining the entire corpus. The builder reads files serially, rechecks
-each content hash after the source watermark is captured, rediscovers and
-rehashes the complete source immediately before sealing, and reports a
-conservative source/pack buffer peak in phase telemetry. Changed, added, or
-removed content aborts the candidate; it is never accepted as a mixed snapshot.
-The production watermark also binds the registered source type/path and adapter
-profile without publishing those protected values.
+than retaining the entire corpus. Files above one MiB are split into
+deterministic, contiguous, UTF-8-aligned byte ranges of no more than one MiB
+plus three UTF-8 continuation bytes. Where possible, each boundary moves
+backward within a bounded 64-KiB window to retain complete lines. The ranges
+preserve the original path and must cover the physical file
+exactly once; any gap, overlap, truncation, or length drift aborts the build.
+The builder reads items serially, rechecks each content hash after the source
+watermark is captured, rediscovers and rehashes the complete source immediately
+before sealing, and reports the fragment count, largest item, and conservative
+source/pack buffer peak in phase telemetry. Changed, added, or removed content
+aborts the candidate; it is never accepted as a mixed snapshot. The production
+watermark also binds the registered source type/path and adapter profile,
+including the fragment-size contract, without publishing those protected
+values.
 
 Current and explicitly named generation reads must then be compared through the
 supported APIs. The evidence endpoint binds the source's recorded production or
