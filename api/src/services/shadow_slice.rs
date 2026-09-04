@@ -372,7 +372,7 @@ where
         .query_one(
             "SELECT evidence.id, evidence.generation_id, \
                     encode(evidence.manifest_sha256, 'hex') AS manifest_sha256 \
-               FROM storage_v2_qualify_release_candidate( \
+               FROM storage_v2_replace_release_candidate( \
                     $1,$2,$3,$4,$5,$6,$7,$8,$9) evidence",
             &[
                 &input.evidence_id,
