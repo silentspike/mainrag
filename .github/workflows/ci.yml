@@ -80,6 +80,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Test telemetry integrity presentation
+        run: node --test eval/storage_v2/telemetry_viewer.test.cjs
       - name: Verify every relative link in README resolves
         run: |
           python3 - <<'PY'
