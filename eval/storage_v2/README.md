@@ -131,6 +131,21 @@ The ingest response embeds the existing `ShadowIngestMeasurements` phase keys
 collector can compare the full read/dedup/write pipeline across repeated and
 delta runs. The harness never stores the token or the local fixture path.
 
+The dependency-free [integrity presentation policy](../../docs/telemetry-integrity.js)
+supports private viewers without publishing their HTML, labels, or measurements.
+`candidate_state` metrics are pinned point-in-time measurements: zero binding
+errors remain visible, missing observations remain missing, and distinct counts
+are displayed without compact abbreviations. `query_client_ms` includes
+connection startup and the complete source-state SQL query; it is not search
+API latency or a candidate qualification result. Viewers must honor `showZero`
+and `pinned` before applying zero/counter/change filters, and use
+`formatExactCount` for `n_exact` units. Failed runs remain excluded by the
+collector/aggregator, not converted into zero-valued successful measurements.
+
+Run the public presentation regressions with
+`node --test eval/storage_v2/telemetry_viewer.test.cjs`. The required docs check
+also runs them without private assets or production access.
+
 Warm p50/p95/p99 may differ by at most 50% between the two local subprocess
 runs. This deliberately broad tolerance detects large regressions without
 pretending that scheduler and process-start noise are deterministic. Result
