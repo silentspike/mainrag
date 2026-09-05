@@ -162,9 +162,31 @@ degradation, expected-hit presence, missing path counts, and ordered identity
 hashes, along with the checkpoint and verification needed for diagnosis. Empty
 query sets fail. No dual-read or qualification request is submitted on failure;
 an existing output is never overwritten. Use a new output path for each retry
-and keep failed attempts out of successful performance aggregates. The exact
-ordered-path and 2000 ms default latency gates are unchanged; added coverage is
-not automatically accepted merely because it appears plausible.
+and keep failed attempts out of successful performance aggregates. The 2000 ms
+default latency gate is unchanged.
+
+Literal query seeds use `literal-coverage-non-inferiority-v1`. This policy allows
+additional relevant paths only with read-only server evidence bound to the
+source, verified generation, commit, query, and every returned hit identity.
+For each candidate hit, the server hashes the complete search text against its
+immutable body digest and independently counts the literal term from that text;
+the count must equal the collision-checked posting frequency. Unsupported
+multi-component projections, mismatched bodies, and out-of-scope identities fail
+closed. Token boundaries and case folding follow the lexical profile's database
+locale. The proof endpoint supports single alphanumeric/underscore terms up to
+128 UTF-8 bytes and at most ten unique identities per retrieval path.
+
+Every legacy Top-10 path must remain in the candidate Top-10 in the same relative
+order, and the seed's expected path must be present. Every candidate hit must
+have positive body support. Negative seeds still require both result sets to be
+empty. Additional paths are classified using legacy chunk counts, FTS matches,
+and independent literal matches as not indexed, lexical projection gaps, content
+gaps, or ranking expansion. The full proof is retained privately; its digest is
+bound into both the dual-read query-set identity and qualification manifest.
+Missing proof retains the strict ordered-path comparison and cannot justify an
+additional hit. This literal coverage policy does not establish phrase, Boolean,
+semantic, or general relevance quality; the broader benchmark gates remain
+separate. Query seeds are not removed or replaced to make this policy pass.
 
 Filesystem discovery for this command returns metadata and file paths rather
 than retaining the entire corpus. Files above one MiB are split into

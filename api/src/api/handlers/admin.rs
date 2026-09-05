@@ -180,6 +180,34 @@ pub async fn admin_verify_release_candidate(
 }
 
 #[cfg(feature = "storage-v2-retrieval")]
+pub async fn admin_candidate_query_evidence(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
+    Path(source_id): Path<i64>,
+    JsonBody(request): JsonBody<crate::services::shadow_slice::CandidateQueryEvidenceInput>,
+) -> Result<Json<serde_json::Value>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
+    state
+        .rls_client
+        .with_rls(user_id, true, move |transaction| {
+            Box::pin(async move {
+                let evidence = crate::services::shadow_slice::candidate_query_evidence(
+                    &**transaction,
+                    source_id,
+                    &request,
+                )
+                .await
+                .map_err(|error| {
+                    AppError::BadRequest(format!("candidate query evidence failed: {error}"))
+                })?;
+                Ok(Json(evidence))
+            })
+        })
+        .await
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
 pub async fn admin_qualify_release_candidate(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Arc<crate::auth::Claims>>,

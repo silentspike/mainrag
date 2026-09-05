@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
 import json
 import stat
 import tempfile
@@ -82,10 +83,10 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                      patch.object(MODULE, "validate_telemetry"), \
                      patch.object(MODULE, "verify_intelligence", return_value={}), \
                      patch.object(MODULE, "request", side_effect=[repeated, verified, current,
-                                                                 {**current, "took_ms": 2001}]) as request:
+                                                                 {**current, "took_ms": 2001}, {}]) as request:
                     with self.assertRaisesRegex(RuntimeError, "candidate search"):
                         MODULE.verify(arguments, "private-token")
-                    self.assertEqual(request.call_count, 4 if seeds else 2)
+                    self.assertEqual(request.call_count, 5 if seeds else 2)
                     self.assertFalse(any("qualify" in call.args[3] or "dual-read" in call.args[3]
                                          for call in request.call_args_list))
                 artifact = json.loads(arguments.output.read_text())
@@ -97,6 +98,134 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                 self.assertNotIn("private-token", arguments.output.read_text())
                 with self.assertRaisesRegex(RuntimeError, "output already exists"):
                     MODULE.verify(arguments, "private-token")
+
+    def coverage_fixture(self):
+        seed, current = self.search_fixture()
+        seed["query"] = "private_query"
+        candidate = {**current["results"][0], "chunk_id": 11, "external_hit_id": "storage-v2:one"}
+        added = {**candidate, "chunk_id": 12, "file_path": "added.txt", "external_hit_id": "storage-v2:two"}
+        storage = {"results": [candidate, added], "took_ms": 100}
+        checkpoint = {"source_id": 1, "generation_id": 2, "generation_seq": 1, "commit_sha": "a" * 40}
+        evidence = {**checkpoint, "schema_version": "mainrag.storage-v2.query-coverage.v1",
+                    "query_sha256": MODULE.sha256_text(seed["query"]),
+                    "candidate": [{"occurrence_id": row["chunk_id"], "external_hit_id": row["external_hit_id"],
+                                   "path_sha256": MODULE.sha256_text(row["file_path"]),
+                                   "body_sha256": "b" * 64, "body_text_matches": True,
+                                   "reference_frequency": 2, "posting_frequency": 2}
+                                  for row in storage["results"]],
+                    "current": [{"chunk_id": 1, "path_sha256": MODULE.sha256_text("fixture.txt"),
+                                 "indexed_match": True}],
+                    "legacy_paths": [{"path_sha256": MODULE.sha256_text("fixture.txt"),
+                                      "chunk_count": 1, "indexed_matches": 1, "literal_matches": 1},
+                                     {"path_sha256": MODULE.sha256_text("added.txt"),
+                                      "chunk_count": 0, "indexed_matches": 0, "literal_matches": 0}]}
+        return seed, current, storage, evidence, checkpoint
+
+    def test_additional_coverage_requires_identity_bound_body_and_term_proof(self) -> None:
+        seed, current, storage, evidence, checkpoint = self.coverage_fixture()
+        self.assertFalse(MODULE.search_query_gates(seed, current, storage, 2000)["quality_passed"])
+        result = MODULE.search_query_gates(seed, current, storage, 2000, evidence, checkpoint)
+        self.assertTrue(result["quality_passed"])
+        self.assertEqual(result["coverage"]["additional_path_classes"], {"legacy_not_indexed": 1})
+        for counts, classification in [((2, 0, 1), "legacy_lexical_projection_gap"),
+                                        ((2, 0, 0), "legacy_content_gap"),
+                                        ((2, 1, 1), "ranking_expansion")]:
+            proof = copy.deepcopy(evidence)
+            proof["legacy_paths"][1].update(zip(("chunk_count", "indexed_matches", "literal_matches"), counts))
+            result = MODULE.query_coverage_gates(seed, current, storage, proof, checkpoint)
+            self.assertTrue(result["passed"])
+            self.assertEqual(result["additional_path_classes"], {classification: 1})
+
+    def test_query_coverage_rejects_tampering_and_incomplete_support(self) -> None:
+        seed, current, storage, evidence, checkpoint = self.coverage_fixture()
+        mutations = [
+            lambda p: p.update(source_id=2), lambda p: p.update(source_id=True),
+            lambda p: p.update(generation_id=3), lambda p: p.update(generation_seq=2),
+            lambda p: p.update(commit_sha="c" * 40), lambda p: p.update(query_sha256="d" * 64),
+            lambda p: p.update(schema_version="unsupported"),
+            lambda p: p["candidate"].pop(),
+            lambda p: p["candidate"][0].update(occurrence_id=True),
+            lambda p: p["candidate"][0].update(occurrence_id=0),
+            lambda p: p["candidate"][0].update(external_hit_id="wrong"),
+            lambda p: p["candidate"][0].update(path_sha256="d" * 64),
+            lambda p: p["candidate"][0].update(body_text_matches=False),
+            lambda p: p["candidate"][0].update(body_sha256="invalid"),
+            lambda p: p["candidate"][0].update(reference_frequency=0),
+            lambda p: p["candidate"][0].update(posting_frequency=1),
+            lambda p: p["candidate"].append(p["candidate"][0]),
+            lambda p: p["current"][0].update(indexed_match=False),
+            lambda p: p["current"][0].update(chunk_id=2),
+            lambda p: p["legacy_paths"].pop(),
+            lambda p: p["legacy_paths"][0].update(indexed_matches=2),
+            lambda p: p["legacy_paths"][0].update(literal_matches=-1),
+        ]
+        for ordinal, mutate in enumerate(mutations):
+            with self.subTest(mutation=ordinal):
+                proof = copy.deepcopy(evidence)
+                mutate(proof)
+                self.assertFalse(MODULE.query_coverage_gates(seed, current, storage, proof, checkpoint)["passed"])
+
+    def test_supported_coverage_is_bound_into_dual_read_and_qualification(self) -> None:
+        seed, current, storage, proof, identity = self.coverage_fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            arguments = Namespace(checkpoint=directory / "checkpoint.json",
+                                  output=directory / "result.json", source_id=1,
+                                  commit_sha="a" * 40, api_url="http://fixture.invalid",
+                                  max_query_ms=2000, pack_root=directory, minimum_free_bytes=0)
+            checkpoint = {**identity, "source_ref": "b" * 64, "item_count": 2,
+                          "source_watermark_sha256": "c" * 64, "active_generation_id": None,
+                          "server_instance_id": "before", "build": {"fixture_sha256": "d" * 64}}
+            MODULE.atomic_private_json(arguments.checkpoint, checkpoint)
+            repeated = {**checkpoint, "reused_generation": True, "telemetry": {},
+                        "active_generation_before": None, "active_generation_after": None}
+            verified = {**checkpoint, "status": "verified", "intelligence_export": {},
+                        "query_seeds": [seed], "checks": {key: "PASS" for key in MODULE.CHECKS},
+                        "adapter_profile_id": "fixture-adapter", "analysis_profile_id": "fixture-analysis",
+                        "search_profile_id": "fixture-search"}
+            dual = {"status": "PASS", "artifact": {"unexplained_count": 0},
+                    "evidence_id": "fixture-evidence", "artifact_sha256": "e" * 64}
+            qualified = {**identity, "status": "release_candidate", "evidence_id": "fixture-qualified",
+                         "active_generation_id": None}
+            with patch.object(MODULE, "source_state", return_value={"server_instance_id": "after"}), \
+                 patch.object(MODULE, "validate_telemetry"), \
+                 patch.object(MODULE, "verify_intelligence", return_value={}), \
+                 patch.object(MODULE, "publish_telemetry"), patch("builtins.print"), \
+                 patch.object(MODULE, "request", side_effect=[repeated, verified, current, storage,
+                                                             proof, dual, qualified]) as request:
+                MODULE.verify(arguments, "private-token")
+            calls = request.call_args_list
+            self.assertEqual(len(calls), 7)
+            self.assertEqual(calls[4].args[4]["candidate_occurrence_ids"], [11, 12])
+            self.assertEqual(calls[4].args[4]["current_chunk_ids"], [1])
+            self.assertEqual(calls[4].args[4]["query"], seed["query"])
+            dual_request = calls[5].args[4]
+            comparisons = dual_request["queries"]
+            self.assertEqual(comparisons[0]["fixture"]["coverage_evidence_sha256"],
+                             MODULE.sha256_text(json.dumps(proof, sort_keys=True)))
+            self.assertEqual(dual_request["query_set_sha256"], MODULE.query_set_sha256(comparisons))
+            manifest = calls[6].args[4]["manifest"]
+            self.assertEqual(manifest["query_coverage_sha256"],
+                             MODULE.sha256_text(json.dumps([proof], sort_keys=True)))
+            self.assertTrue(manifest["query_results"][0]["coverage"]["all_candidate_hits_supported"])
+            artifact = json.loads(arguments.output.read_text())
+            self.assertEqual(artifact["query_coverage"], [proof])
+            self.assertEqual(artifact["result"], qualified)
+            self.assertEqual(stat.S_IMODE(arguments.output.stat().st_mode), 0o600)
+            self.assertNotIn("private-token", arguments.output.read_text())
+
+    def test_proven_new_hits_may_not_displace_or_reorder_baseline_paths(self) -> None:
+        seed, current, storage, evidence, checkpoint = self.coverage_fixture()
+        current["results"].append({**current["results"][0], "chunk_id": 2, "file_path": "added.txt"})
+        evidence["current"].append({"chunk_id": 2, "path_sha256": MODULE.sha256_text("added.txt"),
+                                    "indexed_match": True})
+        evidence["legacy_paths"][1].update(chunk_count=1, indexed_matches=1, literal_matches=1)
+        self.assertTrue(MODULE.query_coverage_gates(seed, current, storage, evidence, checkpoint)["passed"])
+        storage["results"].reverse()
+        self.assertFalse(MODULE.query_coverage_gates(seed, current, storage, evidence, checkpoint)["passed"])
+        storage["results"].pop(0)
+        evidence["candidate"].pop()
+        self.assertFalse(MODULE.query_coverage_gates(seed, current, storage, evidence, checkpoint)["passed"])
 
     def test_release_candidate_telemetry_requires_fragment_bounds(self) -> None:
         telemetry = {
