@@ -16,6 +16,7 @@ python3 -m unittest \
   eval.storage_v2.schema.test_search_document_reuse \
   eval.storage_v2.schema.test_search_document_reuse_benchmark \
   eval.storage_v2.schema.test_search_materialization \
+  eval.storage_v2.schema.test_scoped_posting_probes \
   eval.storage_v2.test_release_candidate_operator
 ```
 
@@ -46,6 +47,17 @@ rejection, and executes the installed query under a generic prepared plan.
 The plan must assemble only the returned three texts while evaluating all 24
 fixture views. Three installed posting predicates must use both primary-key
 columns and retain authoritative term equality. No latency threshold is relaxed.
+
+Migration 045's suite adds 5,000 unrelated documents containing the same common
+term and verifies that neither results nor scope normalization change. The
+installed complete query must use one shared physical posting lookup, the full
+document/digest primary key, and no global posting term index. It retains the
+late Top-K content boundary and checks authoritative text equality outside the
+index lookup. Its 36-case differential gate includes positive/negative/repeated
+terms, phrases, exact values, long tokens and filters, plus migration replay,
+drift rejection and the complete inherited shadow-ingest suite. The historical
+044 structural suite pins its own version; all other fresh schema consumers
+exercise the latest migration sequence.
 
 ## Reproducible SQL reuse comparison
 
