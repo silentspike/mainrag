@@ -10,7 +10,8 @@ from eval.storage_v2.schema import test_shadow_ingest_schema as schema
 from eval.storage_v2.schema import test_search_document_reuse as reuse
 
 
-MIGRATION = schema.ROOT / 'migrations/047_storage_v2_structural_card_reuse.sql'
+BASE_REUSE = schema.ROOT / 'migrations/047_storage_v2_structural_card_reuse.sql'
+MIGRATION = schema.ROOT / 'migrations/049_storage_v2_new_symbol_miss_guard.sql'
 PREVIOUS = schema.ROOT / 'migrations/041_storage_v2_structural_card_bundle.sql'
 TABLES = ('storage_v2_symbol', 'storage_v2_symbol_occurrence',
           'storage_v2_intelligence_analysis', 'storage_v2_symbol_card')
@@ -29,6 +30,10 @@ class StructuralCardReuseTests(schema.ShadowIngestSchemaTests):
     wait_for_client = reuse.SearchDocumentReuseTests.wait_for_client
 
     def setUp(self) -> None:
+        self.apply_current()
+
+    def apply_current(self) -> None:
+        self.file(BASE_REUSE)
         self.file(MIGRATION)
 
     def fixture(self) -> dict[str, str]:
@@ -101,6 +106,21 @@ class StructuralCardReuseTests(schema.ShadowIngestSchemaTests):
                                                    'resource': 'unknown', 'delegation_target': 'unknown'})}
         definition = self.sql("SELECT pg_get_functiondef(oid) FROM pg_proc "
                               "WHERE proname='storage_v2_put_structural_card_bundle'")
+        guard = re.search(r'SELECT 1 FROM storage_v2_symbol existing_symbol\s+WHERE.*?p_symbol_key',
+                          definition, re.DOTALL)
+        self.assertIsNotNone(guard)
+        guard_query = guard.group().replace('p_source_id', '$1').replace('p_symbol_key', '$2')
+        for key, rows in (('synthetic-bulk-1', 1), ('synthetic-absent-key', 0)):
+            guard_plan = json.loads(self.sql(
+                'SET plan_cache_mode=force_generic_plan; '
+                f'PREPARE fixture_symbol_presence(BIGINT,TEXT) AS {guard_query}; '
+                'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) '
+                f"EXECUTE fixture_symbol_presence({args['p_source_id']},{literal(key)});"))[0]['Plan']
+            self.assertIn(guard_plan['Node Type'], ('Index Scan', 'Index Only Scan'))
+            self.assertIn('source_id', guard_plan['Index Cond'])
+            self.assertIn('symbol_key', guard_plan['Index Cond'])
+            self.assertEqual(guard_plan['Actual Rows'], rows)
+            self.assertEqual(guard_plan.get('Rows Removed by Filter', 0), 0)
         lookup = re.search(r'SELECT symbol_occurrence\.\* INTO v_symbol_occurrence.*?;',
                            definition, re.DOTALL)
         self.assertIsNotNone(lookup)
@@ -194,7 +214,10 @@ class StructuralCardReuseTests(schema.ShadowIngestSchemaTests):
         variants.append(self.actor(schema.OTHER_ID, self.call(args)))
         observed = []
         for migration in (PREVIOUS, MIGRATION):
-            self.file(migration)
+            if migration == MIGRATION:
+                self.apply_current()
+            else:
+                self.file(migration)
             errors = []
             for index, statement in enumerate(variants):
                 with self.subTest(migration=migration.name, case=index):
@@ -243,6 +266,45 @@ class StructuralCardReuseTests(schema.ShadowIngestSchemaTests):
                                  "WHERE proname='storage_v2_put_structural_card_bundle' AND acl.grantee=0"), '0')
         args = self.fixture()
         self.assertGreater(int(self.sql(self.admin(self.call(args)))), 0)
+
+    def test_new_symbol_miss_does_not_repeat_canonical_hash_work(self) -> None:
+        args = self.fixture()
+        original = self.sql("SELECT pg_get_functiondef('storage_v2_hash_parts(text,bytea[])'::regprocedure)")
+        self.sql(original.replace('FUNCTION public.storage_v2_hash_parts(',
+                                  'FUNCTION public.fixture_original_hash_parts(', 1))
+        self.sql('CREATE TABLE fixture_hash_work(domain TEXT NOT NULL); '
+                 'GRANT SELECT ON fixture_hash_work TO storage_v2_shadow_worker; '
+                 "CREATE OR REPLACE FUNCTION storage_v2_hash_parts(p_domain TEXT,p_parts BYTEA[]) "
+                 'RETURNS BYTEA LANGUAGE plpgsql VOLATILE STRICT SET search_path=pg_catalog,public AS $$ '
+                 'BEGIN INSERT INTO fixture_hash_work VALUES(p_domain); '
+                 'RETURN fixture_original_hash_parts(p_domain,p_parts); END $$;')
+        counts = []
+        try:
+            for migration in (PREVIOUS, BASE_REUSE, MIGRATION):
+                if migration == MIGRATION:
+                    self.apply_current()
+                else:
+                    self.file(migration)
+                result = self.sql(self.admin('BEGIN; ' + self.call(args) +
+                    "SELECT jsonb_object_agg(domain,n) FROM (SELECT domain,count(*) n "
+                    'FROM fixture_hash_work GROUP BY domain) counts; ROLLBACK;'))
+                counts.append(json.loads(result.splitlines()[-1]))
+            self.assertEqual(counts[0], {'mainrag.symbol.v1': 1, 'mainrag.symbol-occurrence.v1': 1})
+            self.assertEqual(counts[1], {'mainrag.symbol.v1': 2, 'mainrag.symbol-occurrence.v1': 2})
+            self.assertEqual(counts[2], counts[0])
+        finally:
+            self.sql(original)
+            self.sql('DROP TABLE fixture_hash_work; DROP FUNCTION fixture_original_hash_parts(TEXT,BYTEA[])')
+            self.apply_current()
+
+    def test_new_symbol_guard_rejects_unrecognized_function_state(self) -> None:
+        self.file(PREVIOUS)
+        try:
+            result = self.command('--file', str(MIGRATION), check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('reuse guard differs from the reviewed definition', result.stderr)
+        finally:
+            self.apply_current()
 
     def test_concurrent_winner_uses_conflict_readback_and_rejects_collision(self) -> None:
         self.sql('CREATE TABLE fixture_card_barrier(released BOOLEAN NOT NULL); '

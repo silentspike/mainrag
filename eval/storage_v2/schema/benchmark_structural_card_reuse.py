@@ -23,6 +23,7 @@ def implementation_identity() -> dict[str, str]:
     return {
         'commit_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=reuse.schema.ROOT, text=True).strip(),
         'migration_sha256': hashlib.sha256(reuse.MIGRATION.read_bytes()).hexdigest(),
+        'base_reuse_migration_sha256': hashlib.sha256(reuse.BASE_REUSE.read_bytes()).hexdigest(),
         'benchmark_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
     }
 
@@ -70,14 +71,17 @@ def run_benchmark(repetitions: int = 3, calls: int = 500) -> dict[str, object]:
                 if repetition % 2 == 0:
                     variants.reverse()
                 for variant, migration in variants:
-                    case.file(migration)
+                    if variant == 'after':
+                        case.apply_current()
+                    else:
+                        case.file(migration)
                     measured = measure(case, arguments, calls, cold=state == 'cold')
                     if state == 'warm' and variant == 'after' and measured['wal_records'] != 0:
                         raise RuntimeError('complete reuse unexpectedly generated WAL records')
                     timings.append({'state': state, 'variant': variant, 'repetition': repetition, **measured})
                     if case.data_identity() != before:
                         raise RuntimeError('comparison changed the protected semantic fixture state')
-            case.file(reuse.MIGRATION)
+            case.apply_current()
         medians = {}
         for state in ('cold', 'warm'):
             pair = {variant + '_ms': statistics.median(row['execution_ms'] for row in timings

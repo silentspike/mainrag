@@ -97,6 +97,17 @@ inputs; the warm fixture is first created by the previous function. Optional
 `TM_KENNZAHLEN` output uses `card_reuse`, separate from pipeline or API timings.
 It is a synthetic SQL comparison, not production latency or throughput proof.
 
+Migration 049 adds an exact source/symbol-key existence probe before preparing
+the reuse digests and normalized card. Missing symbols go directly to the
+original writer; an existing symbol still requires all complete-reuse checks.
+The installed negative probe must use both index-key columns for present and
+absent keys. Instrumented canonical hash calls prove that new-symbol misses
+perform the original two hashes, not four. Replay and unrecognized-definition
+checks cover the additive patch; all prior authorization/collision/concurrency
+checks run against 047 plus 049. The card benchmark applies that complete pair
+and records both migration hashes. This specifically reduces new-symbol miss
+work, not every possible incomplete bundle or changed structural version.
+
 Migration 048 retains the canonical hash byte format while aggregating large
 part arrays without repeated copies of the growing root. The small-key path
 remains unchanged. Differential tests compare the previous function and an
