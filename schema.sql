@@ -582,3 +582,4 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag;
 \ir migrations/047_storage_v2_structural_card_reuse.sql
 \ir migrations/048_storage_v2_linear_hash_parts.sql
 \ir migrations/049_storage_v2_new_symbol_miss_guard.sql
+\ir migrations/050_storage_v2_view_binding_verification.sql

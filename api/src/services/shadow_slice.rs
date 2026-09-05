@@ -353,17 +353,7 @@ where
         .await?
         .get(0);
     let expected_item_count: i64 = identity.get("expected_item_count");
-    for field in ["declared_item_count", "item_count", "occurrence_count"] {
-        if state[field].as_i64() != Some(expected_item_count) {
-            bail!("candidate item, membership, and occurrence counts differ");
-        }
-    }
-    if state["view_count"] != state["search_document_count"]
-        || state["analysis_incomplete_count"].as_i64() != Some(0)
-        || state["active_generation_id"].as_i64() != active_generation_id
-    {
-        bail!("candidate view, analysis, or active-pointer state differs");
-    }
+    validate_candidate_source_state(&state, expected_item_count, active_generation_id)?;
     let intelligence_export: serde_json::Value = client
         .query_one(
             "SELECT storage_v2_export_intelligence($1,$2,'public')",
@@ -408,6 +398,42 @@ where
         query_seeds,
         checks,
     })
+}
+
+fn validate_candidate_source_state(
+    state: &serde_json::Value,
+    expected_item_count: i64,
+    active_generation_id: Option<i64>,
+) -> Result<()> {
+    if expected_item_count < 0 {
+        bail!("candidate expected item count is invalid");
+    }
+    for field in ["declared_item_count", "item_count", "occurrence_count"] {
+        if state[field].as_i64() != Some(expected_item_count) {
+            bail!("candidate item, membership, and occurrence counts differ");
+        }
+    }
+    // Distinct views and documents are not one-to-one. Require valid counts,
+    // then check every ordered component binding instead of their cardinality.
+    for field in ["view_count", "search_document_count"] {
+        if !matches!(state[field].as_i64(), Some(count) if count >= 0) {
+            bail!("candidate view or search-document count is invalid");
+        }
+    }
+    for field in [
+        "unbound_view_count",
+        "search_binding_error_count",
+        "analysis_incomplete_count",
+    ] {
+        if state[field].as_i64() != Some(0) {
+            bail!("candidate binding or analysis completeness failed: {field}");
+        }
+    }
+    // A missing/malformed field must not be treated as an explicit null pointer.
+    if state.get("active_generation_id") != Some(&serde_json::json!(active_generation_id)) {
+        bail!("candidate active-pointer state differs");
+    }
+    Ok(())
 }
 
 pub async fn qualify_release_candidate<C>(
@@ -2154,6 +2180,111 @@ fn validate_hits(path: &str, hits: &[ComparableHit]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn complete_candidate_state() -> serde_json::Value {
+        serde_json::json!({
+            "declared_item_count": 3,
+            "item_count": 3,
+            "occurrence_count": 3,
+            "view_count": 2,
+            "search_document_count": 1,
+            "unbound_view_count": 0,
+            "search_binding_error_count": 0,
+            "analysis_incomplete_count": 0,
+            "active_generation_id": null,
+        })
+    }
+
+    #[test]
+    fn candidate_state_accepts_shared_documents_and_composed_views() {
+        let mut state = complete_candidate_state();
+        assert!(validate_candidate_source_state(&state, 3, None).is_ok());
+        state["view_count"] = serde_json::json!(1);
+        state["search_document_count"] = serde_json::json!(2);
+        assert!(validate_candidate_source_state(&state, 3, None).is_ok());
+        state["active_generation_id"] = serde_json::json!(7);
+        assert!(validate_candidate_source_state(&state, 3, Some(7)).is_ok());
+        assert!(validate_candidate_source_state(&state, 3, None).is_err());
+        assert!(validate_candidate_source_state(&state, 3, Some(8)).is_err());
+    }
+
+    #[test]
+    fn candidate_state_rejects_missing_and_malformed_fields() {
+        let complete = complete_candidate_state();
+        for key in complete.as_object().unwrap().keys() {
+            let mut state = complete.clone();
+            state.as_object_mut().unwrap().remove(key);
+            assert!(
+                validate_candidate_source_state(&state, 3, None).is_err(),
+                "{key}"
+            );
+            for invalid in [serde_json::json!("0"), serde_json::json!(false)] {
+                state[key] = invalid;
+                assert!(
+                    validate_candidate_source_state(&state, 3, None).is_err(),
+                    "{key}"
+                );
+            }
+            if key != "active_generation_id" {
+                state[key] = serde_json::Value::Null;
+                assert!(
+                    validate_candidate_source_state(&state, 3, None).is_err(),
+                    "{key}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_state_rejects_incomplete_and_negative_counts() {
+        let complete = complete_candidate_state();
+        for key in [
+            "unbound_view_count",
+            "search_binding_error_count",
+            "analysis_incomplete_count",
+        ] {
+            for count in [-1, 1] {
+                let mut state = complete.clone();
+                state[key] = serde_json::json!(count);
+                assert!(
+                    validate_candidate_source_state(&state, 3, None).is_err(),
+                    "{key}"
+                );
+            }
+        }
+        for key in ["declared_item_count", "item_count", "occurrence_count"] {
+            let mut state = complete.clone();
+            state[key] = serde_json::json!(2);
+            assert!(
+                validate_candidate_source_state(&state, 3, None).is_err(),
+                "{key}"
+            );
+        }
+        for key in ["view_count", "search_document_count"] {
+            let mut state = complete.clone();
+            state[key] = serde_json::json!(-1);
+            assert!(
+                validate_candidate_source_state(&state, 3, None).is_err(),
+                "{key}"
+            );
+        }
+        assert!(validate_candidate_source_state(&complete, -1, None).is_err());
+    }
+
+    #[test]
+    fn candidate_state_accepts_an_explicitly_complete_empty_generation() {
+        let mut state = complete_candidate_state();
+        for key in [
+            "declared_item_count",
+            "item_count",
+            "occurrence_count",
+            "view_count",
+            "search_document_count",
+        ] {
+            state[key] = serde_json::json!(0);
+        }
+        assert!(validate_candidate_source_state(&state, 0, None).is_ok());
+    }
 
     #[test]
     fn candidate_query_evidence_input_is_bounded_and_literal() {
