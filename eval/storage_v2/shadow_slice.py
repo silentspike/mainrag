@@ -439,6 +439,15 @@ def ingest(arguments: argparse.Namespace, token: str) -> None:
     print("Restart the API, then run this harness with --phase verify.")
 
 
+def has_complete_search_bindings(state: dict[str, Any]) -> bool:
+    counts = (state.get("view_count"), state.get("search_document_count"))
+    errors = (state.get("unbound_view_count"), state.get("search_binding_error_count"))
+    return (
+        all(type(value) is int and value >= 0 for value in counts)
+        and all(type(value) is int and value == 0 for value in errors)
+    )
+
+
 def verify(arguments: argparse.Namespace, token: str) -> None:
     checkpoint = json.loads(arguments.checkpoint.read_text(encoding="utf-8"))
     queries = load_queries(arguments.queries)
@@ -456,7 +465,7 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
         and state["active_generation_id"] is None
         and state["declared_item_count"] == state["item_count"]
         and state["item_count"] == state["occurrence_count"]
-        and state["view_count"] == state["search_document_count"]
+        and has_complete_search_bindings(state)
         and state["analysis_incomplete_count"] == 0
         and state["packed_body_count"] == state["item_count"]
         and state["published_pack_count"] >= 1
