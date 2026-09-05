@@ -104,7 +104,7 @@ class StructuralCardReuseTests(schema.ShadowIngestSchemaTests):
         lookup = re.search(r'SELECT symbol_occurrence\.\* INTO v_symbol_occurrence.*?;',
                            definition, re.DOTALL)
         self.assertIsNotNone(lookup)
-        self.assertEqual(lookup.group().count('OFFSET 0'), 4,
+        self.assertEqual(len(re.findall(r'^\s*OFFSET 0\s*$', lookup.group(), re.MULTILINE)), 4,
                          'cold plans must not start from a broad analysis/card profile')
         query = lookup.group().replace(' INTO v_symbol_occurrence', '')
         positions = {key: f'${index}' for index, key in enumerate(values, 1)}
