@@ -18,6 +18,8 @@ python3 -m unittest \
   eval.storage_v2.schema.test_search_materialization \
   eval.storage_v2.schema.test_scoped_posting_probes \
   eval.storage_v2.schema.test_query_coverage_evidence \
+  eval.storage_v2.schema.test_structural_card_reuse \
+  eval.storage_v2.schema.test_structural_card_reuse_benchmark \
   eval.storage_v2.test_release_candidate_operator
 ```
 
@@ -69,6 +71,29 @@ The operator suite additionally rejects proof tampering and baseline path
 displacement/reordering, and verifies that the complete proof is bound into
 dual-read and qualification evidence. These literal-query checks do not replace
 the broader search benchmark.
+
+Migration 047 reuses only complete, authorized structural-card bundles whose
+full fields and digests agree. Its suite rejects speculative writes on the
+reuse path, compares the previous error contract for invalid and colliding
+inputs, checks incomplete-analysis recovery, and races actual insert conflicts.
+It extracts the installed lookup for a generic-plan check on 1,000 cards;
+the existing symbol, occurrence, analysis, and card indexes must each return
+one row without filtering a broader partition. The inherited full shadow gate
+also runs against the new migration.
+
+After committing the implementation, compare both cold and repeated card work:
+
+```bash
+python3 -m eval.storage_v2.schema.benchmark_structural_card_reuse \
+  --repetitions 3 --calls 500 --output /tmp/storage-v2-card-comparison.json
+```
+
+This uses an owned disposable database, alternates the previous/new functions,
+checks actual nonzero function calls and unchanged semantic rows, and requires
+zero WAL records for complete reuse. Cold writes use identical rolled-back
+inputs; the warm fixture is first created by the previous function. Optional
+`TM_KENNZAHLEN` output uses `card_reuse`, separate from pipeline or API timings.
+It is a synthetic SQL comparison, not production latency or throughput proof.
 
 ## Reproducible SQL reuse comparison
 
