@@ -580,3 +580,4 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag;
 \ir migrations/045_storage_v2_scoped_posting_probes.sql
 \ir migrations/046_storage_v2_query_coverage_evidence.sql
 \ir migrations/047_storage_v2_structural_card_reuse.sql
+\ir migrations/048_storage_v2_linear_hash_parts.sql
