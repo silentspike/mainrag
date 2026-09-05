@@ -139,6 +139,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/admin/sources/:id/storage-v2-release-candidate-verify",
             post(handlers::admin_verify_release_candidate),
+        )
+        .route(
+            "/api/v1/admin/sources/:id/storage-v2-candidate-query-evidence",
+            post(handlers::admin_candidate_query_evidence),
         );
     let long_running_routes = long_running_routes
         .layer(middleware::from_fn(admin_middleware))

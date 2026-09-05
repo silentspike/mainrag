@@ -217,7 +217,9 @@ def query_set_sha256(comparisons: list[dict[str, Any]]) -> str:
 
 
 def search_query_gates(seed: dict[str, Any], current: dict[str, Any],
-                       storage: dict[str, Any], max_query_ms: int) -> dict[str, Any]:
+                       storage: dict[str, Any], max_query_ms: int,
+                       coverage: dict[str, Any] | None = None,
+                       checkpoint: dict[str, Any] | None = None) -> dict[str, Any]:
     """Classify observable failures without accepting a plausible difference."""
     current_paths = path_identity(current["results"])
     storage_paths = path_identity(storage["results"])
@@ -226,6 +228,10 @@ def search_query_gates(seed: dict[str, Any], current: dict[str, Any],
         expected in current_paths and expected in storage_paths and current_paths == storage_paths
         if seed["expects_match"] else not current["results"] and not storage["results"]
     )
+    coverage_check = None
+    if coverage is not None:
+        coverage_check = query_coverage_gates(seed, current, storage, coverage, checkpoint or {})
+        quality = coverage_check["passed"]
     took_ms = storage.get("took_ms")
     performance = (type(took_ms) is int and 0 <= took_ms <= max_query_ms)
     degradation = all(
@@ -249,7 +255,90 @@ def search_query_gates(seed: dict[str, Any], current: dict[str, Any],
         "max_query_ms": max_query_ms,
         "current_identity_sha256": sha256_text(json.dumps(current_paths, separators=(",", ":"))),
         "storage_v2_identity_sha256": sha256_text(json.dumps(storage_paths, separators=(",", ":"))),
+        "coverage": coverage_check,
     }
+
+
+def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage: dict[str, Any],
+                         evidence: dict[str, Any], checkpoint: dict[str, Any]) -> dict[str, Any]:
+    """Require complete legacy path recall and independent support for every new hit."""
+    failed = {"passed": False, "policy": "literal-coverage-non-inferiority-v1"}
+    if evidence.get("schema_version") != "mainrag.storage-v2.query-coverage.v1" \
+            or evidence.get("query_sha256") != sha256_text(seed["query"]) \
+            or any(type(evidence.get(key)) is not int or evidence[key] <= 0
+                   for key in ("source_id", "generation_id", "generation_seq")) \
+            or any(key not in checkpoint or evidence.get(key) != checkpoint[key]
+                   for key in ("source_id", "generation_id", "generation_seq", "commit_sha")):
+        return failed
+    candidate = evidence.get("candidate")
+    baseline = evidence.get("current")
+    legacy = evidence.get("legacy_paths")
+    if not all(isinstance(rows, list) for rows in (candidate, baseline, legacy)):
+        return failed
+    for rows, results, identity in ((candidate, storage["results"], "occurrence_id"),
+                                    (baseline, current["results"], "chunk_id")):
+        if len(rows) != len(results) or len(rows) > 10 or any(not isinstance(row, dict) for row in rows):
+            return failed
+        if any(type(row.get(identity)) is not int or row[identity] <= 0 for row in rows) \
+                or any(type(hit.get("chunk_id")) is not int or hit["chunk_id"] <= 0
+                       or not isinstance(hit.get("file_path"), str) for hit in results):
+            return failed
+        indexed = {row[identity]: row for row in rows}
+        if len(indexed) != len(rows) or set(indexed) != {hit["chunk_id"] for hit in results}:
+            return failed
+        for hit in results:
+            row = indexed[hit["chunk_id"]]
+            if row.get("path_sha256") != sha256_text(hit["file_path"]):
+                return failed
+            if identity == "chunk_id":
+                if row.get("indexed_match") is not True:
+                    return failed
+            elif row.get("external_hit_id") != hit.get("external_hit_id") \
+                    or not isinstance(row.get("external_hit_id"), str) \
+                    or row.get("body_text_matches") is not True \
+                    or not isinstance(row.get("body_sha256"), str) \
+                    or len(row["body_sha256"]) != 64 \
+                    or any(c not in "0123456789abcdef" for c in row["body_sha256"]) \
+                    or type(row.get("reference_frequency")) is not int \
+                    or row["reference_frequency"] <= 0 \
+                    or type(row.get("posting_frequency")) is not int \
+                    or row["posting_frequency"] != row["reference_frequency"]:
+                return failed
+    current_paths = path_identity(current["results"])
+    storage_paths = path_identity(storage["results"])
+    if any(not isinstance(row, dict) or not isinstance(row.get("path_sha256"), str) for row in legacy):
+        return failed
+    by_path = {row["path_sha256"]: row for row in legacy}
+    if len(by_path) != len(legacy) or set(by_path) != set(current_paths) | set(storage_paths):
+        return failed
+    for row in legacy:
+        if any(type(row.get(key)) is not int or row[key] < 0
+               for key in ("chunk_count", "indexed_matches", "literal_matches")) \
+                or row["indexed_matches"] > row["chunk_count"] \
+                or row["literal_matches"] > row["chunk_count"]:
+            return failed
+    # Added, independently supported paths may not displace a baseline path or
+    # reorder the retained baseline. They are relevant gold hits, not negatives
+    # merely because the legacy index omitted their document or lexical text.
+    retained = [path for path in storage_paths if path in set(current_paths)]
+    positive = (seed["expected_path_sha256"] in storage_paths and retained == current_paths)
+    negative = not current["results"] and not storage["results"]
+    classes: dict[str, int] = {}
+    for path in set(storage_paths) - set(current_paths):
+        row = by_path[path]
+        if row["chunk_count"] == 0:
+            reason = "legacy_not_indexed"
+        elif row["indexed_matches"] == 0:
+            reason = "legacy_lexical_projection_gap" if row["literal_matches"] else "legacy_content_gap"
+        else:
+            reason = "ranking_expansion"
+        classes[reason] = classes.get(reason, 0) + 1
+    return {"passed": positive if seed["expects_match"] else negative,
+            "policy": "literal-coverage-non-inferiority-v1",
+            "all_candidate_hits_supported": True,
+            "all_current_hits_supported": True,
+            "baseline_paths_retained_in_order": retained == current_paths,
+            "additional_path_classes": classes}
 
 
 def verify_intelligence(api_url: str, token: str, source_id: int, generation: int,
@@ -323,6 +412,7 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
 
     comparisons = []
     query_results = []
+    query_coverage = []
     quality_passed = True
     performance_passed = True
     degradation_passed = True
@@ -343,11 +433,21 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
             current_by_path.setdefault(sha256_text(result["file_path"]), []).append(
                 f"legacy:{int(result['chunk_id'])}"
             )
-        gates = search_query_gates(seed, current, storage, arguments.max_query_ms)
+        coverage = request(
+            arguments.api_url, token, "POST",
+            f"/api/v1/admin/sources/{arguments.source_id}/storage-v2-candidate-query-evidence",
+            {"generation_id": checkpoint["generation_id"], "commit_sha": arguments.commit_sha,
+             "query": seed["query"],
+             "candidate_occurrence_ids": [hit["chunk_id"] for hit in storage["results"]],
+             "current_chunk_ids": [hit["chunk_id"] for hit in current["results"]]},
+        )
+        query_coverage.append(coverage)
+        gates = search_query_gates(seed, current, storage, arguments.max_query_ms, coverage, checkpoint)
         quality_passed &= gates["quality_passed"]
         performance_passed &= gates["performance_passed"]
         degradation_passed &= gates["degradation_passed"]
-        fixture = {"id": seed["id"], "query": seed["query"], "phrase": False, "k": 10}
+        fixture = {"id": seed["id"], "query": seed["query"], "phrase": False, "k": 10,
+                   "coverage_evidence_sha256": sha256_text(json.dumps(coverage, sort_keys=True))}
         comparisons.append({
             "fixture": fixture,
             "normalized_query": seed["query"],
@@ -360,6 +460,7 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
             "status": "FAIL", "failed_gate": "candidate_search",
             "checkpoint": checkpoint, "verification": verified,
             "query_results": query_results, "comparisons": comparisons,
+            "query_coverage": query_coverage,
             "checks": {"quality": quality_passed and bool(query_results),
                        "performance": performance_passed and bool(query_results),
                        "degradation": degradation_passed and bool(query_results)},
@@ -415,6 +516,7 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
             "dual_read_evidence_id": dual["evidence_id"],
             "dual_read_artifact_sha256": dual["artifact_sha256"],
             "query_results": query_results,
+            "query_coverage_sha256": sha256_text(json.dumps(query_coverage, sort_keys=True)),
             "intelligence": intelligence,
             "resource": {"free_bytes": free_bytes, "minimum_free_bytes": arguments.minimum_free_bytes},
             "restart": {"server_instance_changed": True, "generation_reused": True},
@@ -428,6 +530,7 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
         qualification,
     )
     artifact = {"checkpoint": checkpoint, "verification": verified, "dual_read": dual,
+                "query_coverage": query_coverage,
                 "qualification": qualification, "result": result}
     atomic_private_json(arguments.output, artifact)
     publish_telemetry(repeated["telemetry"])
