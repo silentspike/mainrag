@@ -61,6 +61,7 @@ readback() {
       branch_protection: {
         strict: $protection.required_status_checks.strict,
         checks: [$protection.required_status_checks.checks[] | {context, app_id}],
+        pull_request_review_configuration_present: ($protection.required_pull_request_reviews != null),
         required_approvals: $protection.required_pull_request_reviews.required_approving_review_count,
         dismiss_stale_reviews: $protection.required_pull_request_reviews.dismiss_stale_reviews,
         require_last_push_approval: $protection.required_pull_request_reviews.require_last_push_approval,
@@ -86,8 +87,31 @@ readback() {
   sha256sum .github/PULL_REQUEST_TEMPLATE.md .github/GOVERNANCE.md .gitignore
 }
 
+protection_payload() {
+  local app_id="${1:-}" checks_json
+  [[ "$app_id" =~ ^[1-9][0-9]*$ ]] || die 'positive GitHub Actions app ID required'
+  checks_json="$(printf '%s\n' "${REQUIRED_CONTEXTS[@]}" \
+    | jq -R --argjson app_id "$app_id" '{context: ., app_id: $app_id}' \
+    | jq -s '.')"
+  jq -n --argjson checks "$checks_json" \
+    '{
+      required_status_checks: {strict: true, checks: $checks},
+      enforce_admins: true,
+      required_pull_request_reviews: {
+        dismiss_stale_reviews: true,
+        require_code_owner_reviews: false,
+        required_approving_review_count: 0,
+        require_last_push_approval: false
+      },
+      restrictions: null,
+      required_conversation_resolution: true,
+      allow_force_pushes: false,
+      allow_deletions: false
+    }'
+}
+
 apply_settings() {
-  local operator authenticated_actor operator_permission app_id checks_json payload
+  local operator authenticated_actor operator_permission app_id payload
   [[ "${CONFIRM_REPOSITORY:-}" == "$REPOSITORY" ]] || \
     die 'set CONFIRM_REPOSITORY to the exact repository'
   [[ "${CONFIRM_OWNER_SETTINGS_APPLY:-}" == 'yes' ]] || \
@@ -110,20 +134,7 @@ apply_settings() {
     die 'default branch changed; stop for review'
 
   app_id="$(github_actions_app_id)"
-  checks_json="$(printf '%s\n' "${REQUIRED_CONTEXTS[@]}" \
-    | jq -R --argjson app_id "$app_id" '{context: ., app_id: $app_id}' \
-    | jq -s '.')"
-  payload="$(jq -n \
-    --argjson checks "$checks_json" \
-    '{
-      required_status_checks: {strict: true, checks: $checks},
-      enforce_admins: true,
-      required_pull_request_reviews: null,
-      restrictions: null,
-      required_conversation_resolution: true,
-      allow_force_pushes: false,
-      allow_deletions: false
-    }')"
+  payload="$(protection_payload "$app_id")"
 
   gh api --method PUT \
     -H 'Accept: application/vnd.github+json' \
@@ -149,9 +160,12 @@ apply_settings() {
   readback
 }
 
-require_tools
-case "$MODE" in
-  check) readback ;;
-  apply) apply_settings ;;
-  *) die 'usage: repository-settings.sh [check|apply]' ;;
-esac
+# Sourcing exposes the pure payload builder for offline tests, not live actions.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  require_tools
+  case "$MODE" in
+    check) readback ;;
+    apply) apply_settings ;;
+    *) die 'usage: repository-settings.sh [check|apply]' ;;
+  esac
+fi

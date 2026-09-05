@@ -26,6 +26,8 @@ jobs:
         run: python3 .github/scripts/check_issue_forms.py
       - name: Test issue-contract validator
         run: node --test .github/scripts/validate-pr-contract.test.cjs
+      - name: Test repository settings payload without live access
+        run: python3 .github/scripts/test_repository_settings.py
       - name: Validate workflow policy
         run: python3 .github/scripts/check_workflows.py
       - name: Parse YAML files
