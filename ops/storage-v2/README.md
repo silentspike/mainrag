@@ -156,6 +156,16 @@ resource gates, records accepted dual-read evidence, and only then submits the
 qualification envelope. Raw checkpoints, seeds, result sets, and evidence stay
 outside Git with mode `0600`.
 
+A failed query gate writes a protected `FAIL` artifact to the requested output
+before returning nonzero. It records each query's quality, measured latency,
+degradation, expected-hit presence, missing path counts, and ordered identity
+hashes, along with the checkpoint and verification needed for diagnosis. Empty
+query sets fail. No dual-read or qualification request is submitted on failure;
+an existing output is never overwritten. Use a new output path for each retry
+and keep failed attempts out of successful performance aggregates. The exact
+ordered-path and 2000 ms default latency gates are unchanged; added coverage is
+not automatically accepted merely because it appears plausible.
+
 Filesystem discovery for this command returns metadata and file paths rather
 than retaining the entire corpus. Files above one MiB are split into
 deterministic, contiguous, UTF-8-aligned byte ranges of no more than one MiB

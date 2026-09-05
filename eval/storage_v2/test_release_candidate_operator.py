@@ -7,7 +7,9 @@ import json
 import stat
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,6 +21,83 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ReleaseCandidateOperatorTests(unittest.TestCase):
+    def search_fixture(self):
+        hit = {"chunk_id": 1, "file_path": "fixture.txt", "score": 1.0,
+               "degradation": {stage: "unavailable" for stage in ("graph", "semantic", "rerank")}}
+        seed = {"id": "fixture-one", "query": "private-query", "expects_match": True,
+                "expected_path_sha256": MODULE.sha256_text("fixture.txt")}
+        return seed, {"results": [hit], "took_ms": 1}
+
+    def test_search_gates_preserve_exact_quality_and_latency_thresholds(self) -> None:
+        seed, current = self.search_fixture()
+        for millis, passed in ((0, True), (2000, True), (2001, False), (-1, False),
+                               (True, False), ("1", False), (None, False)):
+            result = MODULE.search_query_gates(seed, current, {**current, "took_ms": millis}, 2000)
+            self.assertEqual(result["performance_passed"], passed)
+            self.assertTrue(result["quality_passed"])
+        extra = {**current["results"][0], "file_path": "extra.txt"}
+        result = MODULE.search_query_gates(seed, current,
+                                          {**current, "results": [*current["results"], extra]}, 2000)
+        self.assertFalse(result["quality_passed"])
+        self.assertEqual(result["missing_current_paths"], 1)
+        self.assertEqual(result["missing_storage_v2_paths"], 0)
+        self.assertNotIn("fixture.txt", json.dumps(result))
+        self.assertNotIn("private-query", json.dumps(result))
+
+    def test_search_gates_reject_missing_expected_reordered_and_degraded_hits(self) -> None:
+        seed, current = self.search_fixture()
+        other = {**current["results"][0], "file_path": "second.txt"}
+        two = {**current, "results": [*current["results"], other]}
+        reordered = {**two, "results": list(reversed(two["results"]))}
+        self.assertFalse(MODULE.search_query_gates(seed, two, reordered, 2000)["quality_passed"])
+        missing = MODULE.search_query_gates(seed, current, {"results": [], "took_ms": 1}, 2000)
+        self.assertFalse(missing["quality_passed"])
+        self.assertEqual(missing["missing_storage_v2_paths"], 1)
+        degraded = {**current, "results": [{**current["results"][0], "degradation": {}}]}
+        self.assertFalse(MODULE.search_query_gates(seed, current, degraded, 2000)["degradation_passed"])
+        empty = {"results": [], "took_ms": 1}
+        self.assertTrue(MODULE.search_query_gates({**seed, "expects_match": False}, empty, empty, 2000)
+                        ["quality_passed"])
+        self.assertFalse(MODULE.search_query_gates(seed, empty, empty, 2000)["quality_passed"])
+
+    def test_failed_queries_persist_private_evidence_and_never_qualify(self) -> None:
+        seed, current = self.search_fixture()
+        for seeds in ([seed], []):
+            with self.subTest(query_count=len(seeds)), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                arguments = Namespace(checkpoint=directory / "checkpoint.json",
+                                      output=directory / "attempt.json", source_id=1,
+                                      commit_sha="a" * 40, api_url="http://fixture.invalid", max_query_ms=2000)
+                checkpoint = {"source_id": 1, "source_ref": "b" * 64, "commit_sha": "a" * 40,
+                              "generation_id": 2, "generation_seq": 1, "item_count": 1,
+                              "source_watermark_sha256": "c" * 64, "active_generation_id": None,
+                              "server_instance_id": "before"}
+                MODULE.atomic_private_json(arguments.checkpoint, checkpoint)
+                repeated = {**checkpoint, "reused_generation": True,
+                            "active_generation_before": None, "active_generation_after": None,
+                            "telemetry": {}}
+                verified = {**checkpoint, "status": "verified", "intelligence_export": {},
+                            "query_seeds": seeds}
+                with patch.object(MODULE, "source_state", return_value={"server_instance_id": "after"}), \
+                     patch.object(MODULE, "validate_telemetry"), \
+                     patch.object(MODULE, "verify_intelligence", return_value={}), \
+                     patch.object(MODULE, "request", side_effect=[repeated, verified, current,
+                                                                 {**current, "took_ms": 2001}]) as request:
+                    with self.assertRaisesRegex(RuntimeError, "candidate search"):
+                        MODULE.verify(arguments, "private-token")
+                    self.assertEqual(request.call_count, 4 if seeds else 2)
+                    self.assertFalse(any("qualify" in call.args[3] or "dual-read" in call.args[3]
+                                         for call in request.call_args_list))
+                artifact = json.loads(arguments.output.read_text())
+                self.assertEqual(artifact["status"], "FAIL")
+                self.assertEqual(len(artifact["query_results"]), len(seeds))
+                self.assertFalse(artifact["checks"]["performance"])
+                self.assertFalse(artifact["qualification_submitted"])
+                self.assertEqual(stat.S_IMODE(arguments.output.stat().st_mode), 0o600)
+                self.assertNotIn("private-token", arguments.output.read_text())
+                with self.assertRaisesRegex(RuntimeError, "output already exists"):
+                    MODULE.verify(arguments, "private-token")
+
     def test_release_candidate_telemetry_requires_fragment_bounds(self) -> None:
         telemetry = {
             "phase": {name: 1.0 for name in MODULE.TELEMETRY_PHASES},

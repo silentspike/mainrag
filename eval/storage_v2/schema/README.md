@@ -14,7 +14,9 @@ python3 -m unittest \
   eval.storage_v2.schema.test_content_schema \
   eval.storage_v2.schema.test_content_graph_schema \
   eval.storage_v2.schema.test_search_document_reuse \
-  eval.storage_v2.schema.test_search_document_reuse_benchmark
+  eval.storage_v2.schema.test_search_document_reuse_benchmark \
+  eval.storage_v2.schema.test_search_materialization \
+  eval.storage_v2.test_release_candidate_operator
 ```
 
 The shadow-ingest suite also exercises the additive storage-v2 intelligence and
@@ -34,6 +36,16 @@ the winner commits. Identical content must return the same document ID; changed
 text or identifiers must fail with a profile collision. Each race must leave
 exactly one document and its original postings. Client processes, synchronization
 relations, and databases are fixture-owned and cleaned up on success or failure.
+
+The late-materialization suite compares complete result JSON before/after
+migration 044 for 32 combinations of Boolean, phrase, exact, long-token, repeated
+term, and source-filter queries. Counts, scores, ordering, full result content,
+function ownership and ACLs must remain identical. It also reruns the inherited
+authorization/oversized-document suite, tests migration replay and drift
+rejection, and executes the installed query under a generic prepared plan.
+The plan must assemble only the returned three texts while evaluating all 24
+fixture views. Three installed posting predicates must use both primary-key
+columns and retain authoritative term equality. No latency threshold is relaxed.
 
 ## Reproducible SQL reuse comparison
 

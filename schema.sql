@@ -576,3 +576,4 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag;
 \ir migrations/041_storage_v2_structural_card_bundle.sql
 \ir migrations/042_storage_v2_oversized_search_documents.sql
 \ir migrations/043_storage_v2_indexed_search_document_reuse.sql
+\ir migrations/044_storage_v2_late_search_materialization.sql

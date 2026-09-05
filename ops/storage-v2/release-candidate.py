@@ -216,6 +216,42 @@ def query_set_sha256(comparisons: list[dict[str, Any]]) -> str:
     return digest.hexdigest()
 
 
+def search_query_gates(seed: dict[str, Any], current: dict[str, Any],
+                       storage: dict[str, Any], max_query_ms: int) -> dict[str, Any]:
+    """Classify observable failures without accepting a plausible difference."""
+    current_paths = path_identity(current["results"])
+    storage_paths = path_identity(storage["results"])
+    expected = seed["expected_path_sha256"]
+    quality = (
+        expected in current_paths and expected in storage_paths and current_paths == storage_paths
+        if seed["expects_match"] else not current["results"] and not storage["results"]
+    )
+    took_ms = storage.get("took_ms")
+    performance = (type(took_ms) is int and 0 <= took_ms <= max_query_ms)
+    degradation = all(
+        result.get("degradation", {}).get(stage) in {"available", "unavailable"}
+        for result in storage["results"] for stage in ("graph", "semantic", "rerank")
+    )
+    return {
+        "id": seed["id"],
+        "quality_passed": quality,
+        "performance_passed": performance,
+        "degradation_passed": degradation,
+        "expected_in_current": expected in current_paths,
+        "expected_in_storage_v2": expected in storage_paths,
+        "missing_current_paths": len(set(storage_paths) - set(current_paths)),
+        "missing_storage_v2_paths": len(set(current_paths) - set(storage_paths)),
+        "same_path_order": current_paths == storage_paths,
+        "current_count": len(current["results"]),
+        "storage_v2_count": len(storage["results"]),
+        "current_took_ms": current.get("took_ms"),
+        "storage_v2_took_ms": took_ms,
+        "max_query_ms": max_query_ms,
+        "current_identity_sha256": sha256_text(json.dumps(current_paths, separators=(",", ":"))),
+        "storage_v2_identity_sha256": sha256_text(json.dumps(storage_paths, separators=(",", ":"))),
+    }
+
+
 def verify_intelligence(api_url: str, token: str, source_id: int, generation: int,
                         export: dict[str, Any]) -> dict[str, Any]:
     record_counts = export["payload"]["record_counts"]
@@ -239,6 +275,8 @@ def verify_intelligence(api_url: str, token: str, source_id: int, generation: in
 
 
 def verify(arguments: argparse.Namespace, token: str) -> None:
+    if arguments.output.exists():
+        raise RuntimeError("verification output already exists; retain it and choose a new attempt")
     checkpoint = json.loads(arguments.checkpoint.read_text(encoding="utf-8"))
     if checkpoint["source_id"] != arguments.source_id or checkpoint["commit_sha"] != arguments.commit_sha:
         raise RuntimeError("checkpoint source or commit identity differs")
@@ -305,24 +343,10 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
             current_by_path.setdefault(sha256_text(result["file_path"]), []).append(
                 f"legacy:{int(result['chunk_id'])}"
             )
-        current_paths = path_identity(current["results"])
-        storage_paths = path_identity(storage["results"])
-        expected = seed["expected_path_sha256"]
-        query_quality = (
-            expected in current_paths
-            and expected in storage_paths
-            and current_paths == storage_paths
-            if seed["expects_match"]
-            else not current["results"] and not storage["results"]
-        )
-        query_performance = int(storage["took_ms"]) <= arguments.max_query_ms
-        query_degradation = all(
-            result.get("degradation", {}).get(stage) in {"available", "unavailable"}
-            for result in storage["results"] for stage in ("graph", "semantic", "rerank")
-        )
-        quality_passed &= query_quality
-        performance_passed &= query_performance
-        degradation_passed &= query_degradation
+        gates = search_query_gates(seed, current, storage, arguments.max_query_ms)
+        quality_passed &= gates["quality_passed"]
+        performance_passed &= gates["performance_passed"]
+        degradation_passed &= gates["degradation_passed"]
         fixture = {"id": seed["id"], "query": seed["query"], "phrase": False, "k": 10}
         comparisons.append({
             "fixture": fixture,
@@ -330,16 +354,17 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
             "current": ranked(current["results"]),
             "storage_v2": ranked(storage["results"], current_by_path),
         })
-        query_results.append({
-            "id": seed["id"],
-            "quality_passed": query_quality,
-            "performance_passed": query_performance,
-            "current_count": len(current["results"]),
-            "storage_v2_count": len(storage["results"]),
-            "current_identity_sha256": sha256_text(json.dumps(current_paths, separators=(",", ":"))),
-            "storage_v2_identity_sha256": sha256_text(json.dumps(storage_paths, separators=(",", ":"))),
+        query_results.append(gates)
+    if not query_results or not (quality_passed and performance_passed and degradation_passed):
+        atomic_private_json(arguments.output, {
+            "status": "FAIL", "failed_gate": "candidate_search",
+            "checkpoint": checkpoint, "verification": verified,
+            "query_results": query_results, "comparisons": comparisons,
+            "checks": {"quality": quality_passed and bool(query_results),
+                       "performance": performance_passed and bool(query_results),
+                       "degradation": degradation_passed and bool(query_results)},
+            "qualification_submitted": False,
         })
-    if not (quality_passed and performance_passed and degradation_passed):
         raise RuntimeError("candidate search quality, latency, or degradation gate failed")
     dual_request = {
         "generation": checkpoint["generation_seq"],
