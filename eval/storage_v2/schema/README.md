@@ -17,6 +17,7 @@ python3 -m unittest \
   eval.storage_v2.schema.test_search_document_reuse_benchmark \
   eval.storage_v2.schema.test_search_materialization \
   eval.storage_v2.schema.test_scoped_posting_probes \
+  eval.storage_v2.schema.test_query_coverage_evidence \
   eval.storage_v2.test_release_candidate_operator
 ```
 
@@ -58,6 +59,16 @@ terms, phrases, exact values, long tokens and filters, plus migration replay,
 drift rejection and the complete inherited shadow-ingest suite. The historical
 044 structural suite pins its own version; all other fresh schema consumers
 exercise the latest migration sequence.
+
+Migration 046's read-only coverage suite binds returned occurrence and legacy
+chunk identities to a verified source/generation/commit, recomputes literal
+support from body-digest-checked text, and rejects inconsistent projections or
+postings. It checks replay, unchanged generation/pointer/evidence state, source
+and administrator authority, input bounds, and locale-aware token boundaries.
+The operator suite additionally rejects proof tampering and baseline path
+displacement/reordering, and verifies that the complete proof is bound into
+dual-read and qualification evidence. These literal-query checks do not replace
+the broader search benchmark.
 
 ## Reproducible SQL reuse comparison
 

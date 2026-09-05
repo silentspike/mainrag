@@ -180,6 +180,66 @@ pub struct CandidateQuerySeed {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateQueryEvidenceInput {
+    pub generation_id: i64,
+    pub commit_sha: String,
+    pub query: String,
+    pub candidate_occurrence_ids: Vec<i64>,
+    pub current_chunk_ids: Vec<i64>,
+}
+
+fn validate_candidate_query_evidence(input: &CandidateQueryEvidenceInput) -> Result<()> {
+    if input.generation_id <= 0
+        || !is_git_sha(&input.commit_sha)
+        || input.query.is_empty()
+        || input.query.len() > 128
+        || !input
+            .query
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_')
+        || [&input.candidate_occurrence_ids, &input.current_chunk_ids]
+            .into_iter()
+            .any(|ids| {
+                ids.len() > 10
+                    || ids.iter().any(|id| *id <= 0)
+                    || ids.iter().collect::<BTreeSet<_>>().len() != ids.len()
+            })
+    {
+        bail!("candidate query evidence requires a named generation, commit, literal term and bounded unique hit IDs");
+    }
+    Ok(())
+}
+
+pub async fn candidate_query_evidence<C>(
+    client: &C,
+    source_id: i64,
+    input: &CandidateQueryEvidenceInput,
+) -> Result<serde_json::Value>
+where
+    C: GenericClient + Sync,
+{
+    validate_candidate_query_evidence(input)?;
+    if source_id <= 0 {
+        bail!("candidate query evidence requires a positive source identity");
+    }
+    let row = client
+        .query_one(
+            "SELECT storage_v2_candidate_query_evidence($1,$2,$3,$4,$5,$6)",
+            &[
+                &source_id,
+                &input.generation_id,
+                &input.commit_sha,
+                &input.query,
+                &input.candidate_occurrence_ids,
+                &input.current_chunk_ids,
+            ],
+        )
+        .await?;
+    Ok(row.get(0))
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReleaseCandidateVerifyResult {
     pub source_id: i64,
     pub generation_id: i64,
@@ -2094,6 +2154,47 @@ fn validate_hits(path: &str, hits: &[ComparableHit]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidate_query_evidence_input_is_bounded_and_literal() {
+        let input = CandidateQueryEvidenceInput {
+            generation_id: 1,
+            commit_sha: "a".repeat(40),
+            query: "fixture_123".into(),
+            candidate_occurrence_ids: vec![1, 2],
+            current_chunk_ids: vec![1, 3],
+        };
+        assert!(validate_candidate_query_evidence(&input).is_ok());
+        for query in [
+            "",
+            "alpha beta",
+            "id:alpha",
+            "alpha OR beta",
+            "\"alpha\"",
+            "alpha.*",
+        ] {
+            let mut invalid = input.clone();
+            invalid.query = query.into();
+            assert!(validate_candidate_query_evidence(&invalid).is_err());
+        }
+        for ids in [vec![1, 1], vec![0], vec![-1], (1..=11).collect()] {
+            let mut invalid = input.clone();
+            invalid.candidate_occurrence_ids = ids.clone();
+            assert!(validate_candidate_query_evidence(&invalid).is_err());
+            invalid = input.clone();
+            invalid.current_chunk_ids = ids;
+            assert!(validate_candidate_query_evidence(&invalid).is_err());
+        }
+        let mut invalid = input.clone();
+        invalid.query = "x".repeat(129);
+        assert!(validate_candidate_query_evidence(&invalid).is_err());
+        invalid = input.clone();
+        invalid.generation_id = 0;
+        assert!(validate_candidate_query_evidence(&invalid).is_err());
+        invalid = input;
+        invalid.commit_sha = "A".repeat(40);
+        assert!(validate_candidate_query_evidence(&invalid).is_err());
+    }
 
     struct TestDirectory(PathBuf);
 
