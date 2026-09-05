@@ -33,6 +33,14 @@ def baseline_definition() -> str:
 class SearchMaterializationTests(schema.ShadowIngestSchemaTests):
     """Also rerun the inherited authorization, phrase and oversized-input gate."""
 
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        # Pin this historical migration's structural assertions. Later retrieval
+        # optimizations have their own exact-plan and differential suite.
+        cls.sql(baseline_definition())
+        cls.file(MIGRATION)
+
     def make_search_fixture(self, count: int = 24) -> None:
         if self.sql("SELECT count(*) FROM sources WHERE id=15") != "0":
             return

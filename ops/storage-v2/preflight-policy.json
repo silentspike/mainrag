@@ -22,7 +22,8 @@
     "migrations/041_storage_v2_structural_card_bundle.sql",
     "migrations/042_storage_v2_oversized_search_documents.sql",
     "migrations/043_storage_v2_indexed_search_document_reuse.sql",
-    "migrations/044_storage_v2_late_search_materialization.sql"
+    "migrations/044_storage_v2_late_search_materialization.sql",
+    "migrations/045_storage_v2_scoped_posting_probes.sql"
   ],
   "required_extensions": {
     "vector": "0.8.2"
