@@ -52,7 +52,9 @@ acceptance.
 
 - Required checks are strict and source-bound to the GitHub Actions app:
   `ci-required`, `workflow-policy`, and `issue-contract`.
-- No approving review is required while only one qualified maintainer exists.
+- Pull requests remain required, with zero approving reviews while only one
+  qualified maintainer exists. Keep the review configuration object; `null`
+  disables that configuration instead of representing zero required approvals.
 - A changed head invalidates prior verification evidence and requires the
   protected checks and maintainer end-control pass to run again.
 - All review conversations must be resolved.
@@ -65,6 +67,12 @@ The checked-in `.github/scripts/repository-settings.sh` separates readback from
 mutation. Its `apply` mode is not authorization: the operator still needs an
 explicit owner instruction and must explicitly confirm the single-maintainer
 model. Post-apply readback is mandatory.
+
+The offline settings tests execute the same pure payload builder used by apply,
+with no real GitHub client on the test path. They verify the retained PR gate,
+source-bound checks, other protections, and the explicit confirmation gates.
+This is not live enforcement proof; controlled negative/positive PRs and the
+post-apply readback are still required to close the governance prerequisite.
 
 ## Required enforcement evidence
 
