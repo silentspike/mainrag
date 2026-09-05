@@ -20,6 +20,8 @@ python3 -m unittest \
   eval.storage_v2.schema.test_query_coverage_evidence \
   eval.storage_v2.schema.test_structural_card_reuse \
   eval.storage_v2.schema.test_structural_card_reuse_benchmark \
+  eval.storage_v2.schema.test_linear_hash_parts \
+  eval.storage_v2.schema.test_linear_hash_parts_benchmark \
   eval.storage_v2.test_release_candidate_operator
 ```
 
@@ -94,6 +96,31 @@ zero WAL records for complete reuse. Cold writes use identical rolled-back
 inputs; the warm fixture is first created by the previous function. Optional
 `TM_KENNZAHLEN` output uses `card_reuse`, separate from pipeline or API timings.
 It is a synthetic SQL comparison, not production latency or throughput proof.
+
+Migration 048 retains the canonical hash byte format while aggregating large
+part arrays without repeated copies of the growing root. The small-key path
+remains unchanged. Differential tests compare the previous function and an
+independent SHA-256 framing implementation across the crossover, binary/empty
+parts, Unicode domains, array dimensions/lower bounds, null rejection, and
+ordering/length separation. A 130,908-part synthetic generation root must match
+the independent reference within the unchanged 30-second statement budget.
+Migration replay must preserve ownership, ACLs, and immutable/strict function
+attributes. No production source is accepted merely because this fixture passes.
+
+After committing, run the bounded comparison on its own disposable server:
+
+```bash
+python3 -m eval.storage_v2.schema.benchmark_linear_hash_parts \
+  --repetitions 3 --output /tmp/storage-v2-hash-comparison.json
+```
+
+The comparison alternates old/new functions for 64, 1,000, 10,000, and 130,908
+parts. A completed timed query must match the independently computed digest.
+Baseline statement timeouts remain explicit censored observations with null
+timings; no zero, invented completion time, or speedup ratio is substituted.
+Every new-function query must finish and leave the fixture unchanged. Existing
+outputs, dirty implementation files, and external database sockets are rejected.
+Optional `TM_KENNZAHLEN` metrics use the separate `hash_parts` namespace.
 
 ## Reproducible SQL reuse comparison
 
