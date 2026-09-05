@@ -28,6 +28,32 @@ fn max_file_size() -> u64 {
         * 1024
 }
 
+/// Preserve traversal and ignore-file errors even when other entries succeed.
+/// A partially discovered tree must not look like a complete source snapshot.
+fn collect_walk_entries(
+    entries: impl IntoIterator<Item = Result<ignore::DirEntry, ignore::Error>>,
+) -> (Vec<PathBuf>, Vec<String>) {
+    let mut paths = Vec::new();
+    let mut errors = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => {
+                if let Some(error) = entry.error() {
+                    errors.push(format!("Failed to apply source ignore rules: {error}"));
+                }
+                if entry
+                    .file_type()
+                    .is_some_and(|file_type| file_type.is_file())
+                {
+                    paths.push(entry.path().to_path_buf());
+                }
+            }
+            Err(error) => errors.push(format!("Failed to discover source entry: {error}")),
+        }
+    }
+    (paths, errors)
+}
+
 // Binary file signatures to skip
 const BINARY_SIGNATURES: &[&[u8]] = &[
     b"\xFF\xFE",         // UTF-16 LE BOM
@@ -176,11 +202,10 @@ impl SourcePlugin for FilesystemPlugin {
 
 impl FilesystemPlugin {
     /// Collect files using WalkBuilder for proper .gitignore support
-    /// WalkBuilder handles:
-    /// - Nested .gitignore files in subdirectories
-    /// - Parent directory .gitignore
-    /// - Global gitignore (~/.gitignore)
-    /// - .git/info/exclude
+    /// WalkBuilder handles nested .gitignore and .git/info/exclude files.
+    ///
+    /// Parent and global ignore files are deliberately disabled so unrelated
+    /// user configuration cannot silently narrow the registered source.
     async fn collect_files(
         &self,
         root_path: &Path,
@@ -198,21 +223,26 @@ impl FilesystemPlugin {
         let root = root_path.to_path_buf();
 
         // WalkBuilder is sync but very fast - run in blocking thread
-        let paths: Vec<PathBuf> = spawn_blocking(move || {
-            WalkBuilder::new(&root)
-                .hidden(false) // Include hidden files/dirs (needed for .claude source)
-                .git_ignore(true) // Respect .gitignore (NESTED!)
-                .git_global(false) // Don't use ~/.gitignore (may have broad patterns)
-                .git_exclude(true) // Respect .git/info/exclude
-                .parents(false) // Don't check parent directories for ignore
-                .ignore(true) // Respect .ignore files
-                .build()
-                .filter_map(|entry| entry.ok())
-                .filter(|entry| entry.file_type().is_some_and(|ft| ft.is_file()))
-                .map(|entry| entry.path().to_path_buf())
-                .collect()
+        let (paths, discovery_errors) = spawn_blocking(move || {
+            collect_walk_entries(
+                WalkBuilder::new(&root)
+                    .hidden(false) // Include hidden files/dirs (needed for .claude source)
+                    .git_ignore(true) // Respect .gitignore (NESTED!)
+                    .git_global(false) // Don't use ~/.gitignore (may have broad patterns)
+                    .git_exclude(true) // Respect .git/info/exclude
+                    .parents(false) // Don't check parent directories for ignore
+                    .ignore(true) // Respect .ignore files
+                    .build(),
+            )
         })
         .await?;
+        errors.extend(discovery_errors);
+        if !load_content && !errors.is_empty() {
+            // Candidate construction fails before hashing, parsing, or writing
+            // any part of an incomplete source. Legacy sync retains its
+            // partial-result API, now with the missing discovery diagnostics.
+            return Ok(());
+        }
 
         // Process collected paths (extension/size/binary checks)
         // DEBUG: Count extensions found
@@ -431,6 +461,98 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn discovery_preserves_permission_errors_alongside_readable_entries() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-discovery-errors-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&directory.0).expect("create test directory");
+        let source = directory.0.join("readable.rs");
+        std::fs::write(&source, "fn readable() {}\n").expect("write readable fixture");
+        // Inject the walker's actual error type so this negative test also
+        // exercises the failure path on privileged remote build accounts.
+        let entries = WalkBuilder::new(&directory.0)
+            .build()
+            .chain(std::iter::once(Err(ignore::Error::Io(
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "synthetic unreadable source directory",
+                ),
+            ))));
+        let (paths, errors) = collect_walk_entries(entries);
+        assert_eq!(paths, vec![source]);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("synthetic unreadable source directory"));
+    }
+
+    #[tokio::test]
+    async fn storage_v2_discovery_reports_a_root_lost_before_walking() {
+        let directory = TestDirectory(std::env::temp_dir().join(format!(
+            "mainrag-discovery-missing-{}",
+            uuid::Uuid::new_v4()
+        )));
+        let mut files = Vec::new();
+        let mut errors = Vec::new();
+        FilesystemPlugin::new()
+            .collect_files(&directory.0, &directory.0, &mut files, &mut errors, false)
+            .await
+            .expect("return discovery diagnostics");
+        assert!(files.is_empty());
+        assert!(!errors.is_empty());
+        assert!(errors[0].contains("Failed to discover source entry"));
+    }
+
+    #[tokio::test]
+    async fn storage_v2_discovery_rejects_invalid_ignore_rules_before_content_work() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-discovery-ignore-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&directory.0).expect("create test directory");
+        std::fs::write(directory.0.join(".ignore"), "[z-a]\n")
+            .expect("write malformed ignore fixture");
+        std::fs::write(directory.0.join("readable.rs"), "fn readable() {}\n")
+            .expect("write readable fixture");
+        let result = FilesystemPlugin::new()
+            .sync_for_storage_v2(directory.0.to_str().expect("UTF-8 fixture path"))
+            .await
+            .expect("return invalid-ignore diagnostics");
+        assert!(result.files.is_empty());
+        assert!(!result.errors.is_empty());
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("ignore rules")));
+
+        let legacy = FilesystemPlugin::new()
+            .sync(directory.0.to_str().expect("UTF-8 fixture path"))
+            .await
+            .expect("legacy partial-result API");
+        assert_eq!(legacy.files.len(), 1);
+        assert!(!legacy.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn storage_v2_discovery_preserves_explicit_nested_exclusions() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-discovery-scope-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(directory.0.join("excluded")).expect("create excluded directory");
+        std::fs::write(directory.0.join(".ignore"), "/excluded/\n").expect("write source scope");
+        std::fs::write(directory.0.join("excluded/.ignore"), "[z-a]\n")
+            .expect("write ignored malformed fixture");
+        std::fs::write(directory.0.join("excluded/hidden.rs"), "fn hidden() {}\n")
+            .expect("write excluded source");
+        std::fs::write(directory.0.join("included.rs"), "fn included() {}\n")
+            .expect("write included source");
+        let result = FilesystemPlugin::new()
+            .sync_for_storage_v2(directory.0.to_str().expect("UTF-8 fixture path"))
+            .await
+            .expect("discover explicitly scoped source");
+        assert!(result.errors.is_empty());
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].path, "included.rs");
     }
 
     #[tokio::test]
