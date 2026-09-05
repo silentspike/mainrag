@@ -10,6 +10,7 @@ from pathlib import Path
 from storage_v2.shadow_slice import (
     comparable,
     exhaustive_fixture_scores,
+    has_complete_search_bindings,
     matches_exhaustive_reference,
     publish_telemetry,
     query_set_sha256,
@@ -20,6 +21,26 @@ from storage_v2.shadow_slice import (
 
 
 class ShadowSliceHarnessTests(unittest.TestCase):
+    def test_view_and_search_document_counts_need_not_match(self) -> None:
+        for views, documents in ((2, 1), (1, 2), (0, 0)):
+            self.assertTrue(has_complete_search_bindings({
+                "view_count": views, "search_document_count": documents,
+                "unbound_view_count": 0, "search_binding_error_count": 0,
+            }))
+
+    def test_missing_malformed_and_incomplete_bindings_fail_closed(self) -> None:
+        complete = {"view_count": 2, "search_document_count": 2,
+                    "unbound_view_count": 0, "search_binding_error_count": 0}
+        for key in complete:
+            state = dict(complete)
+            del state[key]
+            self.assertFalse(has_complete_search_bindings(state), key)
+            for invalid in (None, True, False, "0", 0.0, -1):
+                state[key] = invalid
+                self.assertFalse(has_complete_search_bindings(state), key)
+        for key in ("unbound_view_count", "search_binding_error_count"):
+            self.assertFalse(has_complete_search_bindings({**complete, key: 1}), key)
+
     def test_query_set_digest_is_sorted_and_length_framed(self) -> None:
         queries = [
             {"id": "b", "query": "beta", "phrase": False},

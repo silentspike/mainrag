@@ -22,6 +22,7 @@ python3 -m unittest \
   eval.storage_v2.schema.test_structural_card_reuse_benchmark \
   eval.storage_v2.schema.test_linear_hash_parts \
   eval.storage_v2.schema.test_linear_hash_parts_benchmark \
+  eval.storage_v2.schema.test_view_binding_verification \
   eval.storage_v2.test_release_candidate_operator
 ```
 
@@ -132,6 +133,22 @@ timings; no zero, invented completion time, or speedup ratio is substituted.
 Every new-function query must finish and leave the fixture unchanged. Existing
 outputs, dirty implementation files, and external database sockets are rejected.
 Optional `TM_KENNZAHLEN` metrics use the separate `hash_parts` namespace.
+
+Migration 050 preserves the distinct view/document counts without assuming a
+one-to-one relation. Named-generation state additionally reports views without
+components or bindings, and missing, extra, or identity-mismatched component
+bindings. The verifier requires explicit zero completeness errors; absent or
+malformed fields fail closed. Fixtures cover shared documents, mixed body/node
+composed views, rolled-back corruption (including equal-count false positives),
+empty generations, historical generation scope, authorization, unchanged prior
+fields, and replay with unchanged ownership and security attributes. Rust tests
+exercise the corresponding acceptance boundary. This is integrity verification,
+not a relaxation of search-quality or latency gates.
+The installed query's generic plan on 512 shared-document views must not rescan
+binding-related materialized sets per component. Missing/extra/identity checks probe the
+real view/ordinal and document-ID indexes, preserving complete evaluation even
+when generation-local cardinalities are underestimated. The shadow API harness
+uses the same completeness fields and rejects missing or non-integer metrics.
 
 ## Reproducible SQL reuse comparison
 
