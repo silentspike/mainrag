@@ -153,6 +153,35 @@ async fn register_multiple(
 
 async fn exercise_maintenance(client: &mut Client, observer: &Client, root: &Path) -> Result<()> {
     use super::super::pack_maintenance::{self, RepackPolicy};
+    let incomplete = Uuid::new_v4();
+    content_body::create_pack(
+        client,
+        incomplete,
+        &format!("{incomplete}.pack"),
+        Uuid::new_v4(),
+    )
+    .await?;
+    client.execute("INSERT INTO content_pack_entry(pack_id,ordinal,body_id,pack_offset,stored_length,codec,entry_digest) SELECT $1,0,id,0,1,'identity',decode(repeat('00',32),'hex') FROM content_body ORDER BY id LIMIT 1", &[&incomplete]).await?;
+    let incomplete_policy = RepackPolicy {
+        minimum_dead_bytes: 0,
+        minimum_dead_basis_points: 0,
+        max_entries: 16,
+        max_logical_bytes: 1048576,
+        reserve_free_bytes: 0,
+        io_buffer_bytes: 4096,
+        codec: BodyCodec::Zstd,
+    };
+    let error = pack_maintenance::repack(
+        client,
+        root,
+        incomplete,
+        Uuid::new_v4(),
+        0,
+        &incomplete_policy,
+    )
+    .await
+    .expect_err("incomplete manifest must be rejected");
+    ensure!(error.to_string().contains("completed publication"));
     for (case, failure) in [(0_u8, "insert"), (1_u8, "switch")] {
         let live = vec![b'a' + case; 256 * 1024];
         let dead = vec![b'c' + case; 128 * 1024];
