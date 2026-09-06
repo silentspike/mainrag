@@ -241,6 +241,31 @@ cargo test -p mainrag-api --lib integrity_only_comparison_benchmark -- --ignored
 Its public synthetic data and host timings do not qualify a production source,
 prove an end-to-end latency target, or resolve an intelligence-export SQL timeout.
 
+Migration 051 avoids constructing the complete protected intelligence JSONB tree
+for public digest-only exports. Every record still uses native JSONB serialization;
+ordered collection text preserves all eight v1 classes, empty arrays, counts,
+and the full protected payload SHA-256. Protected export still returns the full
+JSONB payload and supports the existing importer. Generation/authorization scope
+and the existing array ordering are unchanged. This is not constant-memory or an
+unlimited-size streaming format: PostgreSQL TEXT/JSONB size limits still apply.
+
+The differential tests compare both redactions against the original function,
+including provenance/import round trips, Unicode/escaping/numeric serialization,
+large collections, repeated order keys, error behavior, and migration reapply.
+A separate comparison runs complete public and protected exports in alternating
+order for three rounds on a disposable database:
+
+```bash
+python3 -m eval.storage_v2.schema.benchmark_intelligence_export --output export-comparison.json
+```
+
+It requires a committed implementation, retains complete payload hashes, and
+writes private evidence plus `TM_KENNZAHLEN` metrics when requested. Its client
+milliseconds include connection, transaction, export, and hash validation; they
+are not SQL execution-only time or production API latency. Failed or incomplete
+work cannot produce a successful timing summary. Actual source qualification is
+still required on the installed package under the original operational limits.
+
 Source names, IDs, paths, watermarks, queries, result sets, and raw resource
 measurements are protected operational evidence. Public progress may contain
 only source counts, type counts, aggregate sizes, hashes, outcomes, and opaque
