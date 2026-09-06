@@ -23,6 +23,36 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ReleaseCandidateOperatorTests(unittest.TestCase):
+    def test_query_seed_summary_counts_repeated_queries_not_independent_cases(self) -> None:
+        seeds = [{"query": "private-query", "expects_match": True,
+                  "expected_path_sha256": str(index)} for index in range(5)]
+        original = copy.deepcopy(seeds)
+        summary = MODULE.query_seed_summary(seeds)
+        self.assertEqual(summary["case_count"], 5)
+        self.assertEqual(summary["distinct_query_count"], 1)
+        self.assertEqual(summary["repeated_query_case_count"], 4)
+        self.assertEqual(summary["largest_query_group"], 5)
+        self.assertEqual(summary["positive_case_count"], 5)
+        self.assertEqual(summary["negative_case_count"], 0)
+        self.assertEqual(summary["representative_gold_coverage"], "NOT_ESTABLISHED")
+        self.assertNotIn("private-query", json.dumps(summary))
+        self.assertNotIn("expected_path_sha256", json.dumps(summary))
+        self.assertEqual(seeds, original)
+
+    def test_query_seed_summary_preserves_exact_query_and_empty_suite_semantics(self) -> None:
+        seeds = [{"query": query, "expects_match": positive}
+                 for query, positive in (("Term", True), ("term", True), ("term ", False))]
+        summary = MODULE.query_seed_summary(seeds)
+        self.assertEqual(summary["distinct_query_count"], 3)
+        self.assertEqual(summary["repeated_query_case_count"], 0)
+        self.assertEqual(summary["positive_case_count"], 2)
+        self.assertEqual(summary["negative_case_count"], 1)
+        empty = MODULE.query_seed_summary([])
+        for field in ("case_count", "distinct_query_count", "repeated_query_case_count",
+                      "largest_query_group", "positive_case_count", "negative_case_count"):
+            self.assertEqual(empty[field], 0)
+        self.assertEqual(empty["representative_gold_coverage"], "NOT_ESTABLISHED")
+
     def search_fixture(self):
         hit = {"chunk_id": 1, "file_path": "fixture.txt", "score": 1.0,
                "degradation": {stage: "unavailable" for stage in ("graph", "semantic", "rerank")}}
@@ -93,6 +123,7 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                 artifact = json.loads(arguments.output.read_text())
                 self.assertEqual(artifact["status"], "FAIL")
                 self.assertEqual(len(artifact["query_results"]), len(seeds))
+                self.assertEqual(artifact["query_seed_summary"], MODULE.query_seed_summary(seeds))
                 self.assertFalse(artifact["checks"]["performance"])
                 self.assertFalse(artifact["qualification_submitted"])
                 self.assertEqual(stat.S_IMODE(arguments.output.stat().st_mode), 0o600)
@@ -169,6 +200,8 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                 self.assertEqual(artifact["failed_gate"], phase)
                 self.assertEqual(artifact["checkpoint"], checkpoint)
                 self.assertEqual(artifact["verification"], verified)
+                self.assertEqual(artifact["query_seed_summary"],
+                                 MODULE.query_seed_summary(verified["query_seeds"]))
                 self.assertEqual(artifact["intelligence"], intelligence)
                 self.assertEqual(artifact["query_coverage"], [proof])
                 self.assertEqual(len(artifact["query_results"]), 1)

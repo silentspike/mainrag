@@ -11,7 +11,27 @@
     search_binding_error_count: ['Candidate binding verification: incorrect bindings', 'n_exact'],
   };
 
+  const searchFields = {
+    seed_count: ['Search diagnosis: seed cases', 'n_exact'],
+    unique_query_count: ['Search diagnosis: distinct query texts', 'n_exact'],
+    quality_passed: ['Search diagnosis: quality passed (0 = FAIL, 1 = PASS)', 'n_exact'],
+    current_http_client_ms_median: ['Current search: paired HTTP client median', 'ms_roh'],
+    candidate_http_client_ms_median: ['Candidate search: paired HTTP client median', 'ms_roh'],
+    current_server_ms_median: ['Current search: paired server median', 'ms_roh'],
+    candidate_server_ms_median: ['Candidate search: paired server median', 'ms_roh'],
+    current_unique_path_count_median: ['Current search: distinct top-10 paths median', 'n_exact'],
+    candidate_unique_path_count_median: ['Candidate search: distinct top-10 paths median', 'n_exact'],
+  };
+
   function candidateMetricInfo(path) {
+    if (path.startsWith('search_quality.')) {
+      const field = path.slice('search_quality.'.length);
+      if (!Object.hasOwn(searchFields, field)) return null;
+      const preference = field === 'quality_passed' ? 'higher'
+        : searchFields[field][1] === 'ms_roh' ? 'lower' : 'neutral';
+      return {l:searchFields[field][0], u:searchFields[field][1], k:'other', showZero:true, pinned:true, preference,
+        d:'Diagnostic only: quality_passed = 0 is FAIL and remains visible. Seed cases are not independent queries. Medians do not replace maximum-latency or quality gates. HTTP time includes transfer and JSON decode; server time is reported separately. More distinct paths do not prove better ranking. This does not qualify or activate a candidate.'};
+    }
     if (!path.startsWith('candidate_state.')) return null;
     const field = path.slice(16);
     if (!Object.hasOwn(fields, field)) return null;

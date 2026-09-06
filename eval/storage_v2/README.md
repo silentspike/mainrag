@@ -146,6 +146,22 @@ Run the public presentation regressions with
 `node --test eval/storage_v2/telemetry_viewer.test.cjs`. The required docs check
 also runs them without private assets or production access.
 
+Candidate verification evidence includes `query_seed_summary`: case counts,
+exact distinct query-text counts, repeated-query cases, and positive/negative
+counts. Different expected paths for the same query are not independent queries.
+This diagnostic does not remove cases, change seed selection, waive failed
+quality/latency checks, or establish representative gold coverage. It survives
+partial verification failures after the server returns its seed set.
+
+The same public presentation policy pins `search_quality` diagnostic metrics,
+including `quality_passed = 0` (FAIL). HTTP client and server clocks have separate
+millisecond labels; repeated-pair medians are not maximum-latency gates. A
+successful telemetry collection does not mean search quality passed. Distinct
+top-10 path counts describe result composition, not relevance improvement.
+Viewers must honor the metric's `preference`: `higher` for the quality-pass
+flag, `lower` for latency, and `neutral` for suite/result counts. Neutral metrics
+must not receive best/worst colors in cells, trends, or percentage deltas.
+
 Warm p50/p95/p99 may differ by at most 50% between the two local subprocess
 runs. This deliberately broad tolerance detects large regressions without
 pretending that scheduler and process-start noise are deterministic. Result
