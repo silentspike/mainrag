@@ -342,7 +342,11 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
 
 
 def verify_intelligence(api_url: str, token: str, source_id: int, generation: int,
-                        export: dict[str, Any]) -> dict[str, Any]:
+                        export: dict[str, Any], progress: dict[str, Any] | None = None) -> dict[str, Any]:
+    hashes: dict[str, str] = {}
+    if progress is not None:
+        progress["intelligence_result_sha256"] = hashes
+        progress["phase"] = "intelligence_layers"
     record_counts = export["payload"]["record_counts"]
     if int(record_counts["cards"]) == 0:
         return {"applicability": "unknown_not_applicable", "commands": []}
@@ -355,8 +359,10 @@ def verify_intelligence(api_url: str, token: str, source_id: int, generation: in
     name = generic.get("name") or layers[0].get("qualified_name")
     if not name:
         raise RuntimeError("candidate intelligence symbol omitted its name")
-    hashes = {"layers": sha256_text(json.dumps(layers, sort_keys=True))}
+    hashes["layers"] = sha256_text(json.dumps(layers, sort_keys=True))
     for command in ("card", "explain", "ownership"):
+        if progress is not None:
+            progress["phase"] = "intelligence_" + command
         query = urllib.parse.urlencode({**common, "command": command, "name": name})
         value = request(api_url, token, "GET", f"/api/v1/intelligence/shadow?{query}")
         hashes[command] = sha256_text(json.dumps(value, sort_keys=True))
@@ -366,12 +372,42 @@ def verify_intelligence(api_url: str, token: str, source_id: int, generation: in
 def verify(arguments: argparse.Namespace, token: str) -> None:
     if arguments.output.exists():
         raise RuntimeError("verification output already exists; retain it and choose a new attempt")
+    progress: dict[str, Any] = {
+        "phase": "checkpoint", "query_results": [], "comparisons": [], "query_coverage": [],
+        "qualification_attempted": False, "qualification_outcome": "NOT_ATTEMPTED",
+    }
+    try:
+        verify_candidate(arguments, token, progress)
+    except Exception as error:
+        # Preserve completed proof even when a later HTTP request or local check
+        # fails. Never copy exception messages, request headers, or response bodies.
+        if not arguments.output.exists():
+            failure = {"type": type(error).__name__}
+            cause = error
+            seen: set[int] = set()
+            while cause is not None and id(cause) not in seen:
+                seen.add(id(cause))
+                if isinstance(cause, urllib.error.HTTPError):
+                    failure["http_status"] = cause.code
+                    break
+                cause = cause.__cause__ or cause.__context__
+            atomic_private_json(arguments.output, {
+                **progress, "status": "FAIL", "failed_gate": progress["phase"],
+                "error": failure,
+            })
+        raise
+
+
+def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[str, Any]) -> None:
     checkpoint = json.loads(arguments.checkpoint.read_text(encoding="utf-8"))
+    progress["checkpoint"] = checkpoint
     if checkpoint["source_id"] != arguments.source_id or checkpoint["commit_sha"] != arguments.commit_sha:
         raise RuntimeError("checkpoint source or commit identity differs")
+    progress["phase"] = "restart_state"
     state = source_state(arguments.api_url, token, arguments.source_id, checkpoint["generation_seq"])
     if state["server_instance_id"] == checkpoint["server_instance_id"]:
         raise RuntimeError("API restart was not observed after candidate construction")
+    progress["phase"] = "restart_resume"
     repeated = request(
         arguments.api_url,
         token,
@@ -389,6 +425,8 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
     ):
         raise RuntimeError("restart/resume did not reproduce the completed candidate identity")
     validate_telemetry(repeated.get("telemetry"), int(repeated["item_count"]))
+    progress["restart_resume"] = {"server_instance_changed": True, "generation_reused": True}
+    progress["phase"] = "integrity"
     verified = request(
         arguments.api_url,
         token,
@@ -396,6 +434,7 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
         f"/api/v1/admin/sources/{arguments.source_id}/storage-v2-release-candidate-verify",
         {"generation_id": checkpoint["generation_id"]},
     )
+    progress["verification"] = verified
     if (
         int(verified["source_id"]) != arguments.source_id
         or int(verified["generation_id"]) != checkpoint["generation_id"]
@@ -407,18 +446,26 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
         raise RuntimeError("server verification returned a different candidate identity")
     intelligence = verify_intelligence(
         arguments.api_url, token, arguments.source_id, checkpoint["generation_seq"],
-        verified["intelligence_export"],
+        verified["intelligence_export"], progress,
     )
+    progress["intelligence"] = intelligence
 
-    comparisons = []
-    query_results = []
-    query_coverage = []
+    comparisons = progress["comparisons"]
+    query_results = progress["query_results"]
+    query_coverage = progress["query_coverage"]
     quality_passed = True
     performance_passed = True
     degradation_passed = True
-    for seed in verified["query_seeds"]:
+    for ordinal, seed in enumerate(verified["query_seeds"], 1):
+        pending = {"ordinal": ordinal, "id": seed["id"], "query_sha256": sha256_text(seed["query"])}
+        progress["pending_query"] = pending
         common = {"query": seed["query"], "source_id": arguments.source_id, "limit": 10}
+        progress["phase"] = "search_current"
         current = request(arguments.api_url, token, "POST", "/api/v1/search/keyword", common)
+        pending["current"] = ranked(current["results"])
+        pending["current_path_sha256"] = path_identity(current["results"])
+        pending["current_ms"] = current.get("took_ms")
+        progress["phase"] = "search_storage_v2"
         storage = request(arguments.api_url, token, "POST", "/api/v1/search/keyword", {
             **common,
             "read_path": "storage_v2",
@@ -428,6 +475,10 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
             "semantic_profile": "candidate-unavailable-v1",
             "rerank_profile": "candidate-unavailable-v1",
         })
+        pending["storage_v2"] = ranked(storage["results"])
+        pending["storage_v2_path_sha256"] = path_identity(storage["results"])
+        pending["storage_v2_ms"] = storage.get("took_ms")
+        progress["phase"] = "query_coverage"
         current_by_path: dict[str, list[str]] = {}
         for result in current["results"]:
             current_by_path.setdefault(sha256_text(result["file_path"]), []).append(
@@ -455,10 +506,13 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
             "storage_v2": ranked(storage["results"], current_by_path),
         })
         query_results.append(gates)
+        progress.pop("pending_query")
+    progress["phase"] = "candidate_search"
     if not query_results or not (quality_passed and performance_passed and degradation_passed):
         atomic_private_json(arguments.output, {
             "status": "FAIL", "failed_gate": "candidate_search",
             "checkpoint": checkpoint, "verification": verified,
+            "intelligence": intelligence,
             "query_results": query_results, "comparisons": comparisons,
             "query_coverage": query_coverage,
             "checks": {"quality": quality_passed and bool(query_results),
@@ -478,6 +532,7 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
         "restart_passed": True,
         "optional_degradation_passed": degradation_passed,
     }
+    progress["phase"] = "dual_read"
     dual = request(
         arguments.api_url,
         token,
@@ -487,9 +542,12 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
     )
     if dual.get("status") != "PASS" or dual.get("artifact", {}).get("unexplained_count") != 0:
         raise RuntimeError("server rejected the dual-read evidence")
+    progress["dual_read"] = dual
+    progress["phase"] = "resource_budget"
     free_bytes = shutil.disk_usage(arguments.pack_root).free
     if free_bytes < arguments.minimum_free_bytes:
         raise RuntimeError("resource reserve is below the approved minimum")
+    progress["phase"] = "server_checks"
     checks = {name: "PASS" for name in CHECKS}
     for name in (
         "artifact_root", "authorization", "body_pack_integrity", "intelligence",
@@ -522,6 +580,11 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
             "restart": {"server_instance_changed": True, "generation_reused": True},
         },
     }
+    progress["phase"] = "qualification"
+    progress["qualification"] = qualification
+    progress["qualification_attempted"] = True
+    # A lost response does not prove the server rejected or never received a POST.
+    progress["qualification_outcome"] = "UNKNOWN"
     result = request(
         arguments.api_url,
         token,
@@ -529,6 +592,9 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
         f"/api/v1/admin/sources/{arguments.source_id}/storage-v2-release-candidate-qualify",
         qualification,
     )
+    progress["qualification_outcome"] = "RESPONSE_RECEIVED"
+    progress["result"] = result
+    progress["phase"] = "evidence_write"
     artifact = {"checkpoint": checkpoint, "verification": verified, "dual_read": dual,
                 "query_coverage": query_coverage,
                 "qualification": qualification, "result": result}
