@@ -6,6 +6,8 @@ use uuid::Uuid;
 use crate::config::QdrantConfig;
 use crate::error::{AppError, Result};
 
+mod bootstrap;
+
 /// M6: Max retries for transient Qdrant errors (502, 503, 429, network)
 const MAX_RETRIES: u32 = 3;
 /// M6: Base delay for exponential backoff (doubles each retry)
