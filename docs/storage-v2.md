@@ -290,6 +290,18 @@ tests prove the commit fence, not complete reader integration or physical
 reclamation. The composed maintenance operator and crash/recovery qualification
 remain required by #58.
 
+The Rust candidate verifier and existing-body reuse reader now register epochs
+before querying placement and finish only after verification, including ordinary
+error returns. Cancellation retains an open epoch for fail-closed recovery.
+Packed reuse takes pack identity, offsets, codec and dictionary from the same
+placement query, even if placement changed after the initial identity lookup.
+The hosted Rust fixture combines real identity/zstd pack files with migrations
+030/055, a concurrent metadata switch, rejected early reclamation, exact-byte
+reads on both sides, delayed old-file removal, corruption rejection and retained
+epochs on cancellation. It uses minimal prerequisite tables and does not replace
+the full-schema authorization suite. A callable maintenance operator, automatic
+crash recovery and measured resource admission remain separate unfinished work.
+
 ## Lossless content graph
 
 `content_node` is an immutable DAG node. A node digest covers:

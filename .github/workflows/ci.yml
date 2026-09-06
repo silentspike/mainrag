@@ -125,6 +125,13 @@ jobs:
         run: |
           cargo test -p mainrag-api --lib services::index::intelligence_retry_tests::postgres_intelligence_retry_preserves_chunk_skips -- --ignored --exact --nocapture | tee intelligence-retry-tests.log
           python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("intelligence-retry-tests.log").read_text(), "Expected the real PostgreSQL fault-injection regression to execute"'
+      - name: Verify real pack readers through database switch
+        shell: bash
+        env:
+          MAINRAG_INDEX_TEST_DATABASE_URL: postgres://fixture:fixture_only@localhost:5432/mainrag_index_fixture
+        run: |
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib services::shadow_slice::pack_reader_tests::postgres_pack_readers_retain_real_bytes_through_switch -- --ignored --exact --nocapture | tee pack-reader-tests.log
+          python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("pack-reader-tests.log").read_text(), "Expected the real pack/database concurrency regression to execute"'
       - name: Stage pinned tokenizer for chunk reuse fixtures
         shell: bash
         env:
