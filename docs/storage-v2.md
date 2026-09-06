@@ -272,6 +272,24 @@ A crash before the metadata switch leaves an unreferenced candidate pack. A
 crash after the switch leaves the old verified pack available for deferred
 cleanup. Readers always observe a complete old or complete new pack.
 
+Migration 055 orders reader registration against switch **commit**, not merely
+the retirement timestamp. Registration takes a shared transaction advisory
+fence; switching takes the matching exclusive fence before GC/pack row locks.
+Both release at transaction completion. Registrations can proceed concurrently.
+An epoch must be registered before placement is fetched in a subsequent SQL
+statement, remain open through verified pack I/O, and finish only afterwards.
+Registration, switch, drain and reclamation reject non-READ-COMMITTED isolation:
+a retained snapshot could otherwise select an already retired placement.
+Do not combine registration and placement selection into a single statement
+or close an epoch merely because its registration transaction committed.
+
+Cancellation or disconnection is not proof that file I/O finished. An abandoned
+open epoch must retain bytes until reader quiescence is established; no elapsed
+time or backend disappearance alone authorizes removal. The SQL concurrency
+tests prove the commit fence, not complete reader integration or physical
+reclamation. The composed maintenance operator and crash/recovery qualification
+remain required by #58.
+
 ## Lossless content graph
 
 `content_node` is an immutable DAG node. A node digest covers:
