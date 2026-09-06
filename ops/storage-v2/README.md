@@ -222,6 +222,25 @@ checks the sealed ingest identity, item and membership counts, complete analysis
 accepted dual-read evidence, unchanged active pointer, and the one-current-RC
 invariant before transitioning `verified` to `release_candidate`.
 
+The candidate integrity verifier hashes both the stored entry and its complete
+decoded body without writing a temporary delivery file. It retains pack identity,
+bounds, dictionary, codec, decoded-length and full-digest checks. This path never
+delivers content: reconstruction and byte-for-byte reuse comparisons still use
+verified staging and check the bytes before delivery.
+
+An explicit filesystem comparison exercises the staged-to-sink and integrity-only
+paths in alternating order for three rounds, with 128 real verifications per
+variant. Linux evidence includes per-thread write-byte and write-call deltas;
+ordinary tests also require zero write calls for integrity-only reads. Run the
+comparison serially on the selected benchmark host:
+
+```bash
+cargo test -p mainrag-api --lib integrity_only_comparison_benchmark -- --ignored --nocapture --test-threads=1
+```
+
+Its public synthetic data and host timings do not qualify a production source,
+prove an end-to-end latency target, or resolve an intelligence-export SQL timeout.
+
 Source names, IDs, paths, watermarks, queries, result sets, and raw resource
 measurements are protected operational evidence. Public progress may contain
 only source counts, type counts, aggregate sizes, hashes, outcomes, and opaque

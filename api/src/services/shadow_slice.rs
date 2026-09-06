@@ -1661,13 +1661,11 @@ fn verify_stored_body_row(
                 .context("candidate packed body omitted its pack length")?,
         )?,
     );
-    let verified = reader.verify_to_staging(
+    reader.verify_integrity(
         &entry,
         dictionary.as_ref().map(|(_, bytes)| *bytes),
-        pack_root,
         io_buffer_bytes,
     )?;
-    verified.copy_to(std::io::sink())?;
     Ok(logical_length)
 }
 
