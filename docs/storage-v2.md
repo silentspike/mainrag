@@ -385,6 +385,9 @@ finite measurements and an exact source revision. It exports individual values,
 median/range/noise and the existing telemetry viewer summary structure. Output
 creation is exclusive: existing summaries are never overwritten. Public metric
 labels explicitly distinguish RSS, file bytes, clocks and failed integrity.
+Use `--cohort random-size16777216` (or the matching pattern/size) to export only
+four comparable settings for the existing five-column viewer. The complete
+48-run matrix is validated before this display filter is applied.
 CI retains the validated JSON as `pack-resource-summary`; raw private logs are
 not uploaded. Compare only equal size/pattern cohorts and build profiles.
 These debug/CI diagnostics do not choose production defaults. Optimized-build

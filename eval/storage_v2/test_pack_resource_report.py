@@ -3,7 +3,7 @@ import itertools
 import json
 import unittest
 
-from pack_resource_report import report
+from pack_resource_report import report, select_cohort
 
 
 def fixture():
@@ -42,6 +42,19 @@ class PackResourceReportTests(unittest.TestCase):
         for invalid in (rows[:-1], rows + rows[:1]):
             with self.assertRaises(ValueError):
                 convert(invalid)
+
+    def test_viewer_cohort_contains_only_comparable_settings(self):
+        full = convert(fixture())
+        selected = select_cohort(full, "random-size16777216")
+        self.assertEqual(len(selected["runs"]), 12)
+        self.assertEqual(len(selected["zustaende"]), 4)
+        self.assertEqual(len(full["runs"]), 48)
+        self.assertEqual(selected["validated_matrix_runs"], 48)
+        for metric in selected["metrics"].values():
+            self.assertEqual(len(metric["v"]), 12)
+            self.assertEqual(len(metric["z"]), 4)
+        with self.assertRaises(ValueError):
+            select_cohort(full, "unknown")
 
     def test_invalid_observations_fail_closed(self):
         for field, value in (("integrity_passed", 0), ("rewrite_ms", None), ("rewrite_ms", float("nan")),

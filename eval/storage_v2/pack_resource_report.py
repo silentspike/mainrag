@@ -91,12 +91,35 @@ def main():
     parser.add_argument("log", type=Path)
     parser.add_argument("--revision", required=True)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--cohort", choices=[f"{pattern}-size{size}" for pattern in ("repeat", "random") for size in (1048576, 16777216)],
+                        help="Export the four comparable settings for the existing five-column viewer")
     args = parser.parse_args()
     result = report(args.log.read_text(), args.revision)
+    if args.cohort:
+        result = select_cohort(result, args.cohort)
     # Never replace an existing telemetry summary or earlier measurement package.
     with args.output.open("x") as target:
         json.dump(result, target, indent=2, allow_nan=False)
     print(f"PASS: {len(result['runs'])} runs, {len(result['zustaende'])} settings; {result['profile']} diagnostic only")
+
+
+def select_cohort(result, cohort):
+    """Filter only after validation of the entire matrix, preserving within-cohort noise."""
+    prefix = f"pack-{cohort}-"
+    states = [state for state in result["zustaende"] if state["name"].startswith(prefix)]
+    if len(states) != 4:
+        raise ValueError("cohort must contain exactly four comparable settings")
+    names = {name for state in states for name in state["laeufe"]}
+    bases = {state["name"] for state in states}
+    metrics = {key: {"kind": metric["kind"],
+                     "v": {name: value for name, value in metric["v"].items() if name in names},
+                     "z": {base: value for base, value in metric["z"].items() if base in bases}}
+               for key, metric in result["metrics"].items()}
+    return {**result, "validated_matrix_runs": 48, "display_cohort": cohort,
+            "runs": [run for run in result["runs"] if run["name"] in names],
+            "zustaende": states, "wiederholungen": {base: result["wiederholungen"][base] for base in bases},
+            "metrics": metrics,
+            "noise": {key: max(value["streuung"] for value in metric["z"].values()) for key, metric in metrics.items()}}
 
 
 if __name__ == "__main__":
