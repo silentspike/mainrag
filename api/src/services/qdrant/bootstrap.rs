@@ -36,7 +36,7 @@ impl QdrantClient {
             .push("collections")
             .push(&self.chunk_collection);
 
-        if let Some(body) = self.read_bootstrap_collection(&url).await? {
+        if let Some(body) = self.read_bootstrap_collection(&url, false).await? {
             return validate_collection(&body, dimension);
         }
         let response = self
@@ -52,41 +52,59 @@ impl QdrantClient {
             .await
             .map_err(|_| AppError::Qdrant("Chunk collection creation transport failed".into()))?;
         // Qdrant v1.16.3 maps AlreadyExists to 409. Only that failed status
-        // permits race recovery; permission, timeout and server errors fail.
+        // permits race recovery; failed create/permission/transport errors fail.
         if !response.status().is_success() && response.status() != StatusCode::CONFLICT {
             return Err(AppError::Qdrant(format!(
                 "Chunk collection creation returned {}",
                 response.status()
             )));
         }
-        let body = self.read_bootstrap_collection(&url).await?.ok_or_else(|| {
-            AppError::Qdrant("Chunk collection absent after creation/readback".into())
-        })?;
+        let body = self
+            .read_bootstrap_collection(&url, true)
+            .await?
+            .ok_or_else(|| {
+                AppError::Qdrant("Chunk collection absent after creation/readback".into())
+            })?;
         validate_collection(&body, dimension)
     }
 
-    async fn read_bootstrap_collection(&self, url: &Url) -> Result<Option<Value>> {
-        let response = self
-            .client
-            .get(url.clone())
-            .header("api-key", &self.api_key)
-            .send()
-            .await
-            .map_err(|_| AppError::Qdrant("Chunk collection lookup transport failed".into()))?;
-        if response.status() == StatusCode::NOT_FOUND {
-            return Ok(None);
+    async fn read_bootstrap_collection(
+        &self,
+        url: &Url,
+        after_create: bool,
+    ) -> Result<Option<Value>> {
+        // Concurrent creation can expose a collection before its local shards
+        // are readable. Retry only readback 5xx responses, never a failed create
+        // or an initial lookup, and still require a compatible final response.
+        for attempt in 0..=3 {
+            let response = self
+                .client
+                .get(url.clone())
+                .header("api-key", &self.api_key)
+                .send()
+                .await
+                .map_err(|_| AppError::Qdrant("Chunk collection lookup transport failed".into()))?;
+            if after_create
+                && matches!(response.status().as_u16(), 500 | 502 | 503 | 504)
+                && attempt < 3
+            {
+                tokio::time::sleep(Duration::from_millis(100 * (1 << attempt))).await;
+                continue;
+            }
+            if response.status() == StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            if !response.status().is_success() {
+                return Err(AppError::Qdrant(format!(
+                    "Chunk collection lookup returned {}",
+                    response.status()
+                )));
+            }
+            return response.json().await.map(Some).map_err(|_| {
+                AppError::Qdrant("Malformed chunk collection lookup response".into())
+            });
         }
-        if !response.status().is_success() {
-            return Err(AppError::Qdrant(format!(
-                "Chunk collection lookup returned {}",
-                response.status()
-            )));
-        }
-        response
-            .json()
-            .await
-            .map(Some)
-            .map_err(|_| AppError::Qdrant("Malformed chunk collection lookup response".into()))
+        unreachable!("the final readback attempt always returns")
     }
 }
 

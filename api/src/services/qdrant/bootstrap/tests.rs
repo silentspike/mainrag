@@ -130,6 +130,24 @@ async fn bootstrap_failed_lookup_never_creates() {
 
 #[tokio::test]
 async fn bootstrap_only_conflict_allows_compatible_readback() {
+    scenario(
+        vec![
+            ("GET", StatusCode::NOT_FOUND, json!(null)),
+            ("PUT", StatusCode::CONFLICT, json!(null)),
+            ("GET", StatusCode::INTERNAL_SERVER_ERROR, json!(null)),
+            ("GET", StatusCode::OK, compatible(768)),
+        ],
+        false,
+        768,
+        true,
+    )
+    .await;
+    let mut unavailable = vec![
+        ("GET", StatusCode::NOT_FOUND, json!(null)),
+        ("PUT", StatusCode::OK, json!({"result": true})),
+    ];
+    unavailable.extend((0..4).map(|_| ("GET", StatusCode::INTERNAL_SERVER_ERROR, json!(null))));
+    scenario(unavailable, false, 768, false).await;
     for dimension in [768, 1024] {
         scenario(
             vec![
@@ -232,6 +250,7 @@ async fn bootstrap_real_qdrant_preserves_points_and_search() -> anyhow::Result<(
             .send().await?.error_for_status()?.json().await?;
         ensure!(before["result"] == after["result"]);
         ensure!(after["result"]["id"] == 7 && after["result"]["payload"] == payload);
+        ensure!(after["result"]["vector"] == json!(vector));
         let results = client.search_chunks_with_tenant(vector, 10, &TenantContext::Admin, Some(1)).await?;
         ensure!(results.len() == 1 && results[0].0 == 7);
         ensure!(client.count_by_source(1).await? == 1);
