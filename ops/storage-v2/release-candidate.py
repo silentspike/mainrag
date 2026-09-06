@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import struct
@@ -239,6 +240,82 @@ def query_seed_summary(seeds: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def query_difference_diagnostics(seed: dict[str, Any], current: dict[str, Any],
+                                 storage: dict[str, Any]) -> dict[str, Any]:
+    """Describe observed top-k differences, never infer corpus loss or relevance."""
+    baseline, candidate = path_identity(current["results"]), path_identity(storage["results"])
+    baseline_set, candidate_set = set(baseline), set(candidate)
+    expected = seed["expected_path_sha256"]
+    reasons = []
+    if seed["expects_match"]:
+        presence = (expected in baseline_set, expected in candidate_set)
+        expected_location = {(True, True): "both", (True, False): "current_only",
+                             (False, True): "storage_v2_only", (False, False): "neither"}[presence]
+        if not presence[0]:
+            reasons.append("expected_not_in_current_top_k")
+        if not presence[1]:
+            reasons.append("expected_not_in_storage_v2_top_k")
+    else:
+        expected_location = "not_applicable"
+        if baseline or candidate:
+            reasons.append("unexpected_negative_case_hits")
+    missing = len(baseline_set - candidate_set)
+    common_order_equal = ([path for path in baseline if path in candidate_set]
+                          == [path for path in candidate if path in baseline_set])
+    if missing:
+        reasons.append("baseline_paths_missing_from_top_k")
+    if not common_order_equal:
+        reasons.append("retained_baseline_order_changed")
+    return {"schema_version": "mainrag.storage-v2.query-difference.v1",
+            "expected_location": expected_location, "observations": reasons,
+            "baseline_paths_missing": missing,
+            "candidate_paths_added": len(candidate_set - baseline_set),
+            "common_path_order_equal": common_order_equal,
+            "current_repeated_path_hits": len(current["results"]) - len(baseline),
+            "storage_v2_repeated_path_hits": len(storage["results"]) - len(candidate),
+            "corpus_presence": "NOT_ESTABLISHED", "ranking_cause": "NOT_ESTABLISHED",
+            "acceptance_effect": "NONE"}
+
+
+def repeated_result_diagnostics(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    """Classify repeated reads of one path; never use across search engines.
+
+    Timing/other envelope metadata is excluded. Every returned hit field and the
+    total remain part of identity. A tie classification is not an acceptance.
+    """
+    def valid(response):
+        if not isinstance(response, dict) or not isinstance(response.get("results"), list):
+            return False
+        if "total" in response and (type(response["total"]) is not int or response["total"] < 0):
+            return False
+        rows = response["results"]
+        if any(not isinstance(row, dict) or type(row.get("chunk_id")) is not int
+               or row["chunk_id"] <= 0 or type(row.get("score")) not in (int, float)
+               or (type(row["score"]) is float and not math.isfinite(row["score"])) for row in rows):
+            return False
+        try:
+            json.dumps(rows, sort_keys=True, allow_nan=False)
+        except (TypeError, ValueError):
+            return False
+        return len({row["chunk_id"] for row in rows}) == len(rows)
+
+    classification = "UNCLASSIFIED_VARIATION"
+    if not valid(left) or not valid(right):
+        classification = "INVALID_RESULT_IDENTITY"
+    elif ("total" in left) == ("total" in right) and left.get("total") == right.get("total"):
+        a, b = left["results"], right["results"]
+        encoded_a = [json.dumps(row, sort_keys=True, allow_nan=False) for row in a]
+        encoded_b = [json.dumps(row, sort_keys=True, allow_nan=False) for row in b]
+        if encoded_a == encoded_b:
+            classification = "ORDERED_RESULTS_IDENTICAL"
+        elif (dict(zip((row["chunk_id"] for row in a), encoded_a))
+              == dict(zip((row["chunk_id"] for row in b), encoded_b))
+              and [row["score"] for row in a] == [row["score"] for row in b]):
+            classification = "IDENTICAL_HITS_EQUAL_SCORE_TIE_PERMUTATION"
+    return {"schema_version": "mainrag.storage-v2.repeated-result.v1",
+            "classification": classification, "acceptance_effect": "NONE"}
+
+
 def search_query_gates(seed: dict[str, Any], current: dict[str, Any],
                        storage: dict[str, Any], max_query_ms: int,
                        coverage: dict[str, Any] | None = None,
@@ -279,6 +356,7 @@ def search_query_gates(seed: dict[str, Any], current: dict[str, Any],
         "current_identity_sha256": sha256_text(json.dumps(current_paths, separators=(",", ":"))),
         "storage_v2_identity_sha256": sha256_text(json.dumps(storage_paths, separators=(",", ":"))),
         "coverage": coverage_check,
+        "diagnostics": query_difference_diagnostics(seed, current, storage),
     }
 
 
