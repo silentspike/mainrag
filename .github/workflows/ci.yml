@@ -76,6 +76,11 @@ jobs:
         run: |
           cargo test -p mainrag-api --bin mainrag-api backfill_tests -- --nocapture | tee backfill-tests.log
           python3 -c 'from pathlib import Path; assert "2 passed; 0 failed;" in Path("backfill-tests.log").read_text(), "Expected both backfill regression tests to execute"'
+      - name: Verify chunk probe reuse
+        shell: bash
+        run: |
+          cargo test -p mainrag-api --lib chunk_reuse_tests -- --nocapture | tee chunk-reuse-tests.log
+          python3 -c 'from pathlib import Path; assert "4 passed; 0 failed; 1 ignored;" in Path("chunk-reuse-tests.log").read_text(), "Expected all four chunk reuse regressions and the opt-in benchmark"'
 
   docs-links:
     name: docs link sanity

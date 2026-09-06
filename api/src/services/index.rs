@@ -13,7 +13,7 @@ use tracing::{debug, error, info, warn};
 use crate::db::{PostgresPool, DEFAULT_USER_ID};
 use crate::error::{AppError, Result};
 use crate::plugins::{self, RawFile};
-use crate::services::chunker::{get_default_chunker, Chunker};
+use crate::services::chunker::{get_default_chunker, Chunk, Chunker};
 use crate::services::intelligence::IntelligenceService;
 use crate::services::{QdrantClient, TeiClient};
 use pgvector::Vector;
@@ -144,6 +144,20 @@ fn chunk_content_sha256(text: &str) -> String {
     h.update(text.as_bytes());
     format!("{:x}", h.finalize())
 }
+
+/// Consume an existing full-file probe, including an empty result. New files
+/// and append-only deltas have no probe and are chunked exactly once here.
+fn chunks_for_write(
+    probe: Option<Vec<Chunk>>,
+    chunker: &dyn Chunker,
+    content: &str,
+    language: Option<&str>,
+) -> Vec<Chunk> {
+    probe.unwrap_or_else(|| chunker.chunk(content, language))
+}
+
+#[cfg(test)]
+mod chunk_reuse_tests;
 
 /// Max length for CCH (Contextual Chunk Header) prefix
 #[allow(dead_code)]
@@ -980,9 +994,9 @@ impl IndexService {
         // For non-append-only files with existing chunks: generate new chunks,
         // compare content hashes + version metadata against existing chunks.
         // If ALL match → skip re-embed entirely (file record already updated above).
-        if !is_append_only && existing_file_id.is_some() {
-            let probe_chunks = self.chunker.chunk(content, language.as_deref());
-
+        let probe_chunks = (!is_append_only && existing_file_id.is_some())
+            .then(|| self.chunker.chunk(content, language.as_deref()));
+        if let Some(probe_chunks) = probe_chunks.as_ref() {
             if !probe_chunks.is_empty() {
                 let cv = chunker_version();
                 let mid = embedding_model_id();
@@ -1171,16 +1185,21 @@ impl IndexService {
             content
         };
 
-        // NOTE: This is the first Tree-sitter parse pass (chunking). The second pass
-        // happens later in intelligence.analyze_file() for symbol/call-graph extraction.
-        // Both are fast (~2-5ms each) thanks to per-language Mutex locking (B5 fix).
-        // Future optimization: share the AST between chunking and intelligence extraction.
+        // Reuse the full-file version probe by move when present; new files and
+        // append-only deltas have not been chunked yet. Intelligence parsing is
+        // separate and unchanged. Keep truncation after the version comparison.
         info!(
-            "Calling semantic chunker for file {} with {} bytes...",
+            "Preparing chunks for file {} with {} bytes (reuse_probe={})",
             rel_path,
-            content_to_chunk.len()
+            content_to_chunk.len(),
+            probe_chunks.is_some()
         );
-        let mut semantic_chunks = self.chunker.chunk(content_to_chunk, language.as_deref());
+        let mut semantic_chunks = chunks_for_write(
+            probe_chunks,
+            &*self.chunker,
+            content_to_chunk,
+            language.as_deref(),
+        );
 
         // Enterprise guard: MAX_CHUNKS_PER_FILE prevents any single file from
         // generating unbounded chunks (e.g., 41MB JSON → 3000+ chunks → hours of TEI calls).
