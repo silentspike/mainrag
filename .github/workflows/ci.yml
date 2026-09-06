@@ -92,6 +92,11 @@ jobs:
         run: |
           cargo test -p mainrag-api --bin mainrag-api backfill_tests -- --nocapture | tee backfill-tests.log
           python3 -c 'from pathlib import Path; assert "2 passed; 0 failed;" in Path("backfill-tests.log").read_text(), "Expected both backfill regression tests to execute"'
+      - name: Verify independent chunk budgets
+        shell: bash
+        run: |
+          cargo test -p mainrag-api --lib services::index::chunk_limits::tests -- --nocapture | tee chunk-limit-tests.log
+          python3 -c 'from pathlib import Path; assert "6 passed; 0 failed; 0 ignored;" in Path("chunk-limit-tests.log").read_text(), "Expected all six chunk-budget regressions to execute"'
       - name: Verify intelligence retry against isolated PostgreSQL
         shell: bash
         env:

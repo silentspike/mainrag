@@ -26,8 +26,10 @@ fn embedding_batch_size() -> usize {
         .unwrap_or(96)
 }
 
-/// Maximum chunks per file — prevents a single large file from blocking the pipeline.
-/// Files generating more chunks than this are truncated with a warning.
+mod chunk_limits;
+
+/// Global maximum at the capped indexing paths. Non-conversation output also
+/// has an independent budget so conversation tuning does not expand it.
 fn max_chunks_per_file() -> usize {
     std::env::var("MAX_CHUNKS_PER_FILE")
         .ok()
@@ -1222,18 +1224,7 @@ impl IndexService {
             language.as_deref(),
         );
 
-        // Enterprise guard: MAX_CHUNKS_PER_FILE prevents any single file from
-        // generating unbounded chunks (e.g., 41MB JSON → 3000+ chunks → hours of TEI calls).
-        let max_chunks = max_chunks_per_file();
-        if semantic_chunks.len() > max_chunks {
-            warn!(
-                "File {} generated {} chunks (exceeds MAX_CHUNKS_PER_FILE={}), truncating to {} chunks. \
-                 Consider increasing MAX_CHUNKS_PER_FILE or excluding this file.",
-                rel_path, semantic_chunks.len(), max_chunks, max_chunks
-            );
-            metrics::counter!("mainrag_file_chunks_truncated").increment(1);
-            semantic_chunks.truncate(max_chunks);
-        }
+        chunk_limits::apply(&mut semantic_chunks, max_chunks_per_file());
 
         // Sprint 8.1: Log chunk-size statistics per file
         if !semantic_chunks.is_empty() {
@@ -1853,11 +1844,11 @@ impl IndexService {
             })?;
 
             // Use the streaming chunker (parses messages one-by-one, no full DOM)
-            let chunks = self.chunker.chunk(&content, language.as_deref());
+            let mut chunks = self.chunker.chunk(&content, language.as_deref());
             drop(content); // Free the file content immediately after chunking
 
-            let max_chunks = max_chunks_per_file();
-            let chunk_count = chunks.len().min(max_chunks);
+            chunk_limits::apply(&mut chunks, max_chunks_per_file());
+            let chunk_count = chunks.len();
 
             // Process in batches
             for batch_start in (0..chunk_count).step_by(batch_size) {
