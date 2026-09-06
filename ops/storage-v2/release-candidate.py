@@ -216,6 +216,29 @@ def query_set_sha256(comparisons: list[dict[str, Any]]) -> str:
     return digest.hexdigest()
 
 
+def query_seed_summary(seeds: list[dict[str, Any]]) -> dict[str, Any]:
+    """Describe suite diversity without changing cases or acceptance policy.
+
+    Equality is exact query-text equality, not inferred semantic equivalence.
+    Multiple expected paths for one query are cases, not independent queries.
+    Counts alone do not prove representative gold coverage.
+    """
+    query_counts: dict[str, int] = {}
+    for seed in seeds:
+        query = seed["query"]
+        query_counts[query] = query_counts.get(query, 0) + 1
+    return {
+        "schema_version": "mainrag.storage-v2.query-seed-summary.v1",
+        "case_count": len(seeds),
+        "distinct_query_count": len(query_counts),
+        "repeated_query_case_count": len(seeds) - len(query_counts),
+        "largest_query_group": max(query_counts.values(), default=0),
+        "positive_case_count": sum(seed["expects_match"] is True for seed in seeds),
+        "negative_case_count": sum(seed["expects_match"] is False for seed in seeds),
+        "representative_gold_coverage": "NOT_ESTABLISHED",
+    }
+
+
 def search_query_gates(seed: dict[str, Any], current: dict[str, Any],
                        storage: dict[str, Any], max_query_ms: int,
                        coverage: dict[str, Any] | None = None,
@@ -435,6 +458,7 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
         {"generation_id": checkpoint["generation_id"]},
     )
     progress["verification"] = verified
+    progress["query_seed_summary"] = query_seed_summary(verified["query_seeds"])
     if (
         int(verified["source_id"]) != arguments.source_id
         or int(verified["generation_id"]) != checkpoint["generation_id"]
@@ -514,6 +538,7 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             "checkpoint": checkpoint, "verification": verified,
             "intelligence": intelligence,
             "query_results": query_results, "comparisons": comparisons,
+            "query_seed_summary": progress["query_seed_summary"],
             "query_coverage": query_coverage,
             "checks": {"quality": quality_passed and bool(query_results),
                        "performance": performance_passed and bool(query_results),
@@ -574,6 +599,7 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             "dual_read_evidence_id": dual["evidence_id"],
             "dual_read_artifact_sha256": dual["artifact_sha256"],
             "query_results": query_results,
+            "query_seed_summary": progress["query_seed_summary"],
             "query_coverage_sha256": sha256_text(json.dumps(query_coverage, sort_keys=True)),
             "intelligence": intelligence,
             "resource": {"free_bytes": free_bytes, "minimum_free_bytes": arguments.minimum_free_bytes},
