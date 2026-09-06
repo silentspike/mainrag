@@ -60,6 +60,110 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                 "expected_path_sha256": MODULE.sha256_text("fixture.txt")}
         return seed, {"results": [hit], "took_ms": 1}
 
+    def test_difference_separates_missing_expected_from_missing_baseline(self):
+        seed, current = self.search_fixture()
+        candidate = {**current, "results": [{**current["results"][0], "file_path": "other.txt"}]}
+        for baseline, storage, location in ((current, current, "both"),
+                                            (current, candidate, "current_only"),
+                                            (candidate, current, "storage_v2_only"),
+                                            (candidate, candidate, "neither")):
+            with self.subTest(location=location):
+                result = MODULE.search_query_gates(seed, baseline, storage, 2000)
+                self.assertEqual(result["diagnostics"]["expected_location"], location)
+                self.assertEqual(result["quality_passed"], location == "both")
+                self.assertEqual(result["diagnostics"]["corpus_presence"], "NOT_ESTABLISHED")
+                self.assertEqual(result["diagnostics"]["ranking_cause"], "NOT_ESTABLISHED")
+
+    def test_difference_separates_reordering_displacement_and_duplicate_paths(self):
+        seed, current = self.search_fixture()
+        first = current["results"][0]
+        second = {**first, "chunk_id": 2, "file_path": "second.txt"}
+        third = {**first, "chunk_id": 3, "file_path": "third.txt"}
+        duplicate = {**first, "chunk_id": 4}
+        baseline = {**current, "results": [first, duplicate, second]}
+        reordered = {**current, "results": [second, third, first]}
+        snapshot = copy.deepcopy((seed, baseline, reordered))
+        diagnostic = MODULE.query_difference_diagnostics(seed, baseline, reordered)
+        self.assertEqual(diagnostic["baseline_paths_missing"], 0)
+        self.assertEqual(diagnostic["candidate_paths_added"], 1)
+        self.assertEqual(diagnostic["current_repeated_path_hits"], 1)
+        self.assertEqual(diagnostic["storage_v2_repeated_path_hits"], 0)
+        self.assertEqual(diagnostic["observations"], ["retained_baseline_order_changed"])
+        self.assertEqual((seed, baseline, reordered), snapshot)
+        displaced = MODULE.query_difference_diagnostics(seed, baseline, {**current, "results": [first, third]})
+        self.assertTrue(displaced["common_path_order_equal"])
+        self.assertEqual(displaced["observations"], ["baseline_paths_missing_from_top_k"])
+
+    def test_difference_does_not_publish_source_text_or_exempt_negative_cases(self):
+        seed, current = self.search_fixture()
+        negative = {**seed, "expects_match": False}
+        empty = {"results": [], "took_ms": 1}
+        diagnostic = MODULE.query_difference_diagnostics(negative, empty, current)
+        self.assertEqual(diagnostic["expected_location"], "not_applicable")
+        self.assertIn("unexpected_negative_case_hits", diagnostic["observations"])
+        self.assertEqual(diagnostic["acceptance_effect"], "NONE")
+        self.assertFalse(MODULE.search_query_gates(negative, empty, current, 2000)["quality_passed"])
+        for secret in (seed["query"], seed["expected_path_sha256"], "fixture.txt"):
+            self.assertNotIn(secret, json.dumps(diagnostic))
+
+    def test_repeat_classifies_only_complete_equal_score_hit_permutations(self):
+        _, current = self.search_fixture()
+        first = current["results"][0]
+        second = {**first, "chunk_id": 2, "content": "private-body"}
+        baseline = {**current, "total": 2, "results": [first, second]}
+        reordered = {**baseline, "results": [second, first], "took_ms": 2001}
+        snapshot = copy.deepcopy((baseline, reordered))
+        result = MODULE.repeated_result_diagnostics(baseline, reordered)
+        self.assertEqual(result["classification"], "IDENTICAL_HITS_EQUAL_SCORE_TIE_PERMUTATION")
+        self.assertEqual(result["acceptance_effect"], "NONE")
+        self.assertEqual((baseline, reordered), snapshot)
+        self.assertNotIn("private-body", json.dumps(result))
+        identical = MODULE.repeated_result_diagnostics(baseline, {**baseline, "took_ms": 5})
+        self.assertEqual(identical["classification"], "ORDERED_RESULTS_IDENTICAL")
+
+    def test_repeat_rejects_changed_hit_fields_totals_and_non_tie_order(self):
+        _, current = self.search_fixture()
+        first = current["results"][0]
+        second = {**first, "chunk_id": 2, "score": 2}
+        baseline = {**current, "total": 2, "results": [second, first]}
+        alternatives = [
+            {**baseline, "total": 3},
+            {**current, "results": baseline["results"]},
+            {**baseline, "results": [first, second]},
+            {**baseline, "results": [second, {**first, "content": "changed"}]},
+            {**baseline, "results": [second, {**first, "chunk_id": 3}]},
+            {**baseline, "results": [second]},
+        ]
+        for changed in alternatives:
+            with self.subTest(changed=changed):
+                self.assertEqual(MODULE.repeated_result_diagnostics(baseline, changed)["classification"],
+                                 "UNCLASSIFIED_VARIATION")
+        with_boolean = {**current, "results": [{**first, "metadata": True}]}
+        with_number = {**current, "results": [{**first, "metadata": 1}]}
+        self.assertEqual(MODULE.repeated_result_diagnostics(with_boolean, with_number)["classification"],
+                         "UNCLASSIFIED_VARIATION")
+
+    def test_repeat_fails_closed_on_invalid_identities(self):
+        _, current = self.search_fixture()
+        first = current["results"][0]
+        malformed = [{}, {"results": None}, {**current, "total": True},
+                     {**current, "total": -1}, {**current, "results": [first, first]}]
+        malformed += [{**current, "results": [{**first, field: value}]}
+                      for field, value in (("chunk_id", True), ("chunk_id", 0), ("chunk_id", "1"),
+                                           ("score", True), ("score", float("nan")),
+                                           ("score", float("inf")), ("score", "1"))]
+        for invalid in malformed:
+            with self.subTest(invalid=invalid):
+                self.assertEqual(MODULE.repeated_result_diagnostics(invalid, invalid)["classification"],
+                                 "INVALID_RESULT_IDENTITY")
+
+    def test_repeat_empty_results_are_identity_not_positive_quality(self):
+        seed, _ = self.search_fixture()
+        empty = {"results": [], "total": 0, "took_ms": 1}
+        self.assertEqual(MODULE.repeated_result_diagnostics(empty, empty)["classification"],
+                         "ORDERED_RESULTS_IDENTICAL")
+        self.assertFalse(MODULE.search_query_gates(seed, empty, empty, 2000)["quality_passed"])
+
     def test_search_gates_preserve_exact_quality_and_latency_thresholds(self) -> None:
         seed, current = self.search_fixture()
         for millis, passed in ((0, True), (2000, True), (2001, False), (-1, False),

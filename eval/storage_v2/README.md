@@ -153,6 +153,28 @@ This diagnostic does not remove cases, change seed selection, waive failed
 quality/latency checks, or establish representative gold coverage. It survives
 partial verification failures after the server returns its seed set.
 
+Each search gate also emits count-only `diagnostics`. These distinguish expected
+paths absent from either top-k, displaced baseline paths, changed common-path
+order, and multiple hits from one path. A top-k omission does not prove absence
+from the corpus or establish a ranking cause. These observations do not modify
+any acceptance decision. `repeated_result_diagnostics` is for repeated reads of
+the **same** engine and request: it compares every hit field and the total,
+classifying only exact identity or complete equal-score hit permutations.
+It rejects duplicate identities, non-finite scores, and malformed identities;
+all other differences remain unclassified. Timing is excluded from identity,
+but latency checks are unchanged. The helper is not a cross-engine equivalence
+test and does not turn a quality failure into a pass.
+
+The legacy keyword query now uses chunk ID ascending after score descending in
+all four tenant/source branches. This stabilizes ties, including membership at
+the result limit; it does not change the relevance score or access predicates.
+`python3 -m unittest eval/storage_v2/schema/test_keyword_tie_order.py` executes
+the actual Rust SQL templates on a disposable PostgreSQL fixture, including
+term/phrase cases, both insertion orders, ties crossing the limit, unequal
+scores, and tenant/source filtering. Changing the baseline tie policy requires
+fresh runtime-bound comparison evidence after deployment; earlier evidence is
+retained, not relabeled as a measurement of this implementation.
+
 The same public presentation policy pins `search_quality` diagnostic metrics,
 including `quality_passed = 0` (FAIL). HTTP client and server clocks have separate
 millisecond labels; repeated-pair medians are not maximum-latency gates. A
