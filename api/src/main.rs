@@ -114,14 +114,24 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
         );
     }
 
+    // Construct TEI first so bootstrap uses the same configured dimension as indexing.
+    let tei = Arc::new(TeiClient::new(&config.tei));
+
     // Create Qdrant client
     let qdrant = Arc::new(QdrantClient::new(&config.qdrant));
     if cpu_mode {
         tracing::warn!("CPU mode: skipping Qdrant startup health check");
     } else {
-        qdrant.health_check().await?;
+        anyhow::ensure!(
+            qdrant.health_check().await?,
+            "Qdrant startup health check failed"
+        );
         tracing::info!("Qdrant connection established (on_disk mode)");
     }
+
+    qdrant
+        .ensure_chunk_collection(cpu_mode, tei.get_embedding_dim())
+        .await?;
 
     // K4-FIX4: Auto-create user_id payload index for tenant isolation (idempotent)
     if cpu_mode {
@@ -136,8 +146,7 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
         }
     }
 
-    // Create TEI client
-    let tei = Arc::new(TeiClient::new(&config.tei));
+    // Check TEI after collection bootstrap.
     if cpu_mode {
         tracing::warn!("CPU mode: skipping TEI startup health check");
     } else {
