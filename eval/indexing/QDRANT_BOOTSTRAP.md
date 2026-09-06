@@ -12,11 +12,17 @@ ef_construct=200, and scalar INT8 quantization with always_ram=false.
 
 An existing collection is read and validated, never updated, deleted or reset.
 Its vector dimension/distance/layout must match; its existing HNSW/quantization
-tuning is preserved. Permission errors, transport errors, server errors and
+tuning is preserved. Permission errors, transport errors, persistent server errors and
 malformed schemas fail startup, rather than being interpreted as absence.
 Only an HTTP 409 create conflict permits concurrent-start recovery by reading
 and validating the resulting collection. A successful create also requires
 compatible readback.
+
+After a successful create or confirmed 409 only, a readback HTTP
+500/502/503/504 is retried up to three times (100/200/400 ms delays) because
+new local shards can briefly be unreadable. Initial lookup failures and failed
+create requests are never reinterpreted as absence. Persistent readback errors,
+authorization failures, malformed schemas and mismatches still fail startup.
 
 The API shape follows the [collection API](https://api.qdrant.tech/api-reference/collections/create-collection).
 The [pinned v1.16.3 status mapping](https://github.com/qdrant/qdrant/blob/v1.16.3/src/actix/helpers.rs)
