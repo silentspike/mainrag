@@ -219,10 +219,48 @@ jobs:
           curl -sf http://localhost:6333/readyz
           curl -sf http://localhost:6333/collections | python3 -m json.tool
 
+  schema-search:
+    name: storage-v2 empty search branches
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: pgvector/pgvector@sha256:1d50c689b0a6511b9ea0a15615281c81a59fd04a08eb35057ec8646fb3a2118a
+        env:
+          POSTGRES_USER: fixture
+          POSTGRES_PASSWORD: fixture_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fixture -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify full-result identity and zero empty-branch document scans
+        env:
+          STORAGE_V2_TEST_SOCKET: '127.0.0.1'
+          PGUSER: fixture
+          PGPASSWORD: fixture_only
+        run: |
+          python3 - <<'PY'
+          import unittest
+          suite = unittest.defaultTestLoader.loadTestsFromNames([
+              'eval.storage_v2.schema.test_empty_search_branches',
+              'eval.storage_v2.schema.test_empty_search_branch_benchmark',
+          ])
+          assert suite.countTestCases() >= 20, 'Expected all schema and benchmark regressions'
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          raise SystemExit(0 if result.wasSuccessful() and not result.skipped else 1)
+          PY
+
   required:
     name: ci-required
     if: always()
-    needs: [fmt, clippy, check, docs-links, integration]
+    needs: [fmt, clippy, check, docs-links, integration, schema-search]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
