@@ -808,6 +808,10 @@ fn manifest_digest(pack_id: Uuid, entries: &[PackEntry], stored_bytes: u64) -> [
     hasher.finalize().into()
 }
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "pack_resource_tests.rs"]
+mod resource_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
