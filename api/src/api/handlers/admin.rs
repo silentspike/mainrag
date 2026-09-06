@@ -951,6 +951,12 @@ pub async fn admin_backfill_orphaned(
 ) -> Result<Json<BackfillResult>> {
     use pgvector::Vector;
 
+    if state.config.server.cpu_mode {
+        return Err(AppError::BadRequest(
+            "Orphaned backfill requires the embedding service and is unavailable in CPU mode; start full mode with mainrag --gpu, then retry".to_string(),
+        ));
+    }
+
     let model_name = embedding_storage_model_name(state.tei.get_model_name());
     let mut total_processed = 0;
     let mut batch_count = 0;
@@ -1290,7 +1296,7 @@ pub async fn admin_backfill_qdrant_user_ids(
 ) -> Result<Json<BackfillResult>> {
     if state.config.server.cpu_mode {
         return Err(AppError::BadRequest(
-            "requires Qdrant - not available in CPU mode".to_string(),
+            "Qdrant user-id backfill requires Qdrant and is unavailable in CPU mode; start full mode with mainrag --gpu, then retry".to_string(),
         ));
     }
 
@@ -1377,3 +1383,6 @@ pub async fn admin_backfill_qdrant_user_ids(
         message,
     }))
 }
+
+#[cfg(test)]
+mod backfill_tests;
