@@ -12,6 +12,7 @@ pub mod embeddings;
 pub mod generation_ingest;
 pub mod gpu_semaphore;
 pub mod index;
+pub mod ingest_observation;
 pub mod intelligence;
 #[cfg(feature = "storage-v2-intelligence")]
 #[allow(dead_code)]
@@ -28,7 +29,7 @@ pub mod retrieval_v2;
 pub mod search;
 #[cfg(feature = "storage-v2-retrieval")]
 pub mod shadow_slice;
-#[cfg(feature = "storage-v2-retrieval")]
+#[allow(dead_code)]
 pub mod source_read;
 #[allow(dead_code)]
 pub mod watch;

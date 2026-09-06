@@ -618,10 +618,12 @@ where
     let adapter_started = Instant::now();
     let plugin = plugins::get_plugin(source_type)
         .ok_or_else(|| anyhow::anyhow!("source adapter is unavailable"))?;
-    let sync = match mode {
-        SliceMode::PublicFixture => plugin.sync(source_path).await?,
-        SliceMode::ReleaseCandidate => plugin.sync_for_storage_v2(source_path).await?,
+    let observed_sync = match mode {
+        SliceMode::PublicFixture => plugin.sync_observed(source_path).await?,
+        SliceMode::ReleaseCandidate => plugin.sync_for_storage_v2_observed(source_path).await?,
     };
+    measurements.adapter_source_read_bytes = observed_sync.application_read_bytes;
+    let sync = observed_sync.result;
     if !sync.errors.is_empty() || (mode == SliceMode::PublicFixture && sync.files.is_empty()) {
         bail!("source adapter returned errors or an invalid empty fixture");
     }
@@ -2443,6 +2445,51 @@ mod tests {
         let json = measurements.to_telemetry_json();
         assert_eq!(json["source_io"]["coverage"], "PARTIAL");
         assert!(json["source_io"]["adapter_read_bytes"].is_null());
+        assert!(json["source_io"]["device_read_bytes"].is_null());
+    }
+
+    #[tokio::test]
+    async fn observed_adapter_to_hash_and_repeated_load_reconciles_actual_bytes() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-composed-reads-{}", Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let content = b"fn sample() {}\n";
+        std::fs::write(directory.0.join("sample.rs"), content).unwrap();
+        let plugin = plugins::get_plugin("fs").unwrap();
+        let observed = plugin
+            .sync_for_storage_v2_observed(directory.0.to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(observed.result.errors.is_empty());
+        let mut files = observed
+            .result
+            .files
+            .into_iter()
+            .map(SliceFile::from)
+            .collect::<Vec<_>>();
+        let (_, logical) = canonical_fixture_hash(&mut files).await.unwrap();
+        files[0].load_verified_bytes().await.unwrap();
+        files[0].load_verified_bytes().await.unwrap();
+        let mut measurements = ShadowIngestMeasurements::default();
+        measurements.input_bytes = logical;
+        measurements.adapter_source_read_bytes = observed.application_read_bytes;
+        measurements.deferred_source_read_bytes = source_read_bytes(&files).unwrap();
+        let json = measurements.to_telemetry_json();
+        assert_eq!(logical, content.len() as u64);
+        assert_eq!(
+            json["source_io"]["adapter_read_bytes"],
+            content.len() as u64
+        );
+        assert_eq!(
+            json["source_io"]["application_read_bytes"],
+            3 * content.len() as u64
+        );
+        assert_eq!(
+            json["source_io"]["total_content_read_bytes"],
+            4 * content.len() as u64
+        );
+        assert_eq!(json["source_io"]["content_read_coverage"], "COMPLETE");
         assert!(json["source_io"]["device_read_bytes"].is_null());
     }
 

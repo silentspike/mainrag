@@ -97,6 +97,17 @@ async fn skip(service: &IndexService, path: &str, content: &str) -> anyhow::Resu
     Ok(())
 }
 
+async fn observed_skip(
+    service: &IndexService,
+    path: &str,
+    content: &str,
+) -> anyhow::Result<super::super::ingest_observation::IngestObservation> {
+    let (result, work) =
+        super::super::ingest_observation::observe(skip(service, path, content)).await;
+    result?;
+    Ok(work)
+}
+
 async fn exercise(client: &tokio_postgres::Client, pool: PostgresPool) -> anyhow::Result<()> {
     client
         .batch_execute(include_str!("intelligence_retry_fixture.sql"))
@@ -137,18 +148,21 @@ async fn exercise(client: &tokio_postgres::Client, pool: PostgresPool) -> anyhow
     client
         .batch_execute("ALTER TABLE symbols ENABLE TRIGGER fixture_failure")
         .await?;
-    skip(&service, "retry.rs", INITIAL).await?;
+    let work = observed_skip(&service, "retry.rs", INITIAL).await?;
+    ensure!((work.chunker_calls, work.intelligence_parser_calls) == (0, 1));
     ensure!(!state(client, file_id).await?.0);
     ensure!(calls.load(Ordering::SeqCst) == 0);
     client
         .batch_execute("ALTER TABLE symbols DISABLE TRIGGER fixture_failure")
         .await?;
-    skip(&service, "retry.rs", INITIAL).await?;
+    let work = observed_skip(&service, "retry.rs", INITIAL).await?;
+    ensure!((work.chunker_calls, work.intelligence_parser_calls) == (0, 1));
     let completed = state(client, file_id).await?;
     ensure!(completed.0 && completed.2 == 2 && completed.3 == 1);
     let symbols = symbol_ids(client, file_id).await?;
     ensure!(symbols.len() == 2);
-    skip(&service, "retry.rs", INITIAL).await?;
+    let work = observed_skip(&service, "retry.rs", INITIAL).await?;
+    ensure!((work.chunker_calls, work.intelligence_parser_calls) == (0, 0));
     ensure!(state(client, file_id).await? == completed);
     ensure!(symbol_ids(client, file_id).await? == symbols);
     ensure!(calls.load(Ordering::SeqCst) == 0);
