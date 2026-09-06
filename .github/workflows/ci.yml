@@ -132,6 +132,21 @@ jobs:
         run: |
           cargo test -p mainrag-api --features storage-v2-retrieval --lib services::shadow_slice::pack_reader_tests::postgres_pack_readers_retain_real_bytes_through_switch -- --ignored --exact --nocapture | tee pack-reader-tests.log
           python3 -c 'from pathlib import Path; log = Path("pack-reader-tests.log").read_text(); stages = ["before_publish", "after_publish", "after_switch", "after_commit", "before_unlink", "after_unlink", "after_receipt"]; assert "1 passed; 0 failed; 0 ignored;" in log and "pack maintenance:" in log and all(f"pack process crash: {stage}: SIGKILL" in log for stage in stages), "Expected reader, maintenance and all seven process-crash regression blocks to execute"'
+      - name: Measure physical pack resource matrix
+        shell: bash
+        env:
+          PACK_RESOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          cargo test -p mainrag-api --lib services::content_store::resource_tests::pack_resource_matrix -- --ignored --exact --nocapture | tee pack-resource-tests.log
+          python3 -m unittest discover -s eval/storage_v2 -p test_pack_resource_report.py
+          python3 eval/storage_v2/pack_resource_report.py pack-resource-tests.log --revision "$PACK_RESOURCE_REVISION" --output pack-resource-summary.json
+      - name: Preserve public pack resource measurements
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pack-resource-summary
+          path: pack-resource-summary.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Stage pinned tokenizer for chunk reuse fixtures
         shell: bash
         env:

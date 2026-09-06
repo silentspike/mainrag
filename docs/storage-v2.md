@@ -365,6 +365,32 @@ network-filesystem, out-of-band administrator mutation or production deployment
 qualification follows. Interrupted staging/orphan files are retained for an
 explicit, quiescence-proven cleanup; this API never sweeps unrelated artifacts.
 
+### Physical pack resource diagnostics
+
+The ignored `services::content_store::resource_tests::pack_resource_matrix`
+test runs 48 serial fresh-process measurements on Linux: three repetitions of
+two size cohorts (4 KiB and 256 KiB plus 1 MiB or 16 MiB), two deterministic
+patterns (repeated or pseudorandom bytes), identity/zstd output and 4/64 KiB
+buffers. Codec/buffer order alternates between repetitions. Input is streamed;
+the source pack always uses identity encoding for comparable rewrite work.
+
+Build, physical rewrite and final verification have separate wall clocks. Every
+replacement identity and digest is verified. `/proc/self/status` VmHWM supplies
+whole-process lifetime peak RSS, with a 128 MiB fixture gate; it is not the writer
+buffer or a per-stage incremental peak. File lengths are not device allocation.
+SQL, ingestion, CPU attribution and device I/O remain unmeasured here.
+
+`eval/storage_v2/pack_resource_report.py` requires all 48 cells, valid integrity,
+finite measurements and an exact source revision. It exports individual values,
+median/range/noise and the existing telemetry viewer summary structure. Output
+creation is exclusive: existing summaries are never overwritten. Public metric
+labels explicitly distinguish RSS, file bytes, clocks and failed integrity.
+CI retains the validated JSON as `pack-resource-summary`; raw private logs are
+not uploaded. Compare only equal size/pattern cohorts and build profiles.
+These debug/CI diagnostics do not choose production defaults. Optimized-build
+measurements, larger real distributions, DB maintenance latency, concurrent
+resource contention and tuned policy qualification remain separate work.
+
 ## Lossless content graph
 
 `content_node` is an immutable DAG node. A node digest covers:
