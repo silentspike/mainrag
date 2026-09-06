@@ -37,9 +37,9 @@ deployment or release occurred.
 | Worker | Sole maintainer | Implements issue-owned changes and records exact commands and results. |
 | Verification controller | Sole maintainer | Performs a fresh end-control pass at the exact candidate head. This is self-verification, not independent review. |
 | Merge authority | Separately authorized sole-maintainer action | Merge authority does not follow from implementation or verification and does not imply deployment or release authority. |
-| Runtime operator | **Unassigned** | Production operations require separate issue authority and evidence. |
-| Destructive-action authority | **Unassigned** | Destructive cleanup requires an explicit target, backup/rollback boundary, and separate confirmation. |
-| Deployment/release authority | **Unassigned** | Deployment, activation, tag, RC, and release remain separately authorized actions. |
+| Runtime operator | Owner-directed sole maintainer | Approves each issue-scoped operation against its exact package and actual runtime/resource evidence. |
+| Destructive-action authority | Owner-directed sole maintainer | Requires an exact-target decision and satisfied backup, recovery, integrity, and cleanup gates; general authority is not proof that deletion is safe. |
+| Deployment/release authority | Owner-directed sole maintainer | Records separate exact-package decisions for deployment, activation, tag, RC, and release only after the owning issue's actual gates pass. |
 
 The repository has a single maintainer. Requiring a distinct approving identity
 would create an unfulfillable merge gate, so the repository does not claim
@@ -47,6 +47,12 @@ independent review. The maintainer owns implementation and a separate, fresh
 end-control pass over the exact candidate head. Public evidence must identify
 that limitation rather than presenting self-verification as independent
 acceptance.
+
+The owner explicitly selected sole implementation, self-review, approval, and
+issue-scoped operational responsibility. This removes the need for a second
+review identity, not the need for fresh evidence or protected merges. An approval
+records a decision at an exact head/package; it cannot convert failed tests,
+unproven quality, insufficient space, or missing recovery evidence into a pass.
 
 ## Desired `main` controls
 
