@@ -152,6 +152,15 @@ jobs:
           persist-credentials: false
       - name: Test telemetry integrity presentation
         run: node --test eval/storage_v2/telemetry_viewer.test.cjs
+      - name: Test storage-v2 candidate orchestration and evidence
+        run: |
+          python3 - <<'PY'
+          import unittest
+          suite = unittest.defaultTestLoader.discover('eval/storage_v2', pattern='test_*.py')
+          assert suite.countTestCases() >= 58, 'Expected all storage-v2 operator and harness tests'
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          raise SystemExit(0 if result.wasSuccessful() and not result.skipped else 1)
+          PY
       - name: Verify every relative link in README resolves
         run: |
           python3 - <<'PY'
