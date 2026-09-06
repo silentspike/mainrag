@@ -21,7 +21,12 @@ fn crash_checkpoint(root: &Path, pack: Uuid, stage: &str) {
     if std::env::var("MAINRAG_PACK_CRASH_ID").ok().as_deref() == Some(pack.to_string().as_str())
         && std::env::var("MAINRAG_PACK_CRASH_STAGE").ok().as_deref() == Some(stage)
     {
-        fs::write(root.join("fixture-checkpoint"), stage).expect("fixture checkpoint");
+        fs::write(root.join("fixture-checkpoint-pending"), stage).expect("fixture checkpoint");
+        fs::rename(
+            root.join("fixture-checkpoint-pending"),
+            root.join("fixture-checkpoint"),
+        )
+        .expect("complete fixture checkpoint publication");
         loop {
             std::thread::park();
         }
