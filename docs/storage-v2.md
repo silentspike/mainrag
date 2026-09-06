@@ -293,6 +293,9 @@ remain required by #58.
 The Rust candidate verifier and existing-body reuse reader now register epochs
 before querying placement and finish only after verification, including ordinary
 error returns. Cancellation retains an open epoch for fail-closed recovery.
+The streaming reuse pass shares one epoch across its body groups; it does not
+register/finish once per body or materialize all source bytes at once. Whole
+generation no-op reuse returns before this pack-read pass.
 Packed reuse takes pack identity, offsets, codec and dictionary from the same
 placement query, even if placement changed after the initial identity lookup.
 The hosted Rust fixture combines real identity/zstd pack files with migrations
