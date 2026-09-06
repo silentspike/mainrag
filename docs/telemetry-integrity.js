@@ -24,6 +24,26 @@
   };
 
   function candidateMetricInfo(path) {
+    if (path.startsWith('pack_resource.')) {
+      const field = path.slice('pack_resource.'.length);
+      const packFields = {
+        logical_bytes: ['Pack logical bytes', 'b', 'neutral'],
+        stored_bytes: ['Replacement file bytes', 'b', 'lower'],
+        source_stored_bytes: ['Identity source file bytes', 'b', 'neutral'],
+        build_ms: ['Source pack build including generated input', 'ms_roh', 'lower'],
+        rewrite_ms: ['Physical pack rewrite', 'ms_roh', 'lower'],
+        verify_ms: ['Replacement integrity verification', 'ms_roh', 'lower'],
+        rewrite_mib_s: ['Physical rewrite throughput (MiB/s)', 'f', 'higher'],
+        process_peak_rss_bytes: ['Fresh process lifetime peak RSS', 'b', 'lower'],
+        process_baseline_hwm_bytes: ['Process high-water mark before work', 'b', 'neutral'],
+        integrity_passed: ['Pack integrity passed (0 = FAIL)', 'n_exact', 'higher'],
+        entry_count: ['Verified pack entries', 'n_exact', 'neutral'],
+      };
+      if (!Object.hasOwn(packFields, field)) return null;
+      const [l, u, preference] = packFields[field];
+      return {l, u, preference, k:'other', showZero:true, pinned:true,
+        d:'Physical pack diagnostic only. Compare only equal size/pattern cohorts and build profiles, with repetition ranges. VmHWM covers the whole fresh process, not stage-specific RSS or just the writer buffer. No SQL, ingestion or device I/O attribution. A debug/CI result does not select production defaults; integrity 0 is FAIL.'};
+    }
     if (path.startsWith('search_quality.')) {
       const field = path.slice('search_quality.'.length);
       if (!Object.hasOwn(searchFields, field)) return null;
