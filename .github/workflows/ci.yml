@@ -64,6 +64,20 @@ jobs:
     timeout-minutes: 30
     env:
       TOKENIZER_VERSION: hf_bge_wordpiece
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: mainrag_index_fixture
+          POSTGRES_USER: fixture
+          POSTGRES_PASSWORD: fixture_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fixture -d mainrag_index_fixture"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -78,6 +92,13 @@ jobs:
         run: |
           cargo test -p mainrag-api --bin mainrag-api backfill_tests -- --nocapture | tee backfill-tests.log
           python3 -c 'from pathlib import Path; assert "2 passed; 0 failed;" in Path("backfill-tests.log").read_text(), "Expected both backfill regression tests to execute"'
+      - name: Verify intelligence retry against isolated PostgreSQL
+        shell: bash
+        env:
+          MAINRAG_INDEX_TEST_DATABASE_URL: postgres://fixture:fixture_only@localhost:5432/mainrag_index_fixture
+        run: |
+          cargo test -p mainrag-api --lib services::index::intelligence_retry_tests::postgres_intelligence_retry_preserves_chunk_skips -- --ignored --exact --nocapture | tee intelligence-retry-tests.log
+          python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("intelligence-retry-tests.log").read_text(), "Expected the real PostgreSQL fault-injection regression to execute"'
       - name: Stage pinned tokenizer for chunk reuse fixtures
         shell: bash
         env:
