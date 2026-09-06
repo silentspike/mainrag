@@ -22,7 +22,7 @@ MIGRATION = ROOT / "migrations" / "030_storage_v2_content_bodies.sql"
 ADMIN_ID = "00000000-0000-4000-8000-000000000011"
 
 
-class ContentSchemaTests(unittest.TestCase):
+class ContentSchemaFixture(unittest.TestCase):
     stack: ExitStack
     socket: Path
     database: str
@@ -60,11 +60,16 @@ END $$;
         )
         cls.file(SCHEMA)
         cls.file(MIGRATION)
+        cls.file(ROOT / "migrations/055_storage_v2_pack_epoch_commit_fence.sql")
         cls.sql(
             f"""
 CREATE TABLE users(id UUID PRIMARY KEY, is_admin BOOLEAN NOT NULL);
 INSERT INTO users VALUES ('{ADMIN_ID}', TRUE);
-CREATE ROLE storage_v2_pack_worker;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'storage_v2_pack_worker') THEN
+        CREATE ROLE storage_v2_pack_worker;
+    END IF;
+END $$;
 GRANT USAGE ON SCHEMA public TO storage_v2_pack_worker;
 GRANT SELECT, INSERT, UPDATE, DELETE ON
     content_pack, content_body, content_pack_entry, content_dictionary,
@@ -172,6 +177,7 @@ SELECT storage_v2_publish_pack('{pack_id}');
         )
         self.assertEqual(self.digest_hex(logical), self.sql(f"SELECT encode(digest, 'hex') FROM content_body WHERE id = {body_id}"))
 
+class ContentSchemaTests(ContentSchemaFixture):
     def test_body_dedup_pack_publication_repack_and_gc_delay(self) -> None:
         inline = b"synthetic inline body"
         inline_hex = inline.hex()
