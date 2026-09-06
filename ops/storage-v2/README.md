@@ -270,7 +270,8 @@ Source names, IDs, paths, watermarks, queries, result sets, and raw resource
 measurements are protected operational evidence. Public progress may contain
 only source counts, type counts, aggregate sizes, hashes, outcomes, and opaque
 evidence UUIDs. A candidate is not activation authority.
-# Complete search aggregate comparison
+
+## Complete search aggregate comparison
 
 Migration 052 materializes the four complete per-occurrence search aggregates
 once. It does not change scope, Boolean matching, scoring, ordering, tie breaks,
