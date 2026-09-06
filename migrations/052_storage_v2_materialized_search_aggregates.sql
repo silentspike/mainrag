@@ -2,6 +2,9 @@
 -- Inlined grouped relations can be rescanned for every visible occurrence by
 -- generic nested-loop plans. Materialization retains the full authorized scope;
 -- it introduces no candidate cap and changes no scoring or ranking expression.
+-- Source/generation cardinalities differ substantially. Bind this function to
+-- custom plans so each execution can use its actual scope and query parameters;
+-- the function-local setting is restored on return, including error paths.
 
 DO $$
 DECLARE
@@ -13,7 +16,17 @@ DECLARE
     v_new TEXT;
     v_old_count INTEGER := 0;
     v_new_count INTEGER := 0;
+    v_custom_plan BOOLEAN;
 BEGIN
+    SELECT COALESCE('plan_cache_mode=force_custom_plan' = ANY(proconfig), FALSE)
+      INTO v_custom_plan FROM pg_proc WHERE oid = v_signature;
+    IF EXISTS (
+        SELECT 1 FROM pg_proc CROSS JOIN LATERAL unnest(proconfig) setting
+         WHERE oid = v_signature AND setting LIKE 'plan_cache_mode=%'
+           AND setting <> 'plan_cache_mode=force_custom_plan'
+    ) THEN
+        RAISE EXCEPTION 'storage-v2 search plan configuration differs from the reviewed baseline';
+    END IF;
     IF strpos(v_definition, 'scoped_posting AS MATERIALIZED (') = 0 THEN
         RAISE EXCEPTION 'storage-v2 scoped posting prerequisite is missing';
     END IF;
@@ -32,6 +45,10 @@ BEGIN
         END IF;
     END LOOP;
     IF v_new_count = 4 AND v_old_count = 0 THEN
+        IF NOT v_custom_plan THEN
+            EXECUTE 'ALTER FUNCTION storage_v2_search_exact(bigint,text,jsonb,jsonb,bigint) '
+                 || 'SET plan_cache_mode = force_custom_plan';
+        END IF;
         RETURN;
     END IF;
     IF v_old_count <> 4 OR v_new_count <> 0 THEN
@@ -44,5 +61,9 @@ BEGIN
                                 E'\n    ' || v_name || ' AS MATERIALIZED (');
     END LOOP;
     EXECUTE v_definition;
+    IF NOT v_custom_plan THEN
+        EXECUTE 'ALTER FUNCTION storage_v2_search_exact(bigint,text,jsonb,jsonb,bigint) '
+             || 'SET plan_cache_mode = force_custom_plan';
+    END IF;
 END
 $$;

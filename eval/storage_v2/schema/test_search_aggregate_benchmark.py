@@ -32,3 +32,15 @@ class SearchAggregateBenchmarkTests(unittest.TestCase):
             case.sql.return_value = json.dumps([{'Execution Time': 1, 'Planning Time': 1}]) + '\n' + json.dumps(result)
             with self.subTest(result=result), self.assertRaisesRegex(RuntimeError, 'omitted'):
                 benchmark.measure(case, definition, {'type': 'term', 'value': 'alpha'}, 96)
+
+    def test_projection_uses_the_variants_declared_function_plan_policy(self):
+        definition = '    WITH RECURSIVE synthetic AS (SELECT 1) SELECT 1 INTO v_result;'
+        result = {'fully_scored_views': 96, 'total': 96, 'results': [None] * 10}
+        plan = [{'Planning Time': 1, 'Execution Time': 2, 'Plan': {}}]
+        for prefix, mode in (('', 'force_generic_plan'),
+                             (" SET plan_cache_mode TO 'force_custom_plan'\n", 'force_custom_plan')):
+            case = mock.Mock()
+            case.sql.return_value = json.dumps(plan) + '\n' + json.dumps(result)
+            measured = benchmark.measure(case, prefix + definition, {'type': 'term', 'value': 'alpha'}, 96)
+            self.assertEqual(measured['plan_mode'], mode)
+            self.assertIn('SET LOCAL plan_cache_mode=' + mode, case.sql.call_args.args[0])
