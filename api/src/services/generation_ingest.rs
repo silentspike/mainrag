@@ -424,6 +424,7 @@ pub struct ShadowIngestMeasurements {
     /// Actual application reads performed by lazy source loads, including repeats.
     /// Eager adapter reads and kernel/device I/O are outside this counter's scope.
     pub deferred_source_read_bytes: u64,
+    pub adapter_source_read_bytes: Option<u64>,
     pub unique_bytes: u64,
     pub stored_bytes: u64,
     pub reused_bodies: u64,
@@ -505,6 +506,7 @@ impl ShadowIngestMeasurements {
                 "latenz_ms": milliseconds(total_ms),
                 "eingang_bytes": self.input_bytes,
                 "deferred_source_read_bytes": self.deferred_source_read_bytes,
+                "adapter_source_read_bytes": self.adapter_source_read_bytes,
                 "unique_bytes": self.unique_bytes,
                 "stored_bytes": self.stored_bytes,
                 "reuse_bodies": self.reused_bodies,
@@ -529,7 +531,10 @@ impl ShadowIngestMeasurements {
             "source_io": {
                 "scope": "deferred_source_loads",
                 "application_read_bytes": self.deferred_source_read_bytes,
-                "adapter_read_bytes": null,
+                "adapter_read_bytes": self.adapter_source_read_bytes,
+                "total_content_read_bytes": self.adapter_source_read_bytes.and_then(|bytes| bytes.checked_add(self.deferred_source_read_bytes)),
+                "content_read_coverage": if self.adapter_source_read_bytes.is_some() { "COMPLETE" } else { "PARTIAL" },
+                "excluded": ["filesystem_metadata", "walker_configuration", "pack_reads", "device_io"],
                 "device_read_bytes": null,
                 "coverage": "PARTIAL",
             },

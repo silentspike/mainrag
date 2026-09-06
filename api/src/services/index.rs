@@ -155,7 +155,12 @@ fn chunks_for_write(
     content: &str,
     language: Option<&str>,
 ) -> Vec<Chunk> {
-    probe.unwrap_or_else(|| chunker.chunk(content, language))
+    probe.unwrap_or_else(|| observed_chunks(chunker, content, language))
+}
+
+fn observed_chunks(chunker: &dyn Chunker, content: &str, language: Option<&str>) -> Vec<Chunk> {
+    super::ingest_observation::chunker_call();
+    chunker.chunk(content, language)
 }
 
 #[cfg(test)]
@@ -212,6 +217,8 @@ pub struct IndexService {
 
 #[derive(Debug)]
 pub struct IndexStats {
+    pub work: super::ingest_observation::IngestObservation,
+    pub source_io: serde_json::Value,
     pub files_processed: usize,
     pub files_skipped: usize,
     pub chunks_created: usize,
@@ -248,6 +255,14 @@ impl IndexService {
 
     /// Index a source by ID
     pub async fn index_source(&self, source_id: i64) -> Result<IndexStats> {
+        let (result, work) =
+            super::ingest_observation::observe(self.index_source_inner(source_id)).await;
+        let mut stats = result?;
+        stats.work = work;
+        Ok(stats)
+    }
+
+    async fn index_source_inner(&self, source_id: i64) -> Result<IndexStats> {
         // HOTFIX: Use session-scoped set_config (false) instead of SET LOCAL (true)
         // which only lasts for a single statement without an explicit transaction.
         // IndexService runs as system admin for all indexing operations.
@@ -283,6 +298,8 @@ impl IndexService {
         );
 
         let mut stats = IndexStats {
+            work: Default::default(),
+            source_io: serde_json::json!({"content_read_coverage": "NOT_MEASURED"}),
             files_processed: 0,
             files_skipped: 0,
             chunks_created: 0,
@@ -308,10 +325,23 @@ impl IndexService {
         let plugin = plugins::get_plugin(&source_type)
             .ok_or_else(|| AppError::BadRequest(format!("Unknown source type: {}", source_type)))?;
 
-        let sync_result = plugin
-            .sync(&source_path)
+        let observed = plugin
+            .sync_observed(&source_path)
             .await
             .map_err(|e| AppError::Internal(format!("Plugin sync error: {}", e)))?;
+        let sync_result = observed.result;
+        let deferred = sync_result
+            .files
+            .iter()
+            .any(|file| file.content.is_empty() && file.source_path.is_some());
+        stats.source_io = serde_json::json!({
+            "adapter_read_bytes": observed.application_read_bytes,
+            "deferred_read_bytes": if deferred { None } else { Some(0_u64) },
+            "total_content_read_bytes": if deferred { None } else { observed.application_read_bytes },
+            "device_read_bytes": null,
+            "content_read_coverage": if !deferred && observed.application_read_bytes.is_some() { "COMPLETE" } else { "PARTIAL" },
+            "excluded": ["filesystem_metadata", "walker_configuration", "pack_reads", "device_io"],
+        });
 
         info!(
             "Plugin discovery found {} files for source {}",
@@ -505,6 +535,18 @@ impl IndexService {
         source_id: i64,
         files: &[std::path::PathBuf],
     ) -> Result<IndexStats> {
+        let (result, work) =
+            super::ingest_observation::observe(self.sync_files_inner(source_id, files)).await;
+        let mut stats = result?;
+        stats.work = work;
+        Ok(stats)
+    }
+
+    async fn sync_files_inner(
+        &self,
+        source_id: i64,
+        files: &[std::path::PathBuf],
+    ) -> Result<IndexStats> {
         // HOTFIX: Session-scoped RLS context for system indexing operations
         let client = self.db.get().await?;
         client
@@ -539,6 +581,8 @@ impl IndexService {
         );
 
         let mut stats = IndexStats {
+            work: Default::default(),
+            source_io: serde_json::json!({"content_read_coverage": "NOT_MEASURED"}),
             files_processed: 0,
             files_skipped: 0,
             chunks_created: 0,
@@ -1018,7 +1062,7 @@ impl IndexService {
         // compare content hashes + version metadata against existing chunks.
         // If ALL match → skip re-embed entirely (file record already updated above).
         let probe_chunks = (!is_append_only && existing_file_id.is_some())
-            .then(|| self.chunker.chunk(content, language.as_deref()));
+            .then(|| observed_chunks(self.chunker.as_ref(), content, language.as_deref()));
         if let Some(probe_chunks) = probe_chunks.as_ref() {
             if !probe_chunks.is_empty() {
                 let cv = chunker_version();
@@ -1844,7 +1888,7 @@ impl IndexService {
             })?;
 
             // Use the streaming chunker (parses messages one-by-one, no full DOM)
-            let mut chunks = self.chunker.chunk(&content, language.as_deref());
+            let mut chunks = observed_chunks(self.chunker.as_ref(), &content, language.as_deref());
             drop(content); // Free the file content immediately after chunking
 
             chunk_limits::apply(&mut chunks, max_chunks_per_file());
@@ -1893,7 +1937,7 @@ impl IndexService {
 
                 // When buffer exceeds 256KB, chunk what we have and flush
                 if line_buffer.len() > 256 * 1024 {
-                    let batch_chunks = chunker.chunk(&line_buffer, language.as_deref());
+                    let batch_chunks = observed_chunks(&chunker, &line_buffer, language.as_deref());
                     accumulated_chunks.extend(batch_chunks);
                     line_buffer.clear();
 
@@ -1920,7 +1964,7 @@ impl IndexService {
 
             // Flush remaining
             if !line_buffer.is_empty() {
-                let batch_chunks = chunker.chunk(&line_buffer, language.as_deref());
+                let batch_chunks = observed_chunks(&chunker, &line_buffer, language.as_deref());
                 accumulated_chunks.extend(batch_chunks);
             }
             if !accumulated_chunks.is_empty() {
