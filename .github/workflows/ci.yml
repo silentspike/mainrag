@@ -251,8 +251,9 @@ jobs:
           suite = unittest.defaultTestLoader.loadTestsFromNames([
               'eval.storage_v2.schema.test_empty_search_branches',
               'eval.storage_v2.schema.test_empty_search_branch_benchmark',
+              'eval.storage_v2.schema.test_keyword_tie_order',
           ])
-          assert suite.countTestCases() >= 20, 'Expected all schema and benchmark regressions'
+          assert suite.countTestCases() >= 22, 'Expected all schema, keyword and benchmark regressions'
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           raise SystemExit(0 if result.wasSuccessful() and not result.skipped else 1)
           PY
