@@ -521,24 +521,7 @@ impl PackReader {
         buffer_bytes: usize,
     ) -> Result<VerifiedBody> {
         let buffer_bytes = checked_buffer_size(buffer_bytes)?;
-        self.validate_bounds(entry)?;
-        let actual_entry_digest = hash_range(
-            &self.path,
-            entry.pack_offset,
-            entry.stored_length,
-            buffer_bytes,
-        )?;
-        if actual_entry_digest != entry.entry_digest {
-            return Err(ContentStoreError::Corruption(
-                "stored entry digest mismatch".to_string(),
-            ));
-        }
-        match (&entry.dictionary, dictionary) {
-            (Some(expected), Some(bytes)) => expected.verify(bytes)?,
-            (Some(_), None) | (None, Some(_)) => return Err(ContentStoreError::DictionaryMismatch),
-            (None, None) => {}
-        }
-
+        let mut decoded = self.checked_entry_reader(entry, dictionary, buffer_bytes)?;
         let staging_root = staging_root.as_ref();
         fs::create_dir_all(staging_root)?;
         let staging_path = staging_root.join(format!("verified-{}.body", Uuid::new_v4()));
@@ -546,19 +529,6 @@ impl PackReader {
             .create_new(true)
             .write(true)
             .open(&staging_path)?;
-        let file = File::open(&self.path)?;
-        let range = BufReader::with_capacity(
-            buffer_bytes,
-            RangeReader::new(file, entry.pack_offset, entry.stored_length)?,
-        );
-        let mut decoded: Box<dyn Read + '_> = match (entry.codec, dictionary) {
-            (BodyCodec::Identity, None) => Box::new(range),
-            (BodyCodec::Zstd, Some(bytes)) => {
-                Box::new(zstd::stream::read::Decoder::with_dictionary(range, bytes)?)
-            }
-            (BodyCodec::Zstd, None) => Box::new(zstd::stream::read::Decoder::new(range)?),
-            (BodyCodec::Identity, Some(_)) => return Err(ContentStoreError::DictionaryMismatch),
-        };
         let decode_result = copy_hash_bounded(
             &mut decoded,
             &mut staging,
@@ -588,6 +558,72 @@ impl PackReader {
             managed_peak_buffer_bytes: buffer_bytes,
             buffer_bytes,
         })
+    }
+
+    /// Verify a complete entry without delivering bytes or creating a staging
+    /// file. Callers that need verified content must still use verify_to_staging.
+    pub fn verify_integrity(
+        &self,
+        entry: &PackEntry,
+        dictionary: Option<&[u8]>,
+        buffer_bytes: usize,
+    ) -> Result<u64> {
+        let buffer_bytes = checked_buffer_size(buffer_bytes)?;
+        let mut decoded = self.checked_entry_reader(entry, dictionary, buffer_bytes)?;
+        let (length, digest) = copy_hash_bounded(
+            &mut decoded,
+            &mut io::sink(),
+            buffer_bytes,
+            Some(entry.body.logical_length),
+        )?;
+        if length != entry.body.logical_length || digest != entry.body.digest {
+            return Err(ContentStoreError::Corruption(
+                "decoded body identity mismatch".to_string(),
+            ));
+        }
+        Ok(length)
+    }
+
+    // Only the stored representation has been verified at this point. The
+    // private reader must never escape before its decoded identity is checked.
+    fn checked_entry_reader<'a>(
+        &self,
+        entry: &PackEntry,
+        dictionary: Option<&'a [u8]>,
+        buffer_bytes: usize,
+    ) -> Result<Box<dyn Read + 'a>> {
+        self.validate_bounds(entry)?;
+        let actual_entry_digest = hash_range(
+            &self.path,
+            entry.pack_offset,
+            entry.stored_length,
+            buffer_bytes,
+        )?;
+        if actual_entry_digest != entry.entry_digest {
+            return Err(ContentStoreError::Corruption(
+                "stored entry digest mismatch".to_string(),
+            ));
+        }
+        match (&entry.dictionary, dictionary) {
+            (Some(expected), Some(bytes)) => expected.verify(bytes)?,
+            (Some(_), None) | (None, Some(_)) => return Err(ContentStoreError::DictionaryMismatch),
+            (None, None) => {}
+        }
+
+        let file = File::open(&self.path)?;
+        let range = BufReader::with_capacity(
+            buffer_bytes,
+            RangeReader::new(file, entry.pack_offset, entry.stored_length)?,
+        );
+        let decoded: Box<dyn Read + 'a> = match (entry.codec, dictionary) {
+            (BodyCodec::Identity, None) => Box::new(range),
+            (BodyCodec::Zstd, Some(bytes)) => {
+                Box::new(zstd::stream::read::Decoder::with_dictionary(range, bytes)?)
+            }
+            (BodyCodec::Zstd, None) => Box::new(zstd::stream::read::Decoder::new(range)?),
+            (BodyCodec::Identity, Some(_)) => return Err(ContentStoreError::DictionaryMismatch),
+        };
+        Ok(decoded)
     }
 
     fn validate_bounds(&self, entry: &PackEntry) -> Result<()> {
@@ -982,6 +1018,240 @@ mod tests {
             assert!(build_dir.exists());
         }
         assert!(!build_dir.exists());
+        cleanup(&root);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn thread_write_counters() -> (u64, u64) {
+        let counters = fs::read_to_string("/proc/thread-self/io").unwrap();
+        let value = |name: &str| {
+            counters
+                .lines()
+                .find_map(|line| line.strip_prefix(name))
+                .unwrap()
+                .trim()
+                .parse::<u64>()
+                .unwrap()
+        };
+        (value("wchar:"), value("syscw:"))
+    }
+
+    #[test]
+    fn integrity_only_checks_all_codecs_and_lengths_without_staging() {
+        let root = test_root();
+        let dictionary = b"public integrity fixture dictionary";
+        let dictionary_identity = DictionaryIdentity {
+            id: 23,
+            digest: Sha256::digest(dictionary).into(),
+        };
+        let bytes = vec![b'a'; 4 * 1024 * 1024];
+        let mut builder = PackBuilder::new(&root, Uuid::new_v4(), Uuid::new_v4(), 4096).unwrap();
+        let mut entries = Vec::new();
+        for (codec, dict, content) in [
+            (BodyCodec::Identity, None, bytes.as_slice()),
+            (BodyCodec::Zstd, None, bytes.as_slice()),
+            (
+                BodyCodec::Zstd,
+                Some(dictionary.as_slice()),
+                bytes.as_slice(),
+            ),
+            (BodyCodec::Zstd, None, b"".as_slice()),
+        ] {
+            let entry = builder
+                .add_reader(
+                    Cursor::new(content),
+                    codec,
+                    dict.map(|value| (dictionary_identity.clone(), value)),
+                )
+                .unwrap();
+            entries.push((entry, dict));
+        }
+        let published = builder.seal().unwrap().publish().unwrap();
+        let pack_before = fs::read(&published.path).unwrap();
+        let directory_before = fs::read_dir(&root).unwrap().count();
+        #[cfg(target_os = "linux")]
+        let writes_before = thread_write_counters();
+        for buffer_bytes in [4096, DEFAULT_IO_BUFFER_BYTES] {
+            for (entry, dictionary) in &entries {
+                assert_eq!(
+                    published
+                        .reader()
+                        .verify_integrity(entry, *dictionary, buffer_bytes)
+                        .unwrap(),
+                    entry.body.logical_length
+                );
+            }
+        }
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            thread_write_counters(),
+            writes_before,
+            "integrity-only reads must not write bytes or issue write syscalls"
+        );
+        assert_eq!(fs::read_dir(&root).unwrap().count(), directory_before);
+        assert_eq!(fs::read(&published.path).unwrap(), pack_before);
+        cleanup(&root);
+    }
+
+    #[test]
+    fn integrity_only_rejects_corruption_and_matches_staged_verification() {
+        let root = test_root();
+        let dictionary = b"public failure fixture dictionary";
+        let dictionary_identity = DictionaryIdentity {
+            id: 24,
+            digest: Sha256::digest(dictionary).into(),
+        };
+        let mut builder = PackBuilder::new(&root, Uuid::new_v4(), Uuid::new_v4(), 4096).unwrap();
+        let plain = builder
+            .add_reader(
+                Cursor::new(b"public body integrity fixture"),
+                BodyCodec::Identity,
+                None,
+            )
+            .unwrap();
+        let compressed = builder
+            .add_reader(
+                Cursor::new(b"public dictionary body fixture"),
+                BodyCodec::Zstd,
+                Some((dictionary_identity, dictionary)),
+            )
+            .unwrap();
+        let published = builder.seal().unwrap().publish().unwrap();
+        let reader = published.reader();
+        let mut variants = Vec::new();
+        let mut bad = plain.clone();
+        bad.entry_digest[0] ^= 1;
+        variants.push(bad);
+        let mut bad = plain.clone();
+        bad.body.digest[0] ^= 1;
+        variants.push(bad);
+        let mut bad = plain.clone();
+        bad.body.logical_length -= 1;
+        variants.push(bad);
+        let mut bad = plain.clone();
+        bad.body.logical_length += 1;
+        variants.push(bad);
+        let mut bad = plain.clone();
+        bad.pack_id = Uuid::new_v4();
+        variants.push(bad);
+        let mut bad = plain.clone();
+        bad.pack_offset = u64::MAX;
+        variants.push(bad);
+        let mut bad = plain.clone();
+        bad.stored_length = 0;
+        variants.push(bad);
+        let mut bad = plain.clone();
+        bad.stored_length = published.manifest.stored_bytes + 1;
+        variants.push(bad);
+        let mut bad = plain.clone();
+        bad.codec = BodyCodec::Zstd;
+        variants.push(bad);
+        for entry in variants {
+            let direct = reader.verify_integrity(&entry, None, 4096).unwrap_err();
+            let staged = reader
+                .verify_to_staging(&entry, None, &root, 4096)
+                .err()
+                .unwrap();
+            assert_eq!(
+                std::mem::discriminant(&direct),
+                std::mem::discriminant(&staged)
+            );
+        }
+        for supplied in [None, Some(b"incorrect dictionary".as_slice())] {
+            assert!(matches!(
+                reader.verify_integrity(&compressed, supplied, 4096),
+                Err(ContentStoreError::DictionaryMismatch)
+            ));
+        }
+        assert!(matches!(
+            reader.verify_integrity(&plain, Some(dictionary), 4096),
+            Err(ContentStoreError::DictionaryMismatch)
+        ));
+        for buffer_bytes in [0, 4095, 1024 * 1024 + 1] {
+            assert!(matches!(
+                reader.verify_integrity(&plain, None, buffer_bytes),
+                Err(ContentStoreError::InvalidEntry(_))
+            ));
+        }
+        let mut mutated = fs::read(&published.path).unwrap();
+        mutated[0] ^= 1;
+        fs::write(&published.path, &mutated).unwrap();
+        assert!(matches!(
+            reader.verify_integrity(&plain, None, 4096),
+            Err(ContentStoreError::Corruption(_))
+        ));
+        OpenOptions::new()
+            .write(true)
+            .open(&published.path)
+            .unwrap()
+            .set_len(1)
+            .unwrap();
+        assert!(matches!(
+            reader.verify_integrity(&compressed, Some(dictionary), 4096),
+            Err(ContentStoreError::Corruption(_))
+        ));
+        cleanup(&root);
+    }
+
+    #[test]
+    #[ignore = "explicit repeated filesystem comparison; run serially on the chosen benchmark host"]
+    fn integrity_only_comparison_benchmark() {
+        let root = test_root();
+        let bytes = vec![b'b'; 64 * 1024];
+        let mut builder = PackBuilder::new(&root, Uuid::new_v4(), Uuid::new_v4(), 4096).unwrap();
+        let entry = builder
+            .add_reader(Cursor::new(&bytes), BodyCodec::Zstd, None)
+            .unwrap();
+        let published = builder.seal().unwrap().publish().unwrap();
+        for repetition in 1..=3 {
+            for direct in if repetition % 2 == 1 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                #[cfg(target_os = "linux")]
+                let writes_before = thread_write_counters();
+                let started = std::time::Instant::now();
+                let mut verified_bytes = 0;
+                for _ in 0..128 {
+                    verified_bytes += if direct {
+                        published
+                            .reader()
+                            .verify_integrity(&entry, None, 4096)
+                            .unwrap()
+                    } else {
+                        published
+                            .reader()
+                            .verify_to_staging(&entry, None, &root, 4096)
+                            .unwrap()
+                            .copy_to(io::sink())
+                            .unwrap()
+                    };
+                }
+                let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+                #[cfg(target_os = "linux")]
+                let writes = {
+                    let after = thread_write_counters();
+                    (after.0 - writes_before.0, after.1 - writes_before.1)
+                };
+                #[cfg(not(target_os = "linux"))]
+                let writes = (0, 0);
+                assert_eq!(verified_bytes, 128 * bytes.len() as u64);
+                #[cfg(target_os = "linux")]
+                if direct {
+                    assert_eq!(writes, (0, 0));
+                } else {
+                    assert_eq!(writes.0, verified_bytes);
+                    assert!(writes.1 > 0);
+                }
+                println!(
+                    "{}",
+                    serde_json::json!({"benchmark":"integrity-only-v1","repetition":repetition,
+                    "variant":if direct {"integrity_only"} else {"staging_sink"},"calls":128,
+                    "verified_bytes":verified_bytes,"client_ms":elapsed,"write_chars":writes.0,"write_calls":writes.1})
+                );
+            }
+        }
         cleanup(&root);
     }
 
