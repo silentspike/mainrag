@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the public MainRAG current-path storage-v2 fixture baseline."""
+"""Run the public SQL search microbenchmark, not production ingest acceptance."""
 
 from __future__ import annotations
 
@@ -321,18 +321,23 @@ def setup_database(database: TemporaryPostgres, documents: list[tuple[str, bytes
     )
     started = time.monotonic_ns()
     database.sql(insert)
-    parsed_items = int(database.sql("SELECT COUNT(*) FROM documents;"))
+    loaded_rows = int(database.sql("SELECT COUNT(*) FROM documents;"))
     database.sql(insert)
     elapsed_ms = (time.monotonic_ns() - started) / 1_000_000
-    unchanged_items = parsed_items
+    repeated_rows = int(database.sql("SELECT COUNT(*) FROM documents;"))
     database_bytes = int(database.sql("SELECT pg_total_relation_size('documents');"))
     database.sql("ANALYZE documents;")
     return {
-        "status": "PASS",
-        "source_bytes_read": source_bytes,
-        "content_bytes_stored": source_bytes,
-        "parsed_items": parsed_items,
-        "unchanged_items_reused": unchanged_items,
+        "status": "NOT_RUN",
+        "scope": "synthetic_sql_load",
+        "sql_load_status": "PASS" if loaded_rows == repeated_rows == len(documents) else "FAIL",
+        "logical_input_bytes": source_bytes,
+        "loaded_rows": loaded_rows,
+        "rows_after_repeat": repeated_rows,
+        "source_bytes_read": None,
+        "content_bytes_stored": None,
+        "parsed_items": None,
+        "unchanged_items_reused": None,
         "errors": 0,
         "elapsed_ms": round(elapsed_ms, 3),
         "database_bytes_after_ingest": database_bytes,
@@ -504,10 +509,14 @@ def build_manifest(
         f"{code_sha}\0{harness_commit}\0{corpus_hash}\0{query_hash}".encode("utf-8")
     )[:16]
     overall = "PASS"
-    if any(section.get("status") != "PASS" for section in (maintenance_gate, ingest, search)):
+    if ingest.get("sql_load_status") == "FAIL" or any(
+        section.get("status") == "FAIL" for section in (maintenance_gate, ingest, search)
+    ):
         overall = "FAIL"
+    elif any(section.get("status") != "PASS" for section in (maintenance_gate, ingest, search)):
+        overall = "BLOCKED"
     return {
-        "schema_version": "storage-v2-baseline/v1",
+        "schema_version": "storage-v2-baseline/v2",
         "run_id": f"fixture-current-{run_identity}",
         "status": overall,
         "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -539,6 +548,7 @@ def build_manifest(
         "search": search,
         "cleanup": {"status": "PASS", "temporary_cluster_removed": True},
         "limitations": [
+            "Production ingest was not run: SQL-loaded row counts are not parser or reuse measurements.",
             "The public fixture baseline is not a production performance guarantee.",
             "First-before-query-warmups latency does not claim an operating-system cold page cache.",
             "The read-only writer inventory cannot prove that unknown external writers do not exist.",
