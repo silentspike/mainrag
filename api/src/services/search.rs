@@ -1433,11 +1433,12 @@ impl SearchService {
         );
 
         let limit_i64 = limit as i64;
+        // A unique secondary key stabilizes both tie order and LIMIT membership.
         let rows = match tenant {
             TenantContext::Agent { user_id } => {
                 if let Some(sid) = source_id {
                     let full_query = format!(
-                        "{} AND s.user_id = $2 AND f.source_id = $3 ORDER BY score DESC LIMIT $4",
+                        "{} AND s.user_id = $2 AND f.source_id = $3 ORDER BY score DESC, c.id ASC LIMIT $4",
                         base_query
                     );
                     let params: [&(dyn tokio_postgres::types::ToSql + Sync); 4] =
@@ -1445,7 +1446,7 @@ impl SearchService {
                     client.query(&full_query, &params).await?
                 } else {
                     let full_query = format!(
-                        "{} AND s.user_id = $2 ORDER BY score DESC LIMIT $3",
+                        "{} AND s.user_id = $2 ORDER BY score DESC, c.id ASC LIMIT $3",
                         base_query
                     );
                     let params: [&(dyn tokio_postgres::types::ToSql + Sync); 3] =
@@ -1456,14 +1457,15 @@ impl SearchService {
             TenantContext::Admin => {
                 if let Some(sid) = source_id {
                     let full_query = format!(
-                        "{} AND f.source_id = $2 ORDER BY score DESC LIMIT $3",
+                        "{} AND f.source_id = $2 ORDER BY score DESC, c.id ASC LIMIT $3",
                         base_query
                     );
                     let params: [&(dyn tokio_postgres::types::ToSql + Sync); 3] =
                         [&clean_query, &sid, &limit_i64];
                     client.query(&full_query, &params).await?
                 } else {
-                    let full_query = format!("{} ORDER BY score DESC LIMIT $2", base_query);
+                    let full_query =
+                        format!("{} ORDER BY score DESC, c.id ASC LIMIT $2", base_query);
                     let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] =
                         [&clean_query, &limit_i64];
                     client.query(&full_query, &params).await?
