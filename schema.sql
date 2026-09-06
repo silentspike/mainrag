@@ -588,3 +588,4 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag;
 \ir migrations/053_storage_v2_targeted_intelligence_commands.sql
 \ir migrations/054_storage_v2_empty_search_branch_guards.sql
 \ir migrations/055_storage_v2_pack_epoch_commit_fence.sql
+\ir migrations/056_storage_v2_pack_removal_receipts.sql

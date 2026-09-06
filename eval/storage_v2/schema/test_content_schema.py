@@ -61,6 +61,7 @@ END $$;
         cls.file(SCHEMA)
         cls.file(MIGRATION)
         cls.file(ROOT / "migrations/055_storage_v2_pack_epoch_commit_fence.sql")
+        cls.file(ROOT / "migrations/056_storage_v2_pack_removal_receipts.sql")
         cls.sql(
             f"""
 CREATE TABLE users(id UUID PRIMARY KEY, is_admin BOOLEAN NOT NULL);
@@ -307,8 +308,27 @@ INSERT INTO storage_v2_gc_epoch(
         )
         self.assertEqual(
             self.sql("SELECT inline_count, packed_count, reclaimed_bytes FROM storage_v2_content_metrics"),
-            f"1|1|{len(b'old-compressed-frame')}",
+            "1|1|0",  # Database permission is not a physical removal receipt.
         )
+        self.assert_sql_fails(
+            self.admin(f"SELECT storage_v2_record_pack_removal('{replacement}', 20)"),
+            "exact file length required",
+        )
+        self.assert_sql_fails(
+            self.admin(f"SELECT storage_v2_record_pack_removal('{old_pack}', 1)"),
+            "exact file length required",
+        )
+        # SQL-only contract check: this attestation is synthetic, not file I/O evidence.
+        for _ in range(2):
+            self.sql(self.admin(f"SELECT storage_v2_record_pack_removal('{old_pack}', {len(old_stored)})"))
+        self.assertEqual(self.sql("SELECT reclaimed_bytes FROM storage_v2_content_metrics"), str(len(old_stored)))
+        self.assert_sql_fails(
+            f"DELETE FROM storage_v2_pack_removal_receipt WHERE pack_id='{old_pack}'",
+            "rows are immutable",
+        )
+        before = self.sql("SELECT * FROM storage_v2_content_metrics")
+        self.file(ROOT / "migrations/056_storage_v2_pack_removal_receipts.sql")
+        self.assertEqual(self.sql("SELECT * FROM storage_v2_content_metrics"), before)
 
 
 if __name__ == "__main__":

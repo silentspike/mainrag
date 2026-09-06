@@ -131,7 +131,7 @@ jobs:
           MAINRAG_INDEX_TEST_DATABASE_URL: postgres://fixture:fixture_only@localhost:5432/mainrag_index_fixture
         run: |
           cargo test -p mainrag-api --features storage-v2-retrieval --lib services::shadow_slice::pack_reader_tests::postgres_pack_readers_retain_real_bytes_through_switch -- --ignored --exact --nocapture | tee pack-reader-tests.log
-          python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("pack-reader-tests.log").read_text(), "Expected the real pack/database concurrency regression to execute"'
+          python3 -c 'from pathlib import Path; log = Path("pack-reader-tests.log").read_text(); assert "1 passed; 0 failed; 0 ignored;" in log and "pack maintenance:" in log, "Expected both real reader and maintenance regression blocks to execute"'
       - name: Stage pinned tokenizer for chunk reuse fixtures
         shell: bash
         env:
