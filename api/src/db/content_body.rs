@@ -158,8 +158,8 @@ where
     }
 }
 
-pub async fn switch_pack(
-    client: &Client,
+pub async fn switch_pack<C: GenericClient + Sync>(
+    client: &C,
     old_pack_id: Uuid,
     new_pack_id: Uuid,
     gc_epoch_id: i64,
@@ -173,7 +173,10 @@ pub async fn switch_pack(
         .map(|row| row.get(0))
 }
 
-pub async fn mark_pack_readers_drained(client: &Client, pack_id: Uuid) -> Result<(), Error> {
+pub async fn mark_pack_readers_drained<C: GenericClient + Sync>(
+    client: &C,
+    pack_id: Uuid,
+) -> Result<(), Error> {
     client
         .execute(
             "SELECT storage_v2_mark_pack_readers_drained($1)",
@@ -185,7 +188,7 @@ pub async fn mark_pack_readers_drained(client: &Client, pack_id: Uuid) -> Result
 
 /// Advances database state to `reclaimed`. The caller may remove pack bytes
 /// only after this function succeeds.
-pub async fn reclaim_pack(client: &Client, pack_id: Uuid) -> Result<(), Error> {
+pub async fn reclaim_pack<C: GenericClient + Sync>(client: &C, pack_id: Uuid) -> Result<(), Error> {
     client
         .execute("SELECT storage_v2_reclaim_pack($1)", &[&pack_id])
         .await
