@@ -159,6 +159,9 @@ fn chunks_for_write(
 #[cfg(test)]
 mod chunk_reuse_tests;
 
+#[cfg(test)]
+mod intelligence_retry_tests;
+
 /// Max length for CCH (Contextual Chunk Header) prefix
 #[allow(dead_code)]
 const CCH_MAX_LENGTH: usize = 300;
@@ -821,7 +824,8 @@ impl IndexService {
         info!("DB client obtained");
 
         // INCREMENTAL INDEXING: Check hash BEFORE any modifications!
-        // If file exists with same hash, skip re-indexing entirely.
+        // If file exists with the same hash, skip chunk/vector indexing, but
+        // retry intelligence when the previous attempt did not complete.
         // IMPORTANT: hash is BYTEA (Vec<u8>), not hex string!
         //
         // JSONL OPTIMIZATION: For JSONL files (conversations), detect append-only changes.
@@ -833,7 +837,8 @@ impl IndexService {
 
         if let Some(existing_row) = client
             .query_opt(
-                "SELECT id, hash, size_original FROM files WHERE source_id = $1 AND path = $2",
+                "SELECT id, hash, size_original, intelligence_analyzed_at IS NOT NULL AS intelligence_complete \
+                 FROM files WHERE source_id = $1 AND path = $2",
                 &[&source_id, &rel_path],
             )
             .await?
@@ -843,6 +848,10 @@ impl IndexService {
             existing_file_id = Some(file_id);
 
             if existing_hash == hash {
+                if !existing_row.get::<_, bool>("intelligence_complete") {
+                    self.analyze_intelligence_for_file(file_id, &rel_path, content)
+                        .await?;
+                }
                 debug!(
                     "File {} unchanged (hash match), skipping re-index",
                     rel_path
@@ -929,6 +938,9 @@ impl IndexService {
                         hash = EXCLUDED.hash,
                         content = EXCLUDED.content,
                         content_text = NULL,
+                        intelligence_analyzed_at = NULL,
+                        intelligence_symbols_count = 0,
+                        intelligence_calls_count = 0,
                         language = EXCLUDED.language,
                         size_original = EXCLUDED.size_original,
                         size_compressed = EXCLUDED.size_compressed,
@@ -966,6 +978,9 @@ impl IndexService {
                         hash = EXCLUDED.hash,
                         content = EXCLUDED.content,
                         content_text = EXCLUDED.content_text,
+                        intelligence_analyzed_at = NULL,
+                        intelligence_symbols_count = 0,
+                        intelligence_calls_count = 0,
                         language = EXCLUDED.language,
                         size_original = EXCLUDED.size_original,
                         size_compressed = EXCLUDED.size_compressed,
@@ -989,6 +1004,12 @@ impl IndexService {
 
         let file_id: i64 = file_row.get("id");
         info!("File inserted with id: {}", file_id);
+
+        // Completion belongs to the persisted file content, not to chunk or
+        // embedding changes. Failure leaves the marker pending for a hash-skip
+        // retry, including when a version match or empty chunk result follows.
+        self.analyze_intelligence_for_file(file_id, &rel_path, content)
+            .await?;
 
         // Sprint 8.3: Versioned chunk-level incremental skip logic
         // For non-append-only files with existing chunks: generate new chunks,
@@ -1448,11 +1469,6 @@ impl IndexService {
                 );
             }
         }
-
-        // Code Intelligence must run before embeddings so TEI/Qdrant failures cannot
-        // leave symbols/call-graph permanently missing behind a file-hash skip.
-        self.analyze_intelligence_for_file(file_id, &rel_path, content)
-            .await?;
 
         let mut embeddings_count = 0;
 
