@@ -6,6 +6,20 @@ application, source-local generation allocation, immutable artifacts,
 half-open membership intervals, atomic activation and requalification, direct
 mutation rejection, cross-source rejection, and RLS isolation.
 
+Migration 055 adds the pack reader-registration/switch commit fence. Run:
+
+```bash
+python3 -m unittest eval.storage_v2.schema.test_content_schema \
+  eval.storage_v2.schema.test_pack_epoch_fence
+```
+
+The real-backend tests reproduce the historical timestamp race as a negative
+control, exercise both transaction orderings, switch rollback, concurrent
+registrations, stale-snapshot rejection and migration replay. Synchronization
+checks actual PostgreSQL wait events instead of assuming a timing delay proves
+blocking. These tests own their databases and client processes. They do not
+claim physical repack/removal or production reader qualification.
+
 Migration 054 skips document joins for empty phrase/exact query classes using
 one-time scalar guards. Complete scoring, AST matching, rank order, identities,
 content, authorization, and optional-stage behavior remain unchanged. Run its
