@@ -15,7 +15,11 @@ synthetic Rust, prose, and conversation fixtures. Every chunk field participates
 in the comparison, including byte/line ranges, metadata, parents, and context.
 These tests exercise the shared write-preparation function; they are not a
 database integration test. The surrounding pipeline wiring is reviewed with the
-change, and existing API regressions remain required.
+change, and existing API regressions remain required. PR CI explicitly selects
+the BGE WordPiece backend and downloads the same revision-pinned,
+SHA-256-verified public tokenizer asset as the nightly tests into runner
+temporary storage. It must not silently skip real chunker tests when the model
+asset is missing.
 
 ## Repeated measurement
 
