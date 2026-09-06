@@ -655,6 +655,18 @@ pub struct VerifiedBody {
 }
 
 impl VerifiedBody {
+    /// Stream a verified staging body into a replacement pack without allocating
+    /// the whole body. The builder independently rehashes the streamed bytes.
+    pub fn repack_into(&self, builder: &mut PackBuilder, codec: BodyCodec) -> Result<PackEntry> {
+        let entry = builder.add_reader(File::open(&self.path)?, codec, None)?;
+        if entry.body.digest != self.digest || entry.body.logical_length != self.logical_length {
+            return Err(ContentStoreError::Corruption(
+                "repack staging identity changed".to_string(),
+            ));
+        }
+        Ok(entry)
+    }
+
     pub fn copy_to<W: Write>(&self, mut writer: W) -> Result<u64> {
         let mut source = File::open(&self.path)?;
         let (written, digest) = copy_hash_bounded(
