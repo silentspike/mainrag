@@ -172,7 +172,7 @@ async fn exercise_maintenance(client: &mut Client, observer: &Client, root: &Pat
                 &[&other.manifest.pack_id, &bodies[1]],
             )
             .await?;
-        client.execute("INSERT INTO artifact_version(id,raw_body_id) SELECT $1+value,$2 FROM generate_series(1,8) value", &[&(i64::from(case)*100),&bodies[0]]).await?;
+        client.execute("INSERT INTO artifact_version(id,raw_body_id) SELECT $1::BIGINT+value,$2 FROM generate_series(1,8) value", &[&(i64::from(case)*100),&bodies[0]]).await?;
         let new = Uuid::new_v4();
         let gc: i64 = client.query_one("INSERT INTO storage_v2_gc_epoch(source_id,status) VALUES(NULL,'verified') RETURNING id", &[]).await?.get(0);
         let policy = RepackPolicy {
