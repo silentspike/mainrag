@@ -8,6 +8,7 @@ import json
 import stat
 import tempfile
 import unittest
+import urllib.error
 from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
@@ -120,6 +121,118 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                                      {"path_sha256": MODULE.sha256_text("added.txt"),
                                       "chunk_count": 0, "indexed_matches": 0, "literal_matches": 0}]}
         return seed, current, storage, evidence, checkpoint
+
+    def test_transport_failures_keep_completed_and_pending_proof_without_qualifying(self) -> None:
+        seed, current, storage, proof, identity = self.coverage_fixture()
+        # Include bodies to prove pending results do not copy full response content.
+        current["results"][0]["content"] = "private-pending-body"
+        storage["results"][0]["content"] = "private-pending-body"
+        for phase, extra, ordinal in (("search_current", [], 2),
+                                      ("search_storage_v2", [current], 2),
+                                      ("query_coverage", [current, storage], 2),
+                                      ("dual_read", None, None),
+                                      ("qualification", None, None)):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                arguments = Namespace(checkpoint=directory / "checkpoint.json", output=directory / "result.json",
+                                      source_id=1, commit_sha="a" * 40, api_url="http://fixture.invalid",
+                                      max_query_ms=2000, pack_root=directory, minimum_free_bytes=0)
+                checkpoint = {**identity, "source_ref": "b" * 64, "item_count": 2,
+                              "source_watermark_sha256": "c" * 64, "active_generation_id": None,
+                              "server_instance_id": "before", "build": {"fixture_sha256": "d" * 64}}
+                MODULE.atomic_private_json(arguments.checkpoint, checkpoint)
+                repeated = {**checkpoint, "reused_generation": True, "telemetry": {},
+                            "active_generation_before": None, "active_generation_after": None}
+                verified = {**checkpoint, "status": "verified", "intelligence_export": {},
+                            "query_seeds": [seed, seed] if ordinal else [seed],
+                            "checks": {key: "PASS" for key in MODULE.CHECKS},
+                            "adapter_profile_id": "fixture-adapter", "analysis_profile_id": "fixture-analysis",
+                            "search_profile_id": "fixture-search"}
+                replies = [repeated, verified, current, storage, proof, *(extra or [])]
+                if phase == "qualification":
+                    replies.append({"status": "PASS", "artifact": {"unexplained_count": 0},
+                                    "evidence_id": "fixture-evidence", "artifact_sha256": "e" * 64})
+                error = RuntimeError("private-token private-response")
+                error.__cause__ = urllib.error.HTTPError("http://fixture.invalid/private", 408,
+                                                        "private-token", {}, None)
+                replies.append(error)
+                intelligence = {"commands": ["card"], "result_sha256": {"card": "f" * 64}}
+                with patch.object(MODULE, "source_state", return_value={"server_instance_id": "after"}), \
+                     patch.object(MODULE, "validate_telemetry"), \
+                     patch.object(MODULE, "verify_intelligence", return_value=intelligence), \
+                     patch.object(MODULE, "request", side_effect=replies) as request:
+                    with self.assertRaises(RuntimeError) as caught:
+                        MODULE.verify(arguments, "private-token")
+                    self.assertIs(caught.exception, error)
+                artifact = json.loads(arguments.output.read_text())
+                self.assertEqual(artifact["status"], "FAIL")
+                self.assertEqual(artifact["failed_gate"], phase)
+                self.assertEqual(artifact["checkpoint"], checkpoint)
+                self.assertEqual(artifact["verification"], verified)
+                self.assertEqual(artifact["intelligence"], intelligence)
+                self.assertEqual(artifact["query_coverage"], [proof])
+                self.assertEqual(len(artifact["query_results"]), 1)
+                self.assertEqual(len(artifact["comparisons"]), 1)
+                self.assertEqual(artifact["error"], {"type": "RuntimeError", "http_status": 408})
+                self.assertEqual(artifact["qualification_attempted"], phase == "qualification")
+                self.assertEqual(artifact["qualification_outcome"],
+                                 "UNKNOWN" if phase == "qualification" else "NOT_ATTEMPTED")
+                if ordinal:
+                    pending = artifact["pending_query"]
+                    self.assertEqual(pending["ordinal"], ordinal)
+                    self.assertEqual(pending["query_sha256"], MODULE.sha256_text(seed["query"]))
+                    self.assertEqual("current" in pending, len(extra) >= 1)
+                    self.assertEqual("storage_v2" in pending, len(extra) >= 2)
+                    self.assertNotIn("query", pending)
+                else:
+                    self.assertNotIn("pending_query", artifact)
+                if phase != "qualification":
+                    self.assertFalse(any("qualify" in call.args[3] for call in request.call_args_list))
+                if ordinal:
+                    self.assertFalse(any("dual-read" in call.args[3] for call in request.call_args_list))
+                self.assertEqual(stat.S_IMODE(arguments.output.stat().st_mode), 0o600)
+                for private in ("private-token", "private-response", "private-pending-body"):
+                    self.assertNotIn(private, arguments.output.read_text())
+                original = arguments.output.read_bytes()
+                with self.assertRaisesRegex(RuntimeError, "output already exists"):
+                    MODULE.verify(arguments, "private-token")
+                self.assertEqual(arguments.output.read_bytes(), original)
+
+    def test_initial_runtime_failure_retains_checkpoint_and_no_exception_message(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            arguments = Namespace(checkpoint=directory / "checkpoint.json", output=directory / "result.json",
+                                  source_id=1, commit_sha="a" * 40, api_url="http://fixture.invalid")
+            checkpoint = {"source_id": 1, "commit_sha": "a" * 40, "generation_seq": 1}
+            MODULE.atomic_private_json(arguments.checkpoint, checkpoint)
+            with patch.object(MODULE, "source_state", side_effect=RuntimeError("private-token")), \
+                 patch.object(MODULE, "request") as request:
+                with self.assertRaises(RuntimeError):
+                    MODULE.verify(arguments, "private-token")
+                request.assert_not_called()
+            artifact = json.loads(arguments.output.read_text())
+            self.assertEqual(artifact["failed_gate"], "restart_state")
+            self.assertEqual(artifact["checkpoint"], checkpoint)
+            self.assertEqual(artifact["error"], {"type": "RuntimeError"})
+            self.assertEqual(artifact["query_results"], [])
+            self.assertFalse(artifact["qualification_attempted"])
+            self.assertNotIn("private-token", arguments.output.read_text())
+
+    def test_intelligence_failure_retains_completed_command_hashes(self) -> None:
+        layers = [{"generic_card": {"name": "private-symbol"}}]
+        card = {"private": "card-content"}
+        progress = {}
+        with patch.object(MODULE, "request", side_effect=[layers, card, TimeoutError("private-token")]):
+            with self.assertRaises(TimeoutError):
+                MODULE.verify_intelligence("http://fixture.invalid", "private-token", 1, 1,
+                                           {"payload": {"record_counts": {"cards": 1}}}, progress)
+        self.assertEqual(progress["phase"], "intelligence_explain")
+        self.assertEqual(progress["intelligence_result_sha256"], {
+            "layers": MODULE.sha256_text(json.dumps(layers, sort_keys=True)),
+            "card": MODULE.sha256_text(json.dumps(card, sort_keys=True)),
+        })
+        for private in ("private-token", "private-symbol", "card-content"):
+            self.assertNotIn(private, json.dumps(progress))
 
     def test_additional_coverage_requires_identity_bound_body_and_term_proof(self) -> None:
         seed, current, storage, evidence, checkpoint = self.coverage_fixture()
