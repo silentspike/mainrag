@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare complete search projections with alternating generic-plan variants."""
+"""Compare complete search projections with each variant's declared plan policy."""
 from __future__ import annotations
 
 import argparse
@@ -28,9 +28,10 @@ def measure(case, definition, ast, expected_views):
     query = search.search_statement(definition)
     literal = json.dumps(ast).replace("'", "''")
     arguments = f"15,1,'{literal}','{{}}',10"
+    plan_mode = 'force_custom_plan' if " SET plan_cache_mode TO 'force_custom_plan'\n" in definition else 'force_generic_plan'
     statement = (
         "BEGIN READ ONLY; SET LOCAL statement_timeout='30s'; SET LOCAL jit=off; "
-        "SET LOCAL plan_cache_mode=force_generic_plan; "
+        f"SET LOCAL plan_cache_mode={plan_mode}; "
         f'PREPARE measured_search(BIGINT,BIGINT,JSONB,JSONB,BIGINT) AS {query}; '
         f'EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) EXECUTE measured_search({arguments}); '
         f'EXECUTE measured_search({arguments}); COMMIT;'
@@ -52,7 +53,7 @@ def measure(case, definition, ast, expected_views):
     if all(f'{name} AS MATERIALIZED (' in definition for name in search.NAMES):
         if set(aggregates) != set(search.NAMES) or any(value > 1 for value in aggregates.values()):
             raise RuntimeError('materialized search aggregates were not computed once')
-    return {'client_ms': client_ms, 'execution_ms': plan['Execution Time'],
+    return {'plan_mode': plan_mode, 'client_ms': client_ms, 'execution_ms': plan['Execution Time'],
             'planning_ms': plan['Planning Time'], 'aggregate_loops': aggregates,
             'fully_scored_views': expected_views,
             'result_sha256': hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()}
@@ -96,6 +97,7 @@ def run_benchmark(repetitions=3, views=96):
                       'Synthetic read-only SQL projection; not full authorized API or production qualification.',
                       'Execution time is one EXPLAIN ANALYZE execution; client time includes connection, plan, and a second complete result check.',
                       'Three query classes and alternating variant order; no candidate truncation or timeout increase.',
+                      'Original generic-plan policy versus materialized/custom-plan policy. The combined change is measured, not attributed to materialization alone.',
                       'Shared-host resource samples cannot be attributed exclusively to this fixture.',
                       'Materialized grouped output is not constant-memory; executor spill behavior remains workload-dependent.',
                   ]}

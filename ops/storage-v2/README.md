@@ -274,9 +274,12 @@ evidence UUIDs. A candidate is not activation authority.
 ## Complete search aggregate comparison
 
 Migration 052 materializes the four complete per-occurrence search aggregates
-once. It does not change scope, Boolean matching, scoring, ordering, tie breaks,
-returned content, or candidate limits. Migration replay preserves the function
-identity and authority; partial or missing rewrite anchors fail closed.
+once and uses function-local custom planning for parameter-sensitive source
+and generation cardinalities. It does not change scope, Boolean matching,
+scoring, ordering, tie breaks, returned content, or candidate limits. Migration
+replay preserves function identity, owner, ACL and security configuration;
+only the explicit planner policy is added. The caller's policy is restored on
+return. Partial/missing rewrite anchors or conflicting planner settings fail closed.
 
 The differential SQL suite compares full results for terms (including oversized
 terms), phrases, exact identifiers, Boolean combinations, missing matches,
@@ -292,7 +295,9 @@ python3 -m eval.storage_v2.schema.benchmark_search_aggregates --repetitions 3 --
 
 Each variant must score the complete declared view set and produce identical
 full-result hashes for all three query classes in every alternating round.
-The comparison owns a disposable PostgreSQL server and rejects a configured
+The comparison measures the original generic-plan policy against the combined
+materialized/custom-plan policy, not materialization in isolation. It owns a
+disposable PostgreSQL server and rejects a configured
 external test socket. Optional `TM_KENNZAHLEN` output publishes separate
 `search_aggregates` server-execution and client-wall metrics. The latter includes
 a second execution to check complete result identity; the clocks are not

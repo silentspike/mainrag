@@ -13,6 +13,7 @@ NAMES = ('term_match_aggregate', 'term_aggregate', 'phrase_aggregate', 'exact_ag
 def before_definition(definition):
     for name in NAMES:
         definition = definition.replace(f'\n    {name} AS MATERIALIZED (', f'\n    {name} AS (')
+    definition = definition.replace(" SET plan_cache_mode TO 'force_custom_plan'\n", '')
     return definition
 
 
@@ -113,5 +114,56 @@ class MaterializedSearchAggregateTests(schema.ShadowIngestSchemaTests):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('storage-v2 search aggregate definition', result.stderr)
                 self.assertEqual(self.definition(), before)
+        finally:
+            self.sql(final)
+
+    def test_function_local_custom_planning_preserves_the_callers_configuration(self):
+        self.make_search_fixture()
+        final = self.definition()
+        self.assertIn(" SET plan_cache_mode TO 'force_custom_plan'\n", final)
+        result = self.sql(self.admin(
+            "SET plan_cache_mode=force_generic_plan; "
+            "SELECT storage_v2_search_exact(15,'1','{\"type\":\"term\",\"value\":\"alpha\"}','{}',10); "
+            'SHOW plan_cache_mode;'))
+        lines = result.splitlines()
+        self.assertEqual(lines.pop(), 'force_generic_plan')
+        self.assertEqual(json.loads('\n'.join(lines))['fully_scored_views'], 24)
+        self.assertEqual(self.sql(self.admin("""
+SET plan_cache_mode=force_generic_plan;
+DO $error_boundary$
+BEGIN
+    BEGIN
+        PERFORM storage_v2_search_exact(15,'invalid-selector',
+            '{"type":"term","value":"alpha"}','{}',10);
+        RAISE EXCEPTION 'expected invalid-selector rejection';
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM NOT LIKE 'generation selector must%' THEN RAISE; END IF;
+    END;
+    IF current_setting('plan_cache_mode') <> 'force_generic_plan' THEN
+        RAISE EXCEPTION 'function planner policy leaked through an error';
+    END IF;
+END
+$error_boundary$;
+SHOW plan_cache_mode;
+""")), 'force_generic_plan')
+        try:
+            self.sql(before_definition(final))
+            before = json.loads(self.sql(f"SELECT to_jsonb(p) - 'prosrc' - 'proconfig' FROM pg_proc p "
+                                         f"WHERE oid='{previous.SIGNATURE}'::REGPROCEDURE"))
+            configuration = json.loads(self.sql(f"SELECT to_json(COALESCE(proconfig,ARRAY[]::TEXT[])) "
+                                                f"FROM pg_proc WHERE oid='{previous.SIGNATURE}'::REGPROCEDURE"))
+            self.file(MIGRATION)
+            after = json.loads(self.sql(f"SELECT to_jsonb(p) - 'prosrc' - 'proconfig' FROM pg_proc p "
+                                        f"WHERE oid='{previous.SIGNATURE}'::REGPROCEDURE"))
+            self.assertEqual(after, before)
+            expected = [*configuration, 'plan_cache_mode=force_custom_plan']
+            self.assertEqual(json.loads(self.sql(f"SELECT to_json(proconfig) FROM pg_proc "
+                                                 f"WHERE oid='{previous.SIGNATURE}'::REGPROCEDURE")), expected)
+            self.sql(f'ALTER FUNCTION {previous.SIGNATURE} SET plan_cache_mode=force_generic_plan')
+            drifted = self.definition()
+            rejected = self.command('--file', str(MIGRATION), check=False)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn('plan configuration differs', rejected.stderr)
+            self.assertEqual(self.definition(), drifted)
         finally:
             self.sql(final)
