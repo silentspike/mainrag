@@ -64,7 +64,6 @@ jobs:
     timeout-minutes: 30
     env:
       TOKENIZER_VERSION: hf_bge_wordpiece
-      TOKENIZER_ASSET_PATH: ${{ runner.temp }}/chunk-reuse-tokenizer.json
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -81,6 +80,8 @@ jobs:
           python3 -c 'from pathlib import Path; assert "2 passed; 0 failed;" in Path("backfill-tests.log").read_text(), "Expected both backfill regression tests to execute"'
       - name: Stage pinned tokenizer for chunk reuse fixtures
         shell: bash
+        env:
+          TOKENIZER_ASSET_PATH: ${{ runner.temp }}/chunk-reuse-tokenizer.json
         run: |
           curl -sSL --fail-with-body \
             https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/a5beb1e3e68b9ab74eb54cfd186867f64f240e1a/tokenizer.json \
@@ -88,6 +89,8 @@ jobs:
           echo "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66  $TOKENIZER_ASSET_PATH" | sha256sum --check --strict
       - name: Verify chunk probe reuse
         shell: bash
+        env:
+          TOKENIZER_ASSET_PATH: ${{ runner.temp }}/chunk-reuse-tokenizer.json
         run: |
           cargo test -p mainrag-api --lib chunk_reuse_tests -- --nocapture | tee chunk-reuse-tests.log
           python3 -c 'from pathlib import Path; assert "4 passed; 0 failed; 1 ignored;" in Path("chunk-reuse-tests.log").read_text(), "Expected all four chunk reuse regressions and the opt-in benchmark"'
