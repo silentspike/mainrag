@@ -6,6 +6,29 @@ application, source-local generation allocation, immutable artifacts,
 half-open membership intervals, atomic activation and requalification, direct
 mutation rejection, cross-source rejection, and RLS isolation.
 
+Migration 054 skips document joins for empty phrase/exact query classes using
+one-time scalar guards. Complete scoring, AST matching, rank order, identities,
+content, authorization, and optional-stage behavior remain unchanged. Run its
+17 real PostgreSQL checks (including inherited shadow-writer isolation) with:
+
+```bash
+python3 -m unittest eval.storage_v2.schema.test_empty_search_branches
+```
+
+The differential matrix covers 55 query/filter combinations. Execution plans
+under both custom and generic planning must show zero document-scan loops for
+empty classes and executed scans for requested classes. Migration replay retains
+function identity, ACL, owner, security, and configuration; partial or drifted
+definitions fail atomically.
+
+After committing the implementation, run the synthetic benchmark with
+`python3 -m eval.storage_v2.schema.benchmark_empty_search_branches --output RESULT.json`.
+It owns and cleans up its PostgreSQL cluster, refuses external databases and
+existing evidence, and requires nonempty complete result identity for term,
+phrase, and exact queries. Three repetitions are pairs within one experiment;
+run separate experiments for between-run evidence. SQL projection timings are
+not production API latency or candidate qualification.
+
 Run against the locally installed PostgreSQL binaries:
 
 ```bash
