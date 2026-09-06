@@ -289,6 +289,23 @@ pub async fn verify_release_candidate<C>(
 where
     C: GenericClient + Sync,
 {
+    content_body::with_reader_epoch(
+        client,
+        verify_release_candidate_in_epoch(client, source_id, input, pack_root, io_buffer_bytes),
+    )
+    .await
+}
+
+async fn verify_release_candidate_in_epoch<C>(
+    client: &C,
+    source_id: i64,
+    input: &ReleaseCandidateVerifyInput,
+    pack_root: &Path,
+    io_buffer_bytes: usize,
+) -> Result<ReleaseCandidateVerifyResult>
+where
+    C: GenericClient + Sync,
+{
     if input.generation_id <= 0 {
         bail!("release-candidate verification requires a positive generation id");
     }
@@ -787,29 +804,39 @@ where
     let content_started = Instant::now();
     let mut bodies = vec![None; files.len()];
     let mut missing_groups: Vec<(usize, Vec<usize>)> = Vec::new();
-    for group in group_body_indices(&files)? {
-        let representative = group[0];
-        let bytes = files[representative].load_verified_bytes().await?;
-        for index in group.iter().skip(1) {
-            files[*index].load_verified_bytes().await?;
-        }
-        if let Some(body) =
-            find_and_verify_existing_body(client, pack_root, bytes.as_ref(), io_buffer_bytes)
-                .await?
-        {
-            for index in &group {
-                bodies[*index] = Some(body.clone());
+    // One epoch covers the streaming reuse pass, not one registration and
+    // finish per body. Source bytes are still loaded one group at a time.
+    content_body::with_reader_epoch(client, async {
+        for group in group_body_indices(&files)? {
+            let representative = group[0];
+            let bytes = files[representative].load_verified_bytes().await?;
+            for index in group.iter().skip(1) {
+                files[*index].load_verified_bytes().await?;
             }
-            measurements.reused_bodies = measurements
-                .reused_bodies
-                .saturating_add(u64::try_from(group.len())?);
-        } else {
-            measurements.reused_bodies = measurements
-                .reused_bodies
-                .saturating_add(u64::try_from(group.len().saturating_sub(1))?);
-            missing_groups.push((representative, group));
+            if let Some(body) = find_and_verify_existing_body_in_epoch(
+                client,
+                pack_root,
+                bytes.as_ref(),
+                io_buffer_bytes,
+            )
+            .await?
+            {
+                for index in &group {
+                    bodies[*index] = Some(body.clone());
+                }
+                measurements.reused_bodies = measurements
+                    .reused_bodies
+                    .saturating_add(u64::try_from(group.len())?);
+            } else {
+                measurements.reused_bodies = measurements
+                    .reused_bodies
+                    .saturating_add(u64::try_from(group.len().saturating_sub(1))?);
+                missing_groups.push((representative, group));
+            }
         }
-    }
+        Ok(())
+    })
+    .await?;
     let mut result_pack_id = bodies.iter().flatten().find_map(|body| body.pack_id);
     let mut result_pack_stored_bytes = 0_u64;
     if !missing_groups.is_empty() {
@@ -1483,7 +1510,26 @@ fn search_exact_identifiers(text: &str) -> Vec<String> {
         .collect()
 }
 
+// Newly published packs are private to the construction transaction until
+// its commit. Existing published packs require a reader epoch before placement.
+#[cfg(test)]
 async fn find_and_verify_existing_body<C>(
+    client: &C,
+    pack_root: &Path,
+    bytes: &[u8],
+    io_buffer_bytes: usize,
+) -> Result<Option<content_body::ContentBodyRecord>>
+where
+    C: GenericClient + Sync,
+{
+    content_body::with_reader_epoch(
+        client,
+        find_and_verify_existing_body_in_epoch(client, pack_root, bytes, io_buffer_bytes),
+    )
+    .await
+}
+
+async fn find_and_verify_existing_body_in_epoch<C>(
     client: &C,
     pack_root: &Path,
     bytes: &[u8],
@@ -1503,7 +1549,7 @@ where
     let Some(row) = row else {
         return Ok(None);
     };
-    let body = content_body::ContentBodyRecord::from(row);
+    let mut body = content_body::ContentBodyRecord::from(row);
     if let Some(inline) = &body.inline_bytes {
         if inline.as_slice() != bytes {
             bail!("existing inline body failed full-byte equality verification");
@@ -1512,7 +1558,7 @@ where
     }
     let packed = client
         .query_one(
-            "SELECT pack.storage_key, pack.stored_bytes, entry.ordinal, entry.pack_offset, \
+            "SELECT pack.id AS pack_id, pack.storage_key, pack.stored_bytes, entry.ordinal, entry.pack_offset, \
                     entry.stored_length, entry.codec::TEXT AS codec, entry.entry_digest, \
                     dictionary.id AS dictionary_id, dictionary.digest AS dictionary_digest, \
                     dictionary.dictionary_bytes \
@@ -1549,7 +1595,11 @@ where
         (None, None, None) => None,
         _ => bail!("stored body has an incomplete dictionary identity"),
     };
-    let pack_id = body.pack_id.context("packed body omitted pack identity")?;
+    // Placement may switch between the identity and entry queries. Bind every
+    // placement field to the second query's snapshot; the epoch retains either
+    // pack until verification completes.
+    let pack_id: Uuid = packed.get("pack_id");
+    body.pack_id = Some(pack_id);
     let entry = PackEntry {
         pack_id,
         ordinal: u64::try_from(packed.get::<_, i64>("ordinal"))?,
@@ -1569,6 +1619,9 @@ where
             .map_err(|_| anyhow::anyhow!("invalid pack entry digest"))?,
     };
     let storage_key: String = packed.get("storage_key");
+    if storage_key != format!("{pack_id}.pack") {
+        bail!("stored pack key does not match its identity");
+    }
     let reader = PackReader::new(
         pack_root.join(storage_key),
         pack_id,
@@ -2200,6 +2253,9 @@ fn validate_hits(path: &str, hits: &[ComparableHit]) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod pack_reader_tests;
 
 #[cfg(test)]
 mod tests {
