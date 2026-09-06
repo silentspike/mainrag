@@ -78,6 +78,17 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      qdrant:
+        image: qdrant/qdrant:v1.16.3
+        env:
+          QDRANT__SERVICE__API_KEY: fixture-only
+        ports:
+          - 6333:6333
+        options: >-
+          --health-cmd "bash -c '</dev/tcp/localhost/6333'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -97,6 +108,16 @@ jobs:
         run: |
           cargo test -p mainrag-api --lib services::index::chunk_limits::tests -- --nocapture | tee chunk-limit-tests.log
           python3 -c 'from pathlib import Path; assert "6 passed; 0 failed; 0 ignored;" in Path("chunk-limit-tests.log").read_text(), "Expected all six chunk-budget regressions to execute"'
+      - name: Verify Qdrant first-boot isolation and real point preservation
+        shell: bash
+        env:
+          MAINRAG_QDRANT_TEST_URL: http://127.0.0.1:6333
+          MAINRAG_QDRANT_FIXTURE_ACK: ephemeral-only
+        run: |
+          cargo test -p mainrag-api --lib services::qdrant::bootstrap::tests -- --nocapture | tee bootstrap-tests.log
+          python3 -c 'from pathlib import Path; assert "5 passed; 0 failed; 1 ignored;" in Path("bootstrap-tests.log").read_text(), "Expected all five bootstrap isolation tests"'
+          cargo test -p mainrag-api --lib services::qdrant::bootstrap::tests::bootstrap_real_qdrant_preserves_points_and_search -- --ignored --exact --nocapture | tee bootstrap-real-tests.log
+          python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("bootstrap-real-tests.log").read_text(), "Expected real Qdrant bootstrap regression execution"'
       - name: Verify intelligence retry against isolated PostgreSQL
         shell: bash
         env:
