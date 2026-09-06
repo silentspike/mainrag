@@ -9,6 +9,19 @@ const vm = require('node:vm');
 const policyPath = path.join(__dirname, '../../docs/telemetry-integrity.js');
 const context = require(policyPath);
 
+test('pack resource measurements keep RSS, time, file bytes and integrity distinct', () => {
+  assert.equal(context.candidateMetricInfo('pack_resource.process_peak_rss_bytes').u, 'b');
+  assert.equal(context.candidateMetricInfo('pack_resource.rewrite_ms').u, 'ms_roh');
+  assert.equal(context.candidateMetricInfo('pack_resource.rewrite_mib_s').preference, 'higher');
+  const info = context.candidateMetricInfo('pack_resource.integrity_passed');
+  assert.equal(info.showZero, true);
+  assert.match(info.d, /integrity 0 is FAIL/);
+  assert.match(info.d, /whole fresh process/);
+  assert.match(info.d, /equal size\/pattern/);
+  assert.equal(context.candidateMetricInfo('pack_resource.sql_ms'), null);
+  assert.equal(context.candidateMetricInfo('pack_resource.__proto__'), null);
+});
+
 test('known integrity metrics are pinned measurements with explicit units', () => {
   for (const field of ['item_count', 'view_count', 'search_document_count',
     'unbound_view_count', 'search_binding_error_count']) {
