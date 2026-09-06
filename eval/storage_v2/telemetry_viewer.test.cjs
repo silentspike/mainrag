@@ -68,3 +68,26 @@ test('metadata callers cannot mutate the shared presentation policy', () => {
   info.u = 'ms_roh';
   assert.equal(context.candidateMetricInfo('candidate_state.view_count').u, 'n_exact');
 });
+
+test('search diagnosis retains failed zero quality and separates clocks from counts', () => {
+  for (const field of ['seed_count', 'unique_query_count', 'quality_passed',
+    'current_unique_path_count_median', 'candidate_unique_path_count_median']) {
+    const info = context.candidateMetricInfo(`search_quality.${field}`);
+    assert.equal(info.u, 'n_exact');
+    assert.equal(info.pinned, true);
+    assert.equal(context.hideEmptyMetric([{median:0}], info.showZero), false);
+    assert.match(info.d, /0 is FAIL/);
+    assert.match(info.d, /not independent queries/);
+    assert.match(info.d, /do not replace maximum-latency/);
+    assert.equal(info.preference, field === 'quality_passed' ? 'higher' : 'neutral');
+  }
+  for (const variant of ['current', 'candidate']) {
+    for (const clock of ['http_client', 'server']) {
+      assert.equal(context.candidateMetricInfo(`search_quality.${variant}_${clock}_ms_median`).u, 'ms_roh');
+      assert.equal(context.candidateMetricInfo(`search_quality.${variant}_${clock}_ms_median`).preference, 'lower');
+    }
+  }
+  for (const field of ['unknown', '__proto__', 'toString']) {
+    assert.equal(context.candidateMetricInfo(`search_quality.${field}`), null);
+  }
+});
