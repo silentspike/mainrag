@@ -165,6 +165,16 @@ an existing output is never overwritten. Use a new output path for each retry
 and keep failed attempts out of successful performance aggregates. The 2000 ms
 default latency gate is unchanged.
 
+Transport and runtime failures also retain a private failure artifact: the
+current phase, completed verification/intelligence hashes and query proofs, and
+the pending query ordinal, hash and ranked identities. Pending result bodies and
+exception messages are not copied. Only exception type and any HTTP status are
+recorded. A failure before qualification leaves it `NOT_ATTEMPTED`; a lost
+qualification response is explicitly `UNKNOWN`, since the server might have
+accepted the request. Inspect the named candidate before retrying an ambiguous
+POST. A failure artifact never qualifies a source or becomes successful timing
+evidence, and existing successful or failed output remains untouched.
+
 Literal query seeds use `literal-coverage-non-inferiority-v1`. This policy allows
 additional relevant paths only with read-only server evidence bound to the
 source, verified generation, commit, query, and every returned hit identity.
