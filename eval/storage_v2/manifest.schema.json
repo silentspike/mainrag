@@ -19,9 +19,9 @@
     "limitations"
   ],
   "properties": {
-    "schema_version": {"const": "storage-v2-baseline/v1"},
+    "schema_version": {"const": "storage-v2-baseline/v2"},
     "run_id": {"type": "string", "pattern": "^fixture-current-[0-9a-f]{16}$"},
-    "status": {"$ref": "#/$defs/status"},
+    "status": {"enum": ["BLOCKED", "FAIL"]},
     "recorded_at": {"type": "string", "format": "date-time"},
     "subject": {
       "type": "object",
@@ -141,6 +141,11 @@
       "additionalProperties": false,
       "required": [
         "status",
+        "scope",
+        "sql_load_status",
+        "logical_input_bytes",
+        "loaded_rows",
+        "rows_after_repeat",
         "source_bytes_read",
         "content_bytes_stored",
         "parsed_items",
@@ -150,11 +155,16 @@
         "database_bytes_after_ingest"
       ],
       "properties": {
-        "status": {"$ref": "#/$defs/status"},
-        "source_bytes_read": {"$ref": "#/$defs/nonNegativeInteger"},
-        "content_bytes_stored": {"$ref": "#/$defs/nonNegativeInteger"},
-        "parsed_items": {"type": "integer", "minimum": 1},
-        "unchanged_items_reused": {"$ref": "#/$defs/nonNegativeInteger"},
+        "status": {"const": "NOT_RUN"},
+        "scope": {"const": "synthetic_sql_load"},
+        "sql_load_status": {"enum": ["PASS", "FAIL"]},
+        "logical_input_bytes": {"$ref": "#/$defs/nonNegativeInteger"},
+        "loaded_rows": {"$ref": "#/$defs/nonNegativeInteger"},
+        "rows_after_repeat": {"$ref": "#/$defs/nonNegativeInteger"},
+        "source_bytes_read": {"type": "null"},
+        "content_bytes_stored": {"type": "null"},
+        "parsed_items": {"type": "null"},
+        "unchanged_items_reused": {"type": "null"},
         "errors": {"$ref": "#/$defs/nonNegativeInteger"},
         "elapsed_ms": {"$ref": "#/$defs/nonNegativeNumber"},
         "database_bytes_after_ingest": {"$ref": "#/$defs/nonNegativeInteger"}

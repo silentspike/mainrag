@@ -1,5 +1,22 @@
 # Storage-v2 public baseline harness
 
+## Ingest evidence correction
+
+The SQL fixture harness does not run production ingestion. Its v2 manifest
+labels loading as `synthetic_sql_load`, reports logical input bytes and actual
+table counts, and leaves parser/reuse/source-read measurements null with
+`ingest.status=NOT_RUN`. Successful search tests may still be recorded, but the
+aggregate remains `BLOCKED` (nonzero exit), not full baseline acceptance.
+The committed v1 baseline is preserved as historical SQL-fixture evidence; it
+does not validate under the corrected v2 acceptance schema. Do not rewrite its
+old measurements or use them as a current production ingest baseline.
+
+Storage-v2 runtime telemetry separately records `source_io.application_read_bytes`
+and `ablauf.deferred_source_read_bytes` at actual deferred source reads, including
+repeated verification loads. This scope excludes eager adapter reads, pack reads
+and OS/device I/O. `source_io.coverage=PARTIAL` and null adapter/device values
+make that limitation explicit; zero deferred reads do not prove zero total I/O.
+
 This harness measures the repository's current PostgreSQL full-text query shape
 against a frozen public fixture. It is the baseline/comparison contract for
 storage-v2 work; it does not replace the broader golden-set ownership in
@@ -18,7 +35,7 @@ configured production database.
 - PostgreSQL 18 client/server tools: `initdb`, `pg_ctl`, and `psql`; and
 - a Git checkout containing the commit named as the harness identity.
 
-## Reproduce the committed current-path baseline
+## Run the SQL fixture microbenchmark
 
 From the repository root:
 
@@ -26,16 +43,16 @@ From the repository root:
 python3 -m unittest eval/storage_v2/test_harness.py
 python3 eval/storage_v2/check_writers.py
 python3 eval/storage_v2/harness.py \
-  --code-sha b969dc7d4f4fa989999bbf2058fe6af0477afde0 \
+  --code-sha CODE_COMMIT \
   --harness-commit HARNESS_COMMIT \
-  --output eval/storage_v2/baselines/current-path.json
+  --output target/storage-v2/sql-fixture-v2.json
 ```
 
-Replace `HARNESS_COMMIT` with the full commit that introduced the harness. The
+Replace both commit placeholders with the full reviewed subject/harness commits. The
 default run performs three warmups and 30 measured iterations for every query.
 Runs with fewer than 30 measured iterations fail closed.
 
-The committed baseline is successful only when:
+The SQL/search subtests are successful only when:
 
 - at least one document and query were executed;
 - every query produced deterministic exact Top-10 identities across all runs;
@@ -50,8 +67,8 @@ The committed baseline is successful only when:
 - matched documents and scored channel rows separately from returned results;
 - first-before-query-warmups latency separately from warm latency;
 - warm p50/p95/p99 across at least 30 iterations per query;
-- source/content bytes, parsed documents, unchanged-item reuse, ingest errors,
-  elapsed ingest time, and post-ingest relation bytes; and
+- logical fixture bytes, loaded/repeated SQL row counts, SQL-load elapsed time,
+  and post-load relation bytes (production ingest measurements remain null); and
 - code, harness, schema, corpus, query-set, backend, cache, concurrency, and
   timestamp identity.
 

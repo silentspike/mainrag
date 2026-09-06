@@ -24,6 +24,7 @@ use crate::services::intelligence_v2::{
     generic_structural_cards, normalized_output_sha256, GENERIC_ANALYSIS_PROFILE,
 };
 use crate::services::parser::{CodeParser, ExtractedCall, ExtractedSymbol, ParseResult};
+use crate::services::source_read::ReadAccounting;
 
 pub const FIXTURE_ADAPTER_PROFILE: &str = "mainrag.fs-shadow-fixture.v1";
 pub const FIXTURE_VIEW_PROFILE: &str = "mainrag.whole-artifact-view.v1";
@@ -46,6 +47,7 @@ struct SliceFile {
     source_range: Option<plugins::RawFileRange>,
     content_sha256: Option<[u8; 32]>,
     logical_length: u64,
+    source_reads: ReadAccounting,
 }
 
 impl From<plugins::RawFile> for SliceFile {
@@ -70,6 +72,7 @@ impl From<plugins::RawFile> for SliceFile {
             source_range: file.source_range,
             content_sha256: None,
             logical_length: 0,
+            source_reads: ReadAccounting::default(),
         }
     }
 }
@@ -94,13 +97,24 @@ impl SliceFile {
             let mut source = tokio::fs::File::open(path).await?;
             source.seek(std::io::SeekFrom::Start(range.start)).await?;
             let mut bytes = Vec::with_capacity(capacity);
-            source.take(length).read_to_end(&mut bytes).await?;
+            self.source_reads
+                .reader(source)
+                .take(length)
+                .read_to_end(&mut bytes)
+                .await?;
             if bytes.len() != capacity {
                 bail!("storage-v2 source fragment ended before its declared boundary");
             }
             Ok(Cow::Owned(bytes))
         } else {
-            Ok(Cow::Owned(tokio::fs::read(path).await?))
+            use tokio::io::AsyncReadExt;
+            let source = tokio::fs::File::open(path).await?;
+            let mut bytes = Vec::new();
+            self.source_reads
+                .reader(source)
+                .read_to_end(&mut bytes)
+                .await?;
+            Ok(Cow::Owned(bytes))
         }
     }
 
@@ -736,6 +750,7 @@ where
         measurements.reused_views = reused_items;
         measurements.reused_analysis = reused_items;
         measurements.reused_generation = 1;
+        measurements.deferred_source_read_bytes = source_read_bytes(&files)?;
         measurements.record_stage(
             ShadowIngestStage::DatabaseStage,
             reuse_lookup_started.elapsed(),
@@ -1300,6 +1315,7 @@ where
         bail!("active generation changed during the shadow slice");
     }
     measurements.record_stage(ShadowIngestStage::Seal, verification_started.elapsed());
+    measurements.deferred_source_read_bytes = source_read_bytes(&files)?;
     measurements.record_total(total_started.elapsed());
     Ok(ShadowSliceResult {
         run_id: run.id,
@@ -1317,6 +1333,14 @@ where
         active_generation_before,
         active_generation_after,
         telemetry: measurements.to_telemetry_json(),
+    })
+}
+
+fn source_read_bytes(files: &[SliceFile]) -> Result<u64> {
+    files.iter().try_fold(0_u64, |total, file| {
+        total
+            .checked_add(file.source_reads.bytes())
+            .context("source read counter overflow")
     })
 }
 
@@ -2355,6 +2379,7 @@ mod tests {
             .await
             .expect("capture candidate watermark");
         assert_eq!(input_bytes, 15);
+        assert_eq!(source_read_bytes(&files).unwrap(), 15);
         std::fs::write(&source_path, "fn after() {}\n").expect("mutate source");
 
         let error = files[0]
@@ -2362,6 +2387,7 @@ mod tests {
             .await
             .expect_err("content drift must fail");
         assert!(error.to_string().contains("drifted"));
+        assert_eq!(source_read_bytes(&files).unwrap(), 29);
     }
 
     #[tokio::test]
@@ -2393,6 +2419,31 @@ mod tests {
             file.load_verified_bytes().await.unwrap().as_ref(),
             selected.as_slice()
         );
+        assert_eq!(file.source_reads.bytes(), 2 * (end - start));
+    }
+
+    #[tokio::test]
+    async fn eager_content_is_not_reported_as_observed_source_io() {
+        let mut files = vec![SliceFile::from(plugins::RawFile {
+            path: "sample.rs".into(),
+            content: "fn main() {}".into(),
+            size: 12,
+            language: Some("rs".into()),
+            last_modified: None,
+            source_path: None,
+            source_range: None,
+        })];
+        let (_, logical_bytes) = canonical_fixture_hash(&mut files).await.unwrap();
+        files[0].load_verified_bytes().await.unwrap();
+        assert_eq!(logical_bytes, 12);
+        assert_eq!(source_read_bytes(&files).unwrap(), 0);
+        let mut measurements = ShadowIngestMeasurements::default();
+        measurements.input_bytes = logical_bytes;
+        measurements.deferred_source_read_bytes = source_read_bytes(&files).unwrap();
+        let json = measurements.to_telemetry_json();
+        assert_eq!(json["source_io"]["coverage"], "PARTIAL");
+        assert!(json["source_io"]["adapter_read_bytes"].is_null());
+        assert!(json["source_io"]["device_read_bytes"].is_null());
     }
 
     #[test]

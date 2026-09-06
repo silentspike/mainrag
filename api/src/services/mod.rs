@@ -28,6 +28,8 @@ pub mod retrieval_v2;
 pub mod search;
 #[cfg(feature = "storage-v2-retrieval")]
 pub mod shadow_slice;
+#[cfg(feature = "storage-v2-retrieval")]
+pub mod source_read;
 #[allow(dead_code)]
 pub mod watch;
 
