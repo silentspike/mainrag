@@ -270,3 +270,31 @@ Source names, IDs, paths, watermarks, queries, result sets, and raw resource
 measurements are protected operational evidence. Public progress may contain
 only source counts, type counts, aggregate sizes, hashes, outcomes, and opaque
 evidence UUIDs. A candidate is not activation authority.
+# Complete search aggregate comparison
+
+Migration 052 materializes the four complete per-occurrence search aggregates
+once. It does not change scope, Boolean matching, scoring, ordering, tie breaks,
+returned content, or candidate limits. Migration replay preserves the function
+identity and authority; partial or missing rewrite anchors fail closed.
+
+The differential SQL suite compares full results for terms (including oversized
+terms), phrases, exact identifiers, Boolean combinations, missing matches,
+source filters, and unavailable optional profiles. Real generic-plan assertions
+check aggregate execution counts and retain late content materialization.
+
+After committing the implementation, run the isolated comparison:
+
+```bash
+python3 -m unittest eval.storage_v2.schema.test_materialized_search_aggregates eval.storage_v2.schema.test_search_aggregate_benchmark -v
+python3 -m eval.storage_v2.schema.benchmark_search_aggregates --repetitions 3 --views 96 --output comparison.json
+```
+
+Each variant must score the complete declared view set and produce identical
+full-result hashes for all three query classes in every alternating round.
+The comparison owns a disposable PostgreSQL server and rejects a configured
+external test socket. Optional `TM_KENNZAHLEN` output publishes separate
+`search_aggregates` server-execution and client-wall metrics. The latter includes
+a second execution to check complete result identity; the clocks are not
+interchangeable. This synthetic projection is neither full authorized API
+qualification nor an isolated production resource measurement. Materialized
+results can still use memory or spill; no constant-memory claim is made.
