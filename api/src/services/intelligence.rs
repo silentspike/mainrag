@@ -66,6 +66,7 @@ impl IntelligenceService {
         content: &str,
     ) -> Result<ParseResult> {
         // Per-language locking: only the parser for this file's language is locked
+        super::ingest_observation::intelligence_parser_call();
         let result = self.parser.parse_file(path, content)?;
 
         // Single DB connection for all operations

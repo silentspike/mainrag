@@ -11,7 +11,8 @@ use tokio::fs;
 use tokio::task::spawn_blocking;
 use tracing::warn;
 
-use super::{RawFile, RawFileRange, SourcePlugin, SyncResult};
+use super::{ObservedSyncResult, RawFile, RawFileRange, SourcePlugin, SyncResult};
+use crate::services::source_read::{AccountedReader, ReadAccounting};
 
 const STORAGE_V2_FRAGMENT_BYTES: u64 = 1024 * 1024;
 const STORAGE_V2_NEWLINE_WINDOW_BYTES: u64 = 64 * 1024;
@@ -101,10 +102,14 @@ fn valid_utf8_stream_chunk(trailing: &mut Vec<u8>, bytes: &[u8]) -> bool {
     }
 }
 
-async fn check_if_binary(path: &Path, scan_full_text: bool) -> anyhow::Result<bool> {
+async fn check_if_binary(
+    path: &Path,
+    scan_full_text: bool,
+    accounting: Option<&ReadAccounting>,
+) -> anyhow::Result<bool> {
     use tokio::io::AsyncReadExt;
 
-    let mut file = tokio::fs::File::open(path).await?;
+    let mut file = AccountedReader::optional(tokio::fs::File::open(path).await?, accounting);
     let mut buffer = [0u8; 512]; // Read first 512 bytes
     let bytes_read = file.read(&mut buffer).await?;
 
@@ -172,8 +177,15 @@ impl SourcePlugin for FilesystemPlugin {
         let mut files = vec![];
         let mut errors = vec![];
 
-        self.collect_files(path, Path::new(source_path), &mut files, &mut errors, true)
-            .await?;
+        self.collect_files(
+            path,
+            Path::new(source_path),
+            &mut files,
+            &mut errors,
+            true,
+            None,
+        )
+        .await?;
 
         Ok(SyncResult { files, errors })
     }
@@ -190,9 +202,27 @@ impl SourcePlugin for FilesystemPlugin {
 
         let mut files = vec![];
         let mut errors = vec![];
-        self.collect_files(path, Path::new(source_path), &mut files, &mut errors, false)
-            .await?;
+        self.collect_files(
+            path,
+            Path::new(source_path),
+            &mut files,
+            &mut errors,
+            false,
+            None,
+        )
+        .await?;
         Ok(SyncResult { files, errors })
+    }
+
+    async fn sync_observed(&self, source_path: &str) -> anyhow::Result<ObservedSyncResult> {
+        self.observe(source_path, true).await
+    }
+
+    async fn sync_for_storage_v2_observed(
+        &self,
+        source_path: &str,
+    ) -> anyhow::Result<ObservedSyncResult> {
+        self.observe(source_path, false).await
     }
 
     fn source_type(&self) -> &'static str {
@@ -201,6 +231,31 @@ impl SourcePlugin for FilesystemPlugin {
 }
 
 impl FilesystemPlugin {
+    async fn observe(
+        &self,
+        source_path: &str,
+        load_content: bool,
+    ) -> anyhow::Result<ObservedSyncResult> {
+        let path = Path::new(source_path);
+        anyhow::ensure!(path.is_dir(), "source root is not an accessible directory");
+        let accounting = ReadAccounting::filesystem_adapter();
+        let mut files = Vec::new();
+        let mut errors = Vec::new();
+        self.collect_files(
+            path,
+            path,
+            &mut files,
+            &mut errors,
+            load_content,
+            Some(&accounting),
+        )
+        .await?;
+        Ok(ObservedSyncResult {
+            result: SyncResult { files, errors },
+            application_read_bytes: Some(accounting.bytes()),
+        })
+    }
+
     /// Collect files using WalkBuilder for proper .gitignore support
     /// WalkBuilder handles nested .gitignore and .git/info/exclude files.
     ///
@@ -213,6 +268,7 @@ impl FilesystemPlugin {
         files: &mut Vec<RawFile>,
         errors: &mut Vec<String>,
         load_content: bool,
+        accounting: Option<&ReadAccounting>,
     ) -> anyhow::Result<()> {
         const INDEXABLE_EXTENSIONS: &[&str] = &[
             "rs", "py", "js", "ts", "tsx", "go", "java", "c", "cpp", "h", "hpp", "md", "txt",
@@ -292,7 +348,7 @@ impl FilesystemPlugin {
             };
 
             // Binary check
-            match check_if_binary(&path, !load_content).await {
+            match check_if_binary(&path, !load_content, accounting).await {
                 Ok(true) => continue, // Skip binary silently
                 Err(e) => {
                     let err = format!("Failed to check binary status {}: {}", path.display(), e);
@@ -325,7 +381,7 @@ impl FilesystemPlugin {
 
             if !load_content {
                 if file_size > STORAGE_V2_FRAGMENT_BYTES {
-                    for source_range in storage_v2_fragment_ranges(&path, file_size)? {
+                    for source_range in storage_v2_fragment_ranges(&path, file_size, accounting)? {
                         files.push(RawFile {
                             path: relative_path.clone(),
                             content: String::new(),
@@ -372,7 +428,12 @@ impl FilesystemPlugin {
             }
 
             // Read content for normal-sized files
-            match fs::read_to_string(&path).await {
+            let content = if let Some(accounting) = accounting {
+                read_text_observed(&path, accounting).await
+            } else {
+                fs::read_to_string(&path).await
+            };
+            match content {
                 Ok(content) => {
                     // DEBUG: Log JSONL files being added
                     if ext == "jsonl" {
@@ -409,11 +470,25 @@ impl FilesystemPlugin {
     }
 }
 
-fn storage_v2_fragment_ranges(path: &Path, length: u64) -> anyhow::Result<Vec<RawFileRange>> {
+async fn read_text_observed(path: &Path, accounting: &ReadAccounting) -> std::io::Result<String> {
+    use tokio::io::AsyncReadExt;
+    let mut content = String::new();
+    accounting
+        .reader(tokio::fs::File::open(path).await?)
+        .read_to_string(&mut content)
+        .await?;
+    Ok(content)
+}
+
+fn storage_v2_fragment_ranges(
+    path: &Path,
+    length: u64,
+    accounting: Option<&ReadAccounting>,
+) -> anyhow::Result<Vec<RawFileRange>> {
     if length == 0 {
         return Ok(vec![RawFileRange { start: 0, end: 0 }]);
     }
-    let mut file = std::fs::File::open(path)?;
+    let mut file = AccountedReader::optional(std::fs::File::open(path)?, accounting);
     let mut ranges = Vec::new();
     let mut start = 0_u64;
     while start < length {
@@ -454,6 +529,74 @@ fn storage_v2_fragment_ranges(path: &Path, length: u64) -> anyhow::Result<Vec<Ra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn observed_sync_counts_probe_and_eager_reads_on_every_repeat() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-read-observation-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let content = "fn sample() {}\n";
+        std::fs::write(directory.0.join("sample.rs"), content).unwrap();
+        let plugin = FilesystemPlugin::new();
+        let legacy = plugin.sync(directory.0.to_str().unwrap()).await.unwrap();
+        for _ in 0..2 {
+            let observed = plugin
+                .sync_observed(directory.0.to_str().unwrap())
+                .await
+                .unwrap();
+            assert!(observed.result.errors.is_empty());
+            assert_eq!(observed.result.files.len(), legacy.files.len());
+            assert_eq!(observed.result.files[0].content, legacy.files[0].content);
+            assert_eq!(
+                observed.application_read_bytes,
+                Some(2 * content.len() as u64)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn observed_v2_discovery_counts_full_validation_but_not_deferred_loads() {
+        let directory = TestDirectory(std::env::temp_dir().join(format!(
+            "mainrag-deferred-observation-{}",
+            uuid::Uuid::new_v4()
+        )));
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let content = "a".repeat(2048);
+        std::fs::write(directory.0.join("sample.txt"), &content).unwrap();
+        // Rejected content also costs source I/O; it must not disappear from the count.
+        std::fs::write(directory.0.join("binary.txt"), b"\0binary").unwrap();
+        let observed = FilesystemPlugin::new()
+            .sync_for_storage_v2_observed(directory.0.to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(observed.result.errors.is_empty());
+        assert_eq!(observed.result.files.len(), 1);
+        assert!(observed.result.files[0].content.is_empty());
+        assert_eq!(
+            observed.application_read_bytes,
+            Some(content.len() as u64 + 7)
+        );
+    }
+
+    #[test]
+    fn fragment_boundaries_count_read_work_not_seeks_or_logical_size() {
+        let directory = TestDirectory(std::env::temp_dir().join(format!(
+            "mainrag-boundary-observation-{}",
+            uuid::Uuid::new_v4()
+        )));
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let path = directory.0.join("sample.txt");
+        std::fs::write(&path, vec![b'a'; STORAGE_V2_FRAGMENT_BYTES as usize + 20]).unwrap();
+        let accounting = ReadAccounting::filesystem_adapter();
+        let measured =
+            storage_v2_fragment_ranges(&path, STORAGE_V2_FRAGMENT_BYTES + 20, Some(&accounting))
+                .unwrap();
+        let unmeasured =
+            storage_v2_fragment_ranges(&path, STORAGE_V2_FRAGMENT_BYTES + 20, None).unwrap();
+        assert_eq!(measured, unmeasured);
+        assert_eq!(accounting.bytes(), STORAGE_V2_NEWLINE_WINDOW_BYTES + 4);
+    }
 
     struct TestDirectory(PathBuf);
 
@@ -496,7 +639,14 @@ mod tests {
         let mut files = Vec::new();
         let mut errors = Vec::new();
         FilesystemPlugin::new()
-            .collect_files(&directory.0, &directory.0, &mut files, &mut errors, false)
+            .collect_files(
+                &directory.0,
+                &directory.0,
+                &mut files,
+                &mut errors,
+                false,
+                None,
+            )
             .await
             .expect("return discovery diagnostics");
         assert!(files.is_empty());
@@ -615,7 +765,14 @@ mod tests {
         let mut errors = Vec::new();
 
         FilesystemPlugin::new()
-            .collect_files(&directory.0, &directory.0, &mut files, &mut errors, false)
+            .collect_files(
+                &directory.0,
+                &directory.0,
+                &mut files,
+                &mut errors,
+                false,
+                None,
+            )
             .await
             .expect("discover fragmented storage-v2 source");
 
@@ -650,7 +807,7 @@ mod tests {
         content.extend_from_slice(&vec![b'b'; STORAGE_V2_FRAGMENT_BYTES as usize]);
         std::fs::write(&source_file, &content).expect("write fragmented source");
 
-        let ranges = storage_v2_fragment_ranges(&source_file, content.len() as u64)
+        let ranges = storage_v2_fragment_ranges(&source_file, content.len() as u64, None)
             .expect("derive fragment ranges");
 
         assert_eq!(ranges.first().map(|range| range.start), Some(0));

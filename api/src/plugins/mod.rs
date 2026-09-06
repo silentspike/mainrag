@@ -27,6 +27,14 @@ pub struct SyncResult {
     pub errors: Vec<String>,
 }
 
+/// Actual content-read work in an adapter invocation, not logical file sizes.
+/// None means the adapter does not implement measurement, never zero work.
+#[derive(Debug)]
+pub struct ObservedSyncResult {
+    pub result: SyncResult,
+    pub application_read_bytes: Option<u64>,
+}
+
 /// Threshold above which conversation files are streamed from disk instead of loaded into memory.
 pub const LARGE_FILE_THRESHOLD: usize = 5 * 1024 * 1024; // 5 MB
 
@@ -60,6 +68,25 @@ pub struct RawFileRange {
 pub trait SourcePlugin: Send + Sync {
     /// Sync source and return files
     async fn sync(&self, source_path: &str) -> anyhow::Result<SyncResult>;
+
+    #[allow(dead_code)]
+    async fn sync_observed(&self, source_path: &str) -> anyhow::Result<ObservedSyncResult> {
+        Ok(ObservedSyncResult {
+            result: self.sync(source_path).await?,
+            application_read_bytes: None,
+        })
+    }
+
+    #[allow(dead_code)]
+    async fn sync_for_storage_v2_observed(
+        &self,
+        source_path: &str,
+    ) -> anyhow::Result<ObservedSyncResult> {
+        Ok(ObservedSyncResult {
+            result: self.sync_for_storage_v2(source_path).await?,
+            application_read_bytes: None,
+        })
+    }
 
     /// Discover source items for storage-v2 construction. Implementations may
     /// return `source_path` without eagerly materializing `content` so a full
