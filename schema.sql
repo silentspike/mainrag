@@ -585,3 +585,4 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag;
 \ir migrations/050_storage_v2_view_binding_verification.sql
 \ir migrations/051_storage_v2_intelligence_export_text.sql
 \ir migrations/052_storage_v2_materialized_search_aggregates.sql
+\ir migrations/053_storage_v2_targeted_intelligence_commands.sql

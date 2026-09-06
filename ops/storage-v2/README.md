@@ -165,6 +165,18 @@ an existing output is never overwritten. Use a new output path for each retry
 and keep failed attempts out of successful performance aggregates. The 2000 ms
 default latency gate is unchanged.
 
+Migration 053 evaluates `card`, `layers`, `explain` and `ownership` directly
+against their complete required records instead of building and hashing a full
+protected export for every command. Generation authorization, all card fields,
+filter semantics, ordering and source-wide ownership scope remain unchanged.
+Unfiltered layers still returns every visible card; no result cap is introduced.
+The full public/protected export and import contracts are unchanged. The owned
+`eval.storage_v2.schema.benchmark_intelligence_commands` comparison checks full
+result hashes and declared nonempty record counts in alternating repeated runs.
+Its server clock includes command execution and complete-result hashing; its
+client clock additionally includes connection and a second complete execution.
+Synthetic timing is not an installed API or all-source qualification claim.
+
 Transport and runtime failures also retain a private failure artifact: the
 current phase, completed verification/intelligence hashes and query proofs, and
 the pending query ordinal, hash and ranked identities. Pending result bodies and
