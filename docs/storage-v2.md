@@ -348,9 +348,19 @@ field does not claim whole-process peak RSS or memory used by codecs/metadata.
 The real-file/PostgreSQL fixture exercises dead entries, a nonzero source offset,
 unchanged 1:n anchors, policy/lock rejection, SQL failures after publication and
 during placement switch, reader/GC gates, corruption retention and receipt
-failure after unlink. These are controlled failure/retry tests, not process-kill
-or power-loss proof. Process-level crash qualification, representative throughput
-and peak-RSS comparisons, and tuned policy selection remain open in #58. No
+failure after unlink. A Unix child-process fixture additionally pauses the real
+operator before publication, after publication, after the transactional switch
+but before commit, after commit, before unlink, after unlink and after the receipt.
+The parent sends SIGKILL, reaps its exact child and waits for that child's database
+connection to drain before checking atomic placements, every body, stable 1:n
+anchors, reader retention and idempotent retry. The hooks exist only in test
+executables. Before-publication staging is retained and identified; only the
+fixture owner removes its complete disposable root after its children are gone.
+Hosted CI requires all seven crash-stage markers, not merely a zero exit code.
+This qualifies application-process interruption on the tested filesystem, not
+PostgreSQL-server loss, machine power loss or network filesystem durability.
+Representative throughput and peak-RSS comparisons, production orphan recovery
+and tuned policy selection remain open in #58. No
 network-filesystem, out-of-band administrator mutation or production deployment
 qualification follows. Interrupted staging/orphan files are retained for an
 explicit, quiescence-proven cleanup; this API never sweeps unrelated artifacts.

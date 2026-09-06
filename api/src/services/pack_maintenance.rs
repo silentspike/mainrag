@@ -14,6 +14,25 @@ use std::path::{Path, PathBuf};
 use tokio_postgres::{Client, GenericClient};
 use uuid::Uuid;
 
+// Compiled only into the test executable. The parent fixture owns the child,
+// waits for the checkpoint, then sends SIGKILL; no unwinding runs in the child.
+#[cfg(test)]
+fn crash_checkpoint(root: &Path, pack: Uuid, stage: &str) {
+    if std::env::var("MAINRAG_PACK_CRASH_ID").ok().as_deref() == Some(pack.to_string().as_str())
+        && std::env::var("MAINRAG_PACK_CRASH_STAGE").ok().as_deref() == Some(stage)
+    {
+        fs::write(root.join("fixture-checkpoint-pending"), stage).expect("fixture checkpoint");
+        fs::rename(
+            root.join("fixture-checkpoint-pending"),
+            root.join("fixture-checkpoint"),
+        )
+        .expect("complete fixture checkpoint publication");
+        loop {
+            std::thread::park();
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RepackPolicy {
     pub minimum_dead_bytes: u64,
@@ -375,6 +394,8 @@ pub async fn repack(
         sealed.verify_entry(entry, None)?;
     }
     let manifest = sealed.manifest.clone();
+    #[cfg(test)]
+    crash_checkpoint(&root, old_pack, "before_publish");
     let target = root.join(format!("{new_pack}.pack"));
     if target.try_exists()? {
         ensure!(
@@ -390,6 +411,8 @@ pub async fn repack(
     } else {
         sealed.publish()?;
     }
+    #[cfg(test)]
+    crash_checkpoint(&root, old_pack, "after_publish");
     content_body::create_pack(
         &transaction,
         new_pack,
@@ -421,8 +444,12 @@ pub async fn repack(
         "post-switch placement verification failed"
     );
     verify(&transaction, &root, &switched, policy.io_buffer_bytes).await?;
+    #[cfg(test)]
+    crash_checkpoint(&root, old_pack, "after_switch");
     let report = report(&old, &manifest, dead, policy.io_buffer_bytes, false)?;
     transaction.commit().await?;
+    #[cfg(test)]
+    crash_checkpoint(&root, old_pack, "after_commit");
     Ok(report)
 }
 
@@ -524,6 +551,8 @@ pub async fn finish(
     }
     content_body::end_reader_epoch(&transaction, epoch).await?;
     transaction.commit().await?;
+    #[cfg(test)]
+    crash_checkpoint(&root, old_pack, "before_unlink");
     let path = root.join(format!("{old_pack}.pack"));
     let unlinked = match fs::symlink_metadata(&path) {
         Ok(metadata) => {
@@ -543,6 +572,8 @@ pub async fn finish(
         }
         Err(error) => return Err(error.into()),
     };
+    #[cfg(test)]
+    crash_checkpoint(&root, old_pack, "after_unlink");
     File::open(&root)?.sync_all()?;
     client
         .execute(
@@ -550,6 +581,8 @@ pub async fn finish(
             &[&old_pack, &i64::try_from(old.manifest.stored_bytes)?],
         )
         .await?;
+    #[cfg(test)]
+    crash_checkpoint(&root, old_pack, "after_receipt");
     Ok(RemovalReport {
         pack_id: old_pack,
         file_bytes: old.manifest.stored_bytes,

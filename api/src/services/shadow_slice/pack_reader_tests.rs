@@ -9,6 +9,10 @@ use tokio_postgres::{Client, NoTls};
 
 const PRINCIPAL: &str = "00000000-0000-4000-8000-000000000011";
 
+#[cfg(unix)]
+#[path = "pack_process_crash_tests.rs"]
+mod process_crashes;
+
 struct Directory(std::path::PathBuf);
 
 impl Drop for Directory {
@@ -541,6 +545,8 @@ async fn exercise(client: &mut Client, observer: &Client, root: &Path) -> Result
     ensure!(open_epochs(client).await? == 0);
     println!("pack readers: real old/new bytes, concurrent switch, drain rejection, guarded reuse, corruption failure and cancellation retention PASS");
     exercise_maintenance(client, observer, root).await?;
+    #[cfg(unix)]
+    process_crashes::exercise(client, observer, root).await?;
     Ok(())
 }
 
