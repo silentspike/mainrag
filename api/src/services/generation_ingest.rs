@@ -421,6 +421,9 @@ pub struct ShadowIngestMeasurements {
     stage_durations: std::collections::HashMap<ShadowIngestStage, Duration>,
     total_duration: Duration,
     pub input_bytes: u64,
+    /// Actual application reads performed by lazy source loads, including repeats.
+    /// Eager adapter reads and kernel/device I/O are outside this counter's scope.
+    pub deferred_source_read_bytes: u64,
     pub unique_bytes: u64,
     pub stored_bytes: u64,
     pub reused_bodies: u64,
@@ -501,6 +504,7 @@ impl ShadowIngestMeasurements {
             "ablauf": {
                 "latenz_ms": milliseconds(total_ms),
                 "eingang_bytes": self.input_bytes,
+                "deferred_source_read_bytes": self.deferred_source_read_bytes,
                 "unique_bytes": self.unique_bytes,
                 "stored_bytes": self.stored_bytes,
                 "reuse_bodies": self.reused_bodies,
@@ -522,6 +526,13 @@ impl ShadowIngestMeasurements {
                 "largest_item_bytes": self.largest_item_bytes,
             },
             "phase": phases,
+            "source_io": {
+                "scope": "deferred_source_loads",
+                "application_read_bytes": self.deferred_source_read_bytes,
+                "adapter_read_bytes": null,
+                "device_read_bytes": null,
+                "coverage": "PARTIAL",
+            },
         })
     }
 

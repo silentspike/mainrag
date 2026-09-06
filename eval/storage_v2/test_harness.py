@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import sys
 import tempfile
 import unittest
@@ -85,6 +86,67 @@ class ManifestContractTests(unittest.TestCase):
             harness.ensure_public_manifest({"evidence": "/private/result.json"})
         with self.assertRaisesRegex(ValueError, "private field name"):
             harness.ensure_public_manifest({"api_token": "redacted"})
+
+
+class IngestMeasurementTests(unittest.TestCase):
+    class Database:
+        def __init__(self, counts=(2, 2)):
+            self.counts = iter(counts)
+
+        def sql(self, query):
+            if "SELECT COUNT(*)" in query:
+                return str(next(self.counts))
+            if "pg_total_relation_size" in query:
+                return "8192"
+            return ""
+
+    def measurement(self, counts=(2, 2)):
+        return harness.setup_database(self.Database(counts), [("a.md", b"abc"), ("b.md", b"defg")])
+
+    def manifest(self):
+        result = json.loads((harness.HERE / "baselines/current-path.json").read_text())
+        result["schema_version"] = "storage-v2-baseline/v2"
+        result["status"] = "BLOCKED"
+        result["ingest"] = self.measurement()
+        return result
+
+    def test_sql_row_counts_do_not_claim_parser_or_source_work(self):
+        result = self.measurement()
+        self.assertEqual(result["status"], "NOT_RUN")
+        self.assertEqual(result["sql_load_status"], "PASS")
+        self.assertEqual(result["logical_input_bytes"], 7)
+        self.assertEqual(result["loaded_rows"], 2)
+        self.assertEqual(result["rows_after_repeat"], 2)
+        for key in ("parsed_items", "unchanged_items_reused", "source_bytes_read", "content_bytes_stored"):
+            self.assertIsNone(result[key])
+
+    def test_repeat_row_growth_fails_sql_load(self):
+        self.assertEqual(self.measurement((2, 3))["sql_load_status"], "FAIL")
+
+    def test_schema_rejects_invented_ingest_measurements(self):
+        manifest = self.manifest()
+        harness.validate_manifest(manifest)
+        for key in ("parsed_items", "unchanged_items_reused", "source_bytes_read", "content_bytes_stored"):
+            with self.subTest(key=key):
+                invalid = copy.deepcopy(manifest)
+                invalid["ingest"][key] = 2
+                with self.assertRaises(jsonschema.ValidationError):
+                    harness.validate_manifest(invalid)
+
+    def test_sql_only_run_cannot_be_aggregate_pass(self):
+        manifest = self.manifest()
+        manifest["status"] = "PASS"
+        with self.assertRaises(jsonschema.ValidationError):
+            harness.validate_manifest(manifest)
+
+    def test_aggregate_preserves_missing_ingest_as_blocked(self):
+        source = self.manifest()
+        for counts, expected in [((2, 2), "BLOCKED"), ((2, 3), "FAIL")]:
+            result = harness.build_manifest(
+                [("a.md", b"abc")], harness.load_queries(), source["maintenance_gate"],
+                self.measurement(counts), source["search"], "18.4", "a" * 40, "b" * 40, 3, 30,
+            )
+            self.assertEqual(result["status"], expected)
 
 
 class WriterInventoryTests(unittest.TestCase):
