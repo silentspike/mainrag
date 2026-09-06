@@ -107,6 +107,13 @@ async fn load<C: GenericClient + Sync>(client: &C, id: Uuid, limit: usize) -> Re
     ensure!((1..=65536).contains(&limit), "invalid pack entry bound");
     let pack = client.query_one("SELECT status::TEXT, storage_key, stored_bytes, manifest_sha256 FROM content_pack WHERE id=$1", &[&id]).await?;
     ensure!(
+        matches!(
+            pack.get::<_, String>("status").as_str(),
+            "published" | "retired" | "reclaimed"
+        ),
+        "pack has no completed publication"
+    );
+    ensure!(
         pack.get::<_, String>("storage_key") == format!("{id}.pack"),
         "pack storage key differs from identity"
     );
