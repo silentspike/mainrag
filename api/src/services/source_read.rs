@@ -5,12 +5,36 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, ReadBuf};
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ReadAccounting {
     bytes: AtomicU64,
+    scope: &'static str,
+}
+
+impl Default for ReadAccounting {
+    fn default() -> Self {
+        Self {
+            bytes: AtomicU64::new(0),
+            scope: "deferred_source_loads",
+        }
+    }
 }
 
 impl ReadAccounting {
+    pub fn filesystem_adapter() -> Self {
+        Self {
+            bytes: AtomicU64::new(0),
+            scope: "filesystem_adapter",
+        }
+    }
+
+    fn record(&self, bytes: u64) {
+        if bytes != 0 {
+            self.bytes.fetch_add(bytes, Ordering::Relaxed);
+            metrics::counter!("storage_v2_source_application_read_bytes_total", "scope" => self.scope).increment(bytes);
+        }
+    }
+
     pub fn bytes(&self) -> u64 {
         self.bytes.load(Ordering::Relaxed)
     }
@@ -18,14 +42,36 @@ impl ReadAccounting {
     pub fn reader<R>(&self, inner: R) -> AccountedReader<'_, R> {
         AccountedReader {
             inner,
-            accounting: self,
+            accounting: Some(self),
         }
     }
 }
 
 pub struct AccountedReader<'a, R> {
     inner: R,
-    accounting: &'a ReadAccounting,
+    accounting: Option<&'a ReadAccounting>,
+}
+
+impl<'a, R> AccountedReader<'a, R> {
+    pub fn optional(inner: R, accounting: Option<&'a ReadAccounting>) -> Self {
+        Self { inner, accounting }
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for AccountedReader<'_, R> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let bytes = self.inner.read(out)?;
+        if let Some(accounting) = self.accounting {
+            accounting.record(bytes as u64);
+        }
+        Ok(bytes)
+    }
+}
+
+impl<R: std::io::Seek> std::io::Seek for AccountedReader<'_, R> {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(position)
+    }
 }
 
 impl<R: AsyncRead + Unpin> AsyncRead for AccountedReader<'_, R> {
@@ -38,9 +84,8 @@ impl<R: AsyncRead + Unpin> AsyncRead for AccountedReader<'_, R> {
         let before = buffer.filled().len();
         let result = Pin::new(&mut this.inner).poll_read(cx, buffer);
         let bytes = (buffer.filled().len() - before) as u64;
-        if bytes != 0 {
-            this.accounting.bytes.fetch_add(bytes, Ordering::Relaxed);
-            metrics::counter!("storage_v2_source_application_read_bytes_total", "scope" => "deferred_source_loads").increment(bytes);
+        if let Some(accounting) = this.accounting {
+            accounting.record(bytes);
         }
         result
     }
@@ -50,6 +95,17 @@ impl<R: AsyncRead + Unpin> AsyncRead for AccountedReader<'_, R> {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn synchronous_seek_and_failed_exact_read_preserve_actual_work() {
+        let accounting = ReadAccounting::filesystem_adapter();
+        let mut reader = accounting.reader(std::io::Cursor::new(b"abcdef"));
+        std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(4)).unwrap();
+        assert_eq!(accounting.bytes(), 0);
+        let mut out = [0_u8; 4];
+        assert!(std::io::Read::read_exact(&mut reader, &mut out).is_err());
+        assert_eq!(accounting.bytes(), 2);
+    }
 
     #[tokio::test]
     async fn repeated_reads_are_work_not_unique_input() {

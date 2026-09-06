@@ -704,6 +704,9 @@ pub async fn admin_sync_source(
         "source_id": id,
         "stats": {
             "files_processed": stats.files_processed,
+            "files_skipped": stats.files_skipped,
+            "work": stats.work,
+            "source_io": stats.source_io,
             "chunks_created": stats.chunks_created,
             "embeddings_generated": stats.embeddings_generated,
             "errors": stats.errors.len()
@@ -928,6 +931,8 @@ pub async fn admin_sync_files(
         "stats": {
             "files_processed": stats.files_processed,
             "files_skipped": stats.files_skipped,
+            "work": stats.work,
+            "source_io": stats.source_io,
             "chunks_created": stats.chunks_created,
             "embeddings_generated": stats.embeddings_generated,
             "errors": stats.errors.len()

@@ -13,9 +13,21 @@ old measurements or use them as a current production ingest baseline.
 
 Storage-v2 runtime telemetry separately records `source_io.application_read_bytes`
 and `ablauf.deferred_source_read_bytes` at actual deferred source reads, including
-repeated verification loads. This scope excludes eager adapter reads, pack reads
-and OS/device I/O. `source_io.coverage=PARTIAL` and null adapter/device values
-make that limitation explicit; zero deferred reads do not prove zero total I/O.
+repeated verification loads. This counter excludes adapter reads, pack reads and
+OS/device I/O. Filesystem adapter content probes, eager reads and fragment-boundary
+reads are recorded separately in `source_io.adapter_read_bytes`.
+`total_content_read_bytes` sums adapter and deferred loads when both are observed.
+`content_read_coverage` can then be `COMPLETE`, while overall `coverage` remains
+`PARTIAL`: filesystem metadata, walker configuration, pack reads and device I/O
+are not included. Uninstrumented adapters remain null, never an invented zero.
+
+The current source-sync API reports `stats.source_io` and request-local
+`stats.work.chunker_calls` / `stats.work.intelligence_parser_calls`. These count
+actual calls, including failed analysis attempts; concurrent runs do not share
+counters. They are not counts of persisted rows, unique bodies, AST nodes or
+successful analyses. Deferred legacy streaming reads and explicit-path sync I/O
+remain partial/not measured. Initial and unchanged eager filesystem syncs both
+include probe/content reads; a hash skip does not imply zero I/O.
 
 This harness measures the repository's current PostgreSQL full-text query shape
 against a frozen public fixture. It is the baseline/comparison contract for
