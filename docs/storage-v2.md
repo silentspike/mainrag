@@ -302,8 +302,58 @@ The hosted Rust fixture combines real identity/zstd pack files with migrations
 030/055, a concurrent metadata switch, rejected early reclamation, exact-byte
 reads on both sides, delayed old-file removal, corruption rejection and retained
 epochs on cancellation. It uses minimal prerequisite tables and does not replace
-the full-schema authorization suite. A callable maintenance operator, automatic
-crash recovery and measured resource admission remain separate unfinished work.
+the full-schema authorization suite.
+
+### Callable pack maintenance
+
+`services::pack_maintenance::repack` accepts an administrator connection, pack
+root, old pack ID, stable caller-persisted replacement ID, accepted global GC
+epoch and explicit `RepackPolicy`. It copies only bodies still assigned to the
+old pack. Bodies are conservatively retained until an authoritative graph sweep
+has removed their placement; neither `live_bytes` nor reference counters decide
+what is copied. Unchanged body IDs preserve all 1:n anchors.
+
+Admission bounds entry count, total logical bytes, I/O buffers, dead-byte amount
+and ratio, and measured filesystem free space plus an explicit reserve. There
+are no claimed optimal defaults. The space check is conservative admission,
+not an exclusive reservation against other applications. Write failures retain
+the old pack. Dictionaries are loaded individually with a 1 MiB admission bound;
+replacement entries currently use the selected codec without a dictionary.
+
+The operator holds a root-wide filesystem lock and a reader registration in its
+database transaction, rewrites one verified body at a time through bounded
+staging, verifies the candidate, publishes its file, registers its metadata,
+switches placements, verifies every replacement entry and then commits. A retry
+can adopt an unregistered replacement file only after every entry matches the
+newly reconstructed manifest. An occupied mismatching target is never replaced.
+The persistent `.maintenance.lock` inode must not be deleted while maintenance
+may run. All maintenance of the same root must participate in this lock.
+
+`finish` re-verifies replacement bytes for an unfinished removal, requires
+drained readers and GC sweeping/complete authority, commits removal permission,
+unlinks the exact old file, syncs the directory and records an immutable receipt.
+An interruption after unlink but before receipt is resumable without double
+counting. Completed receipts are idempotent even after later replacement work.
+Unfinished predecessor removals block rewriting their replacement pack, keeping
+the supported recovery sequence explicit.
+
+Migration 056 counts reclaimed **file bytes** only from removal receipts. Packs
+with removal permission but no receipt remain in conservative stored-byte
+accounting. Dead bytes use current placements instead of the advisory live-byte
+field. These are tracked file lengths, not device allocation, filesystem
+compression savings or proof that a hard-linked extent was physically freed.
+The operator returns serializable size/count/buffer reports; its writer-buffer
+field does not claim whole-process peak RSS or memory used by codecs/metadata.
+
+The real-file/PostgreSQL fixture exercises dead entries, a nonzero source offset,
+unchanged 1:n anchors, policy/lock rejection, SQL failures after publication and
+during placement switch, reader/GC gates, corruption retention and receipt
+failure after unlink. These are controlled failure/retry tests, not process-kill
+or power-loss proof. Process-level crash qualification, representative throughput
+and peak-RSS comparisons, and tuned policy selection remain open in #58. No
+network-filesystem, out-of-band administrator mutation or production deployment
+qualification follows. Interrupted staging/orphan files are retained for an
+explicit, quiescence-proven cleanup; this API never sweeps unrelated artifacts.
 
 ## Lossless content graph
 

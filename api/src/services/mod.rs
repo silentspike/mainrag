@@ -18,6 +18,8 @@ pub mod intelligence;
 #[allow(dead_code)]
 pub mod intelligence_v2;
 pub mod outbox_worker;
+#[allow(dead_code)]
+pub mod pack_maintenance;
 pub mod parser;
 pub mod qdrant;
 #[allow(dead_code)]
