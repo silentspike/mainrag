@@ -116,18 +116,46 @@ where
         .map(|_| ())
 }
 
-pub async fn begin_reader_epoch(client: &Client) -> Result<Uuid, Error> {
+pub async fn begin_reader_epoch<C: GenericClient + Sync>(client: &C) -> Result<Uuid, Error> {
     client
         .query_one("SELECT storage_v2_begin_reader_epoch()", &[])
         .await
         .map(|row| row.get(0))
 }
 
-pub async fn end_reader_epoch(client: &Client, epoch_id: Uuid) -> Result<(), Error> {
+pub async fn end_reader_epoch<C: GenericClient + Sync>(
+    client: &C,
+    epoch_id: Uuid,
+) -> Result<(), Error> {
     client
         .execute("SELECT storage_v2_end_reader_epoch($1)", &[&epoch_id])
         .await
         .map(|_| ())
+}
+
+/// Register before polling work that fetches placement. Keep the epoch until
+/// all pack-dependent I/O has ended, including failed verification. Cancellation
+/// deliberately leaves an open epoch (or an uncommitted registration lock):
+/// abandoned work must never make reclamation appear safe.
+pub async fn with_reader_epoch<C, T>(
+    client: &C,
+    work: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T>
+where
+    C: GenericClient + Sync,
+{
+    let epoch = begin_reader_epoch(client).await?;
+    let result = work.await;
+    let finish = end_reader_epoch(client, epoch).await;
+    match (result, finish) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(anyhow::Error::new(error)
+            .context("pack reader epoch could not be closed; retention remains required")),
+        (Err(error), Err(finish)) => Err(error.context(format!(
+            "pack reader epoch could not be closed; retention remains required: {finish}"
+        ))),
+    }
 }
 
 pub async fn switch_pack(
