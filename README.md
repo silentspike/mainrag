@@ -326,6 +326,3 @@ serves with private-code context.
 ## License
 
 Licensed under the Apache License, Version 2.0. See [`LICENSE`](LICENSE).
-
-<!-- Owned governance enforcement probe; removed before acceptance. -->
-[Controlled required-check failure](docs/governance-required-check-negative-fixture.md)
