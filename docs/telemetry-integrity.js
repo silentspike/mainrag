@@ -33,7 +33,7 @@
         build_ms: ['Source pack build including generated input', 'ms_roh', 'lower'],
         rewrite_ms: ['Physical pack rewrite', 'ms_roh', 'lower'],
         verify_ms: ['Replacement integrity verification', 'ms_roh', 'lower'],
-        rewrite_mib_s: ['Physical rewrite throughput (MiB/s)', 'n_exact', 'higher'],
+        rewrite_mib_s: ['Physical rewrite throughput (MiB/s)', 'f', 'higher'],
         process_peak_rss_bytes: ['Fresh process lifetime peak RSS', 'b', 'lower'],
         process_baseline_hwm_bytes: ['Process high-water mark before work', 'b', 'neutral'],
         integrity_passed: ['Pack integrity passed (0 = FAIL)', 'n_exact', 'higher'],

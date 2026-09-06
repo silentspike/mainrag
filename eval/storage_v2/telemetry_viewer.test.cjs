@@ -13,6 +13,7 @@ test('pack resource measurements keep RSS, time, file bytes and integrity distin
   assert.equal(context.candidateMetricInfo('pack_resource.process_peak_rss_bytes').u, 'b');
   assert.equal(context.candidateMetricInfo('pack_resource.rewrite_ms').u, 'ms_roh');
   assert.equal(context.candidateMetricInfo('pack_resource.rewrite_mib_s').preference, 'higher');
+  assert.equal(context.candidateMetricInfo('pack_resource.rewrite_mib_s').u, 'f');
   const info = context.candidateMetricInfo('pack_resource.integrity_passed');
   assert.equal(info.showZero, true);
   assert.match(info.d, /integrity 0 is FAIL/);
