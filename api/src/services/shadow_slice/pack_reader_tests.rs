@@ -135,6 +135,30 @@ async fn exercise(client: &mut Client, observer: &Client, root: &Path) -> Result
     );
     ensure!(open_epochs(client).await? == 0);
 
+    let before: i64 = client
+        .query_one("SELECT count(*) FROM content_reader_epoch", &[])
+        .await?
+        .get(0);
+    content_body::with_reader_epoch(&*client, async {
+        for _ in 0..8 {
+            ensure!(
+                find_and_verify_existing_body_in_epoch(client, root, &bytes, 4096)
+                    .await?
+                    .is_some()
+            );
+        }
+        Ok(())
+    })
+    .await?;
+    let after: i64 = client
+        .query_one("SELECT count(*) FROM content_reader_epoch", &[])
+        .await?
+        .get(0);
+    ensure!(
+        after == before + 1,
+        "a reuse batch must share one reader epoch"
+    );
+
     let replacement = pack(root, &bytes, BodyCodec::Zstd)?;
     register(client, &replacement, Some(body)).await?;
     let gc: i64 = client.query_one(

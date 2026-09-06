@@ -804,29 +804,39 @@ where
     let content_started = Instant::now();
     let mut bodies = vec![None; files.len()];
     let mut missing_groups: Vec<(usize, Vec<usize>)> = Vec::new();
-    for group in group_body_indices(&files)? {
-        let representative = group[0];
-        let bytes = files[representative].load_verified_bytes().await?;
-        for index in group.iter().skip(1) {
-            files[*index].load_verified_bytes().await?;
-        }
-        if let Some(body) =
-            find_and_verify_existing_body(client, pack_root, bytes.as_ref(), io_buffer_bytes)
-                .await?
-        {
-            for index in &group {
-                bodies[*index] = Some(body.clone());
+    // One epoch covers the streaming reuse pass, not one registration and
+    // finish per body. Source bytes are still loaded one group at a time.
+    content_body::with_reader_epoch(client, async {
+        for group in group_body_indices(&files)? {
+            let representative = group[0];
+            let bytes = files[representative].load_verified_bytes().await?;
+            for index in group.iter().skip(1) {
+                files[*index].load_verified_bytes().await?;
             }
-            measurements.reused_bodies = measurements
-                .reused_bodies
-                .saturating_add(u64::try_from(group.len())?);
-        } else {
-            measurements.reused_bodies = measurements
-                .reused_bodies
-                .saturating_add(u64::try_from(group.len().saturating_sub(1))?);
-            missing_groups.push((representative, group));
+            if let Some(body) = find_and_verify_existing_body_in_epoch(
+                client,
+                pack_root,
+                bytes.as_ref(),
+                io_buffer_bytes,
+            )
+            .await?
+            {
+                for index in &group {
+                    bodies[*index] = Some(body.clone());
+                }
+                measurements.reused_bodies = measurements
+                    .reused_bodies
+                    .saturating_add(u64::try_from(group.len())?);
+            } else {
+                measurements.reused_bodies = measurements
+                    .reused_bodies
+                    .saturating_add(u64::try_from(group.len().saturating_sub(1))?);
+                missing_groups.push((representative, group));
+            }
         }
-    }
+        Ok(())
+    })
+    .await?;
     let mut result_pack_id = bodies.iter().flatten().find_map(|body| body.pack_id);
     let mut result_pack_stored_bytes = 0_u64;
     if !missing_groups.is_empty() {
@@ -1502,6 +1512,7 @@ fn search_exact_identifiers(text: &str) -> Vec<String> {
 
 // Newly published packs are private to the construction transaction until
 // its commit. Existing published packs require a reader epoch before placement.
+#[cfg(test)]
 async fn find_and_verify_existing_body<C>(
     client: &C,
     pack_root: &Path,
