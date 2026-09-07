@@ -9,6 +9,17 @@ const vm = require('node:vm');
 const policyPath = path.join(__dirname, '../../docs/telemetry-integrity.js');
 const context = require(policyPath);
 
+test('integrated maintenance does not conflate SQL, client RSS and file reclamation', () => {
+  const info = context.candidateMetricInfo('pack_maintenance.repack_ms');
+  assert.equal(info.u, 'ms_roh');
+  assert.match(info.d, /not SQL-only time/);
+  assert.match(info.d, /not database-server memory/);
+  assert.equal(context.candidateMetricInfo('pack_maintenance.dead_entry_bytes').u, 'b');
+  assert.equal(context.candidateMetricInfo('pack_maintenance.integrity_passed').showZero, true);
+  assert.equal(context.candidateMetricInfo('pack_maintenance.sql_only_ms'), null);
+  assert.equal(context.candidateMetricInfo('pack_maintenance.__proto__'), null);
+});
+
 test('pack resource measurements keep RSS, time, file bytes and integrity distinct', () => {
   assert.equal(context.candidateMetricInfo('pack_resource.process_peak_rss_bytes').u, 'b');
   assert.equal(context.candidateMetricInfo('pack_resource.rewrite_ms').u, 'ms_roh');

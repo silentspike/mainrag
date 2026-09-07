@@ -13,6 +13,10 @@ const PRINCIPAL: &str = "00000000-0000-4000-8000-000000000011";
 #[path = "pack_process_crash_tests.rs"]
 mod process_crashes;
 
+#[cfg(target_os = "linux")]
+#[path = "pack_maintenance_resource_tests.rs"]
+mod maintenance_resources;
+
 struct Directory(std::path::PathBuf);
 
 impl Drop for Directory {
@@ -547,6 +551,8 @@ async fn exercise(client: &mut Client, observer: &Client, root: &Path) -> Result
     exercise_maintenance(client, observer, root).await?;
     #[cfg(unix)]
     process_crashes::exercise(client, observer, root).await?;
+    #[cfg(target_os = "linux")]
+    maintenance_resources::exercise(client, root).await?;
     Ok(())
 }
 
