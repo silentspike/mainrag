@@ -13,8 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 use uuid::Uuid;
 
-mod build_recovery;
-pub use build_recovery::{cleanup_incomplete_build, IncompleteBuildCleanup};
+pub mod build_recovery;
 
 const MANIFEST_DOMAIN: &[u8] = b"mainrag.storage-v2.pack-manifest.v1\0";
 pub const DEFAULT_IO_BUFFER_BYTES: usize = 64 * 1024;

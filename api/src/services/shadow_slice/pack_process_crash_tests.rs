@@ -105,7 +105,7 @@ async fn kill_at_checkpoint(
             .context("missing live build")??;
         let nonce = Uuid::parse_str(&entry.file_name().to_string_lossy())?;
         Ok(
-            matches!(crate::services::content_store::cleanup_incomplete_build(root, nonce, 16),
+            matches!(crate::services::content_store::build_recovery::cleanup_incomplete_build(root, nonce, 16),
             Err(crate::services::content_store::ContentStoreError::Io(error)) if error.to_string().contains("build writer active")),
         )
     })();
@@ -237,12 +237,15 @@ pub(super) async fn exercise(client: &mut Client, observer: &Client, root: &Path
                 "SIGKILL must leave one identifiable build"
             );
             let nonce = Uuid::parse_str(&builds[0].file_name().to_string_lossy())?;
-            let cleaned =
-                crate::services::content_store::cleanup_incomplete_build(&case_root, nonce, 16)?;
+            let cleaned = crate::services::content_store::build_recovery::cleanup_incomplete_build(
+                &case_root, nonce, 16,
+            )?;
             ensure!(cleaned.removed_files > 0 && !cleaned.already_absent);
             ensure!(
-                crate::services::content_store::cleanup_incomplete_build(&case_root, nonce, 16)?
-                    .already_absent
+                crate::services::content_store::build_recovery::cleanup_incomplete_build(
+                    &case_root, nonce, 16
+                )?
+                .already_absent
             );
             println!("pack build recovery: SIGKILL, exclusive lease, bounded cleanup and idempotent retry PASS");
         }
