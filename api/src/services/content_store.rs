@@ -520,44 +520,56 @@ impl PackReader {
         staging_root: impl AsRef<Path>,
         buffer_bytes: usize,
     ) -> Result<VerifiedBody> {
+        self.verify_to_staging_with_sync(
+            entry,
+            dictionary,
+            staging_root,
+            buffer_bytes,
+            File::sync_all,
+        )
+    }
+
+    fn verify_to_staging_with_sync(
+        &self,
+        entry: &PackEntry,
+        dictionary: Option<&[u8]>,
+        staging_root: impl AsRef<Path>,
+        buffer_bytes: usize,
+        sync: impl FnOnce(&File) -> io::Result<()>,
+    ) -> Result<VerifiedBody> {
         let buffer_bytes = checked_buffer_size(buffer_bytes)?;
         let mut decoded = self.checked_entry_reader(entry, dictionary, buffer_bytes)?;
         let staging_root = staging_root.as_ref();
         fs::create_dir_all(staging_root)?;
         let staging_path = staging_root.join(format!("verified-{}.body", Uuid::new_v4()));
-        let mut staging = OpenOptions::new()
+        let staging = OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&staging_path)?;
-        let decode_result = copy_hash_bounded(
+        // Take cleanup ownership only after exclusive creation succeeds. Declare
+        // the file after its owner so unwinding closes it before removing it.
+        // This guard must never escape until both integrity and sync succeed.
+        let verified = VerifiedBody {
+            path: staging_path,
+            logical_length: entry.body.logical_length,
+            digest: entry.body.digest,
+            managed_peak_buffer_bytes: buffer_bytes,
+            buffer_bytes,
+        };
+        let mut staging = staging;
+        let (logical_length, logical_digest) = copy_hash_bounded(
             &mut decoded,
             &mut staging,
             buffer_bytes,
             Some(entry.body.logical_length),
-        );
-        let (logical_length, logical_digest) = match decode_result {
-            Ok(value) => value,
-            Err(error) => {
-                drop(staging);
-                let _ = fs::remove_file(&staging_path);
-                return Err(error);
-            }
-        };
-        staging.sync_all()?;
+        )?;
+        sync(&staging)?;
         if logical_length != entry.body.logical_length || logical_digest != entry.body.digest {
-            drop(staging);
-            let _ = fs::remove_file(&staging_path);
             return Err(ContentStoreError::Corruption(
                 "decoded body identity mismatch".to_string(),
             ));
         }
-        Ok(VerifiedBody {
-            path: staging_path,
-            logical_length,
-            digest: logical_digest,
-            managed_peak_buffer_bytes: buffer_bytes,
-            buffer_bytes,
-        })
+        Ok(verified)
     }
 
     /// Verify a complete entry without delivering bytes or creating a staging
@@ -840,6 +852,70 @@ mod tests {
 
     fn cleanup(root: &Path) {
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staging_cleanup_covers_sync_error_unwind_and_integrity_failure() {
+        let root = test_root();
+        let staging_root = root.join("staging");
+        fs::create_dir(&staging_root).unwrap();
+        let sentinel = staging_root.join("unrelated.body");
+        fs::write(&sentinel, b"preserve").unwrap();
+        let mut builder = PackBuilder::new(&root, Uuid::new_v4(), Uuid::new_v4(), 4096).unwrap();
+        let entry = builder
+            .add_reader(Cursor::new(b"verified fixture"), BodyCodec::Identity, None)
+            .unwrap();
+        let pack = builder.seal().unwrap().publish().unwrap();
+        let reader = pack.reader();
+        let assert_clean = || {
+            assert_eq!(fs::read_dir(&staging_root).unwrap().count(), 1);
+            assert_eq!(fs::read(&sentinel).unwrap(), b"preserve");
+            assert_eq!(fs::read(&pack.path).unwrap(), b"verified fixture");
+        };
+
+        let failure =
+            reader.verify_to_staging_with_sync(&entry, None, &staging_root, 4096, |file| {
+                assert_eq!(file.metadata()?.len(), entry.body.logical_length);
+                Err(io::Error::other("injected sync failure"))
+            });
+        assert!(
+            matches!(failure, Err(ContentStoreError::Io(error)) if error.to_string() == "injected sync failure")
+        );
+        assert_clean();
+
+        let unwind = std::panic::catch_unwind(|| {
+            reader.verify_to_staging_with_sync(&entry, None, &staging_root, 4096, |_| {
+                panic!("injected staging unwind")
+            })
+        });
+        assert!(unwind.is_err());
+        assert_clean();
+
+        let mut wrong_digest = entry.clone();
+        wrong_digest.body.digest[0] ^= 1;
+        assert!(matches!(
+            reader.verify_to_staging(&wrong_digest, None, &staging_root, 4096),
+            Err(ContentStoreError::Corruption(_))
+        ));
+        assert_clean();
+
+        let mut too_short = entry.clone();
+        too_short.body.logical_length -= 1;
+        assert!(reader
+            .verify_to_staging(&too_short, None, &staging_root, 4096)
+            .is_err());
+        assert_clean();
+
+        let verified = reader
+            .verify_to_staging(&entry, None, &staging_root, 4096)
+            .unwrap();
+        assert_eq!(fs::read_dir(&staging_root).unwrap().count(), 2);
+        let mut output = Vec::new();
+        verified.copy_to(&mut output).unwrap();
+        assert_eq!(output, b"verified fixture");
+        drop(verified);
+        assert_clean();
+        cleanup(&root);
     }
 
     #[test]

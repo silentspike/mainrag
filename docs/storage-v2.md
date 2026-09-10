@@ -365,6 +365,15 @@ network-filesystem, out-of-band administrator mutation or production deployment
 qualification follows. Interrupted staging/orphan files are retained for an
 explicit, quiescence-proven cleanup; this API never sweeps unrelated artifacts.
 
+Verified-body staging takes per-file cleanup ownership immediately after exclusive
+creation. Decode, logical-integrity and file-sync errors, as well as Rust panic
+unwinding, close and best-effort remove only that invocation's temporary body;
+successful verification retains the body until its owner is dropped. A focused
+fault-injection test checks sync failure, unwind, digest/length failure and the
+successful lifetime while preserving a neighboring file and the published pack.
+This is not SIGKILL cleanup: process termination bypasses destructors, and a
+filesystem refusing removal still requires explicit quiescent recovery.
+
 ### Physical pack resource diagnostics
 
 The ignored `services::content_store::resource_tests::pack_resource_matrix`
