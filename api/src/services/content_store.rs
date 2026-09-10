@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod build_recovery;
+
 const MANIFEST_DOMAIN: &[u8] = b"mainrag.storage-v2.pack-manifest.v1\0";
 pub const DEFAULT_IO_BUFFER_BYTES: usize = 64 * 1024;
 
@@ -252,6 +254,7 @@ impl ContentStoreMetrics {
 }
 
 pub struct PackBuilder {
+    build_lease: std::sync::Arc<File>,
     root: PathBuf,
     build_dir: PathBuf,
     candidate_path: PathBuf,
@@ -274,6 +277,7 @@ impl PackBuilder {
         let buffer_bytes = checked_buffer_size(buffer_bytes)?;
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)?;
+        let build_lease = build_recovery::writer_lease(&root)?;
         let build_root = root.join(".building");
         fs::create_dir_all(&build_root)?;
         let build_dir = build_root.join(build_nonce.to_string());
@@ -285,6 +289,7 @@ impl PackBuilder {
             .write(true)
             .open(&candidate_path)?;
         Ok(Self {
+            build_lease,
             root,
             build_dir,
             candidate_path,
@@ -393,6 +398,7 @@ impl PackBuilder {
         }
         self.handed_off = true;
         Ok(SealedPack {
+            build_lease: std::sync::Arc::clone(&self.build_lease),
             root: self.root.clone(),
             build_dir: self.build_dir.clone(),
             candidate_path: self.candidate_path.clone(),
@@ -412,6 +418,7 @@ impl Drop for PackBuilder {
 }
 
 pub struct SealedPack {
+    build_lease: std::sync::Arc<File>,
     root: PathBuf,
     build_dir: PathBuf,
     candidate_path: PathBuf,
@@ -430,12 +437,14 @@ impl SealedPack {
         entry: &PackEntry,
         dictionary: Option<&[u8]>,
     ) -> Result<VerifiedBody> {
-        PackReader::new(
+        let mut body = PackReader::new(
             &self.candidate_path,
             self.manifest.pack_id,
             self.manifest.stored_bytes,
         )
-        .verify_to_staging(entry, dictionary, &self.build_dir, DEFAULT_IO_BUFFER_BYTES)
+        .verify_to_staging(entry, dictionary, &self.build_dir, DEFAULT_IO_BUFFER_BYTES)?;
+        body.build_lease = Some(std::sync::Arc::clone(&self.build_lease));
+        Ok(body)
     }
 
     pub fn publish(mut self) -> Result<PublishedPack> {
@@ -550,6 +559,7 @@ impl PackReader {
         // the file after its owner so unwinding closes it before removing it.
         // This guard must never escape until both integrity and sync succeed.
         let verified = VerifiedBody {
+            build_lease: None,
             path: staging_path,
             logical_length: entry.body.logical_length,
             digest: entry.body.digest,
@@ -659,6 +669,7 @@ impl PackReader {
 }
 
 pub struct VerifiedBody {
+    build_lease: Option<std::sync::Arc<File>>,
     path: PathBuf,
     pub logical_length: u64,
     pub digest: [u8; 32],
