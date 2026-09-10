@@ -439,13 +439,13 @@ impl SealedPack {
     }
 
     pub fn publish(mut self) -> Result<PublishedPack> {
-        if self.final_path.exists() {
-            return Err(ContentStoreError::InvalidEntry(
-                "final pack path already exists".to_string(),
-            ));
-        }
-        fs::rename(&self.candidate_path, &self.final_path)?;
+        // An existence check followed by rename can overwrite a concurrent
+        // publisher. Both paths are on the same filesystem: creating the final
+        // hard link is atomic and fails if any directory entry already exists.
+        // Unsupported filesystems fail closed; never fall back to rename.
+        fs::hard_link(&self.candidate_path, &self.final_path)?;
         File::open(&self.root)?.sync_all()?;
+        fs::remove_file(&self.candidate_path)?;
         fs::remove_dir(&self.build_dir)?;
         self.published = true;
         Ok(PublishedPack {
@@ -852,6 +852,72 @@ mod tests {
 
     fn cleanup(root: &Path) {
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_pack_publication_never_overwrites_the_winner() {
+        use std::sync::{Arc, Barrier};
+        for _ in 0..16 {
+            let root = test_root();
+            let id = Uuid::new_v4();
+            let barrier = Arc::new(Barrier::new(2));
+            let contenders: Vec<_> = [b'a', b'b']
+                .into_iter()
+                .map(|byte| {
+                    let mut builder = PackBuilder::new(&root, id, Uuid::new_v4(), 4096).unwrap();
+                    builder
+                        .add_reader(Cursor::new(vec![byte; 8192]), BodyCodec::Identity, None)
+                        .unwrap();
+                    let sealed = builder.seal().unwrap();
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        (byte, sealed.publish())
+                    })
+                })
+                .collect();
+            let mut winners = 0;
+            for contender in contenders {
+                let (byte, outcome) = contender.join().unwrap();
+                match outcome {
+                    Ok(pack) => {
+                        winners += 1;
+                        assert_eq!(fs::read(&pack.path).unwrap(), vec![byte; 8192]);
+                        pack.reader()
+                            .verify_integrity(&pack.manifest.entries[0], None, 4096)
+                            .unwrap();
+                    }
+                    Err(ContentStoreError::Io(error)) => {
+                        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists)
+                    }
+                    Err(error) => panic!("unexpected publication failure: {error}"),
+                }
+            }
+            assert_eq!(winners, 1);
+            assert_eq!(fs::read_dir(root.join(".building")).unwrap().count(), 0);
+            cleanup(&root);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pack_publication_preserves_a_dangling_destination_symlink() {
+        let root = test_root();
+        let id = Uuid::new_v4();
+        let final_path = root.join(format!("{id}.pack"));
+        let missing = root.join("unrelated-missing");
+        std::os::unix::fs::symlink(&missing, &final_path).unwrap();
+        let mut builder = PackBuilder::new(&root, id, Uuid::new_v4(), 4096).unwrap();
+        builder
+            .add_reader(Cursor::new(b"candidate"), BodyCodec::Identity, None)
+            .unwrap();
+        assert!(
+            matches!(builder.seal().unwrap().publish(), Err(ContentStoreError::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(fs::read_link(&final_path).unwrap(), missing);
+        assert!(!missing.exists());
+        assert_eq!(fs::read_dir(root.join(".building")).unwrap().count(), 0);
+        cleanup(&root);
     }
 
     #[test]

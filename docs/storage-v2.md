@@ -374,6 +374,16 @@ successful lifetime while preserving a neighboring file and the published pack.
 This is not SIGKILL cleanup: process termination bypasses destructors, and a
 filesystem refusing removal still requires explicit quiescent recovery.
 
+Pack publication creates the final name with an atomic no-clobber hard link from
+the already sealed candidate on the same filesystem, syncs the pack root, then
+removes the candidate name. There is no existence-check/rename race: an existing
+directory entry, including a dangling symlink, makes publication fail rather
+than replace it. Filesystems without hard-link support fail closed. A crash may
+leave both names referring to the same complete file; deleting a stale candidate
+name must not be interpreted as reclaiming the published pack's bytes. Tests
+race two different candidates for one pack identity and require exactly one
+winner with unchanged bytes, plus preservation of a dangling destination link.
+
 ### Physical pack resource diagnostics
 
 The ignored `services::content_store::resource_tests::pack_resource_matrix`
