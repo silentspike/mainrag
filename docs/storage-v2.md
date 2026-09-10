@@ -354,16 +354,19 @@ but before commit, after commit, before unlink, after unlink and after the recei
 The parent sends SIGKILL, reaps its exact child and waits for that child's database
 connection to drain before checking atomic placements, every body, stable 1:n
 anchors, reader retention and idempotent retry. The hooks exist only in test
-executables. Before-publication staging is retained and identified; only the
-fixture owner removes its complete disposable root after its children are gone.
+executables. Before-publication staging is identified and recovery refuses the
+live child writer. After SIGKILL and reaping, the fixture cleans that exact build
+nonce through the exclusive-lease API and checks an idempotent retry; published
+body bytes and stable anchors are verified afterward. The fixture owner removes
+its complete disposable root only after its children are gone.
 Hosted CI requires all seven crash-stage markers, not merely a zero exit code.
 This qualifies application-process interruption on the tested filesystem, not
 PostgreSQL-server loss, machine power loss or network filesystem durability.
 Representative throughput and peak-RSS comparisons, production orphan recovery
 and tuned policy selection remain open in #58. No
 network-filesystem, out-of-band administrator mutation or production deployment
-qualification follows. Interrupted staging/orphan files are retained for an
-explicit, quiescence-proven cleanup; this API never sweeps unrelated artifacts.
+qualification follows. Unregistered published packs and unrelated staging remain
+retained for explicit, quiescence-proven recovery; no automatic sweep occurs.
 
 Verified-body staging takes per-file cleanup ownership immediately after exclusive
 creation. Decode, logical-integrity and file-sync errors, as well as Rust panic
@@ -383,6 +386,30 @@ leave both names referring to the same complete file; deleting a stale candidate
 name must not be interpreted as reclaiming the published pack's bytes. Tests
 race two different candidates for one pack identity and require exactly one
 winner with unchanged bytes, plus preservation of a dangling destination link.
+
+### Explicit incomplete-build recovery
+
+`cleanup_incomplete_build(root, build_nonce, max_files)` operates only on the named
+`.building/<build_nonce>` directory. Builders acquire a shared, permanent-inode
+root lease before creating any build directory and retain it through sealing,
+publication and candidate verification lifetimes. Cleanup requires an exclusive
+nonblocking lease: an active participating writer makes it fail without unlinking.
+The root must be operator-owned and all writers must use this protocol; older
+binaries, out-of-band filesystem administrators and network filesystems require
+external quiescence and are not qualified by the lease alone. Lock files must not
+be removed while the root is in use.
+
+Before unlinking, recovery bounds the entire inventory (1–65,536 files), requires
+regular files with recognized candidate/raw/verified-body names, and rejects
+symlinks, nested directories and unknown entries. It removes no published pack,
+changes no database state and never recurses. Completion syncs the build parent;
+retry of an absent nonce is successful. An I/O interruption can leave a partially
+cleaned build for a later retry. The report counts removed names and their logical
+file lengths, not allocated or reclaimed device bytes: a candidate may still
+share bytes with a published hard link. Unit tests cover active writers, invalid
+inventory, bounded preflight, preserved published aliases and retry; hosted real
+SIGKILL coverage proves cross-process exclusion and recovery after writer death.
+This API is not authorization to clean a live production root or old generations.
 
 ### Physical pack resource diagnostics
 
