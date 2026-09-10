@@ -96,6 +96,19 @@ async fn kill_at_checkpoint(
         }
     })
     .await;
+    let recovery_blocked = (|| -> Result<bool> {
+        if stage != "before_publish" || !matches!(reached, Ok(Ok(()))) {
+            return Ok(true);
+        }
+        let entry = std::fs::read_dir(root.join(".building"))?
+            .next()
+            .context("missing live build")??;
+        let nonce = Uuid::parse_str(&entry.file_name().to_string_lossy())?;
+        Ok(
+            matches!(crate::services::content_store::cleanup_incomplete_build(root, nonce, 16),
+            Err(crate::services::content_store::ContentStoreError::Io(error)) if error.to_string().contains("build writer active")),
+        )
+    })();
     // Always terminate and reap this exact owned child, also on checkpoint failure.
     child.kill().await?;
     let status = child.wait().await?;
@@ -104,6 +117,10 @@ async fn kill_at_checkpoint(
         "expected real SIGKILL at {stage}"
     );
     reached.context("child checkpoint timed out")??;
+    ensure!(
+        recovery_blocked?,
+        "recovery did not exclude the live writer"
+    );
     // Server rollback is asynchronous after client death. Wait for that exact
     // connection to disappear, never terminate arbitrary database backends.
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -213,12 +230,21 @@ pub(super) async fn exercise(client: &mut Client, observer: &Client, root: &Path
                 }
         );
         if stage == "before_publish" {
+            let builds = std::fs::read_dir(case_root.join(".building"))?
+                .collect::<std::io::Result<Vec<_>>>()?;
             ensure!(
-                std::fs::read_dir(case_root.join(".building"))?
-                    .next()
-                    .is_some(),
-                "SIGKILL must leave identifiable staging"
+                builds.len() == 1,
+                "SIGKILL must leave one identifiable build"
             );
+            let nonce = Uuid::parse_str(&builds[0].file_name().to_string_lossy())?;
+            let cleaned =
+                crate::services::content_store::cleanup_incomplete_build(&case_root, nonce, 16)?;
+            ensure!(cleaned.removed_files > 0 && !cleaned.already_absent);
+            ensure!(
+                crate::services::content_store::cleanup_incomplete_build(&case_root, nonce, 16)?
+                    .already_absent
+            );
+            println!("pack build recovery: SIGKILL, exclusive lease, bounded cleanup and idempotent retry PASS");
         }
         for (body, id) in bytes.iter().zip(&ids) {
             ensure!(
