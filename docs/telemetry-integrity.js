@@ -24,6 +24,26 @@
   };
 
   function candidateMetricInfo(path) {
+    if (path.startsWith('pack_maintenance.')) {
+      const field = path.slice('pack_maintenance.'.length);
+      const maintenanceFields = {
+        repack_ms: ['Integrated pack rewrite and database switch', 'ms_roh', 'lower'],
+        finish_ms: ['Integrated reader drain, unlink and receipt', 'ms_roh', 'lower'],
+        process_peak_rss_bytes: ['Maintenance client lifetime peak RSS', 'b', 'lower'],
+        process_baseline_hwm_bytes: ['Maintenance client initial high-water mark', 'b', 'neutral'],
+        moved_entries: ['Moved immutable bodies', 'n_exact', 'neutral'],
+        logical_bytes: ['Moved logical bytes', 'b', 'neutral'],
+        old_file_bytes: ['Old pack file bytes', 'b', 'neutral'],
+        new_file_bytes: ['Replacement pack file bytes', 'b', 'lower'],
+        dead_entry_bytes: ['Excluded old entry bytes', 'b', 'neutral'],
+        reclaimed_file_bytes: ['Receipted removed file bytes', 'b', 'neutral'],
+        integrity_passed: ['Maintenance integrity passed (0 = FAIL)', 'n_exact', 'higher'],
+      };
+      if (!Object.hasOwn(maintenanceFields, field)) return null;
+      const [l, u, preference] = maintenanceFields[field];
+      return {l, u, preference, k:'other', showZero:true, pinned:true,
+        d:'Integrated PostgreSQL/file operator diagnostic: wall time includes database waits and file work, not SQL-only time. RSS is the fresh client lifetime high-water mark, not database-server memory. Excluded entry bytes and removed whole-file bytes are different. No device I/O or production-policy qualification. Compare repetition ranges; integrity 0 is FAIL.'};
+    }
     if (path.startsWith('pack_resource.')) {
       const field = path.slice('pack_resource.'.length);
       const packFields = {
