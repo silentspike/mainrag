@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import subprocess
 import tempfile
@@ -263,6 +264,127 @@ SELECT COUNT(*)
             "8",
         )
         self.assertEqual(self.run_sql(database, "SELECT COUNT(*) FROM sources"), "2")
+
+    def test_complete_candidate_set_activation_is_atomic_and_bound(self) -> None:
+        database = self.create_database()
+        self.psql(database, file=SCHEMA)
+        self.run_sql(database, f"""
+CREATE TABLE users(id UUID PRIMARY KEY, is_admin BOOLEAN NOT NULL);
+INSERT INTO users VALUES ('{ADMIN_ID}', TRUE), ('{WRITER_ID}', FALSE);
+INSERT INTO sources(id, name, type, path) VALUES
+    (1, 'synthetic-one', 'fixture', 'synthetic-one'),
+    (2, 'synthetic-two', 'fixture', 'synthetic-two');
+CREATE FUNCTION user_can_access_source(
+    p_user_id UUID, p_source_id BIGINT, p_action TEXT DEFAULT 'read'
+) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog, public AS $$
+    SELECT EXISTS (SELECT 1 FROM users WHERE id = p_user_id AND is_admin)
+$$;
+""")
+        def as_actor(user_id: str, sql: str) -> str:
+            return f"SET app.user_id = '{user_id}'; {sql}"
+        candidates = []
+        evidence_ids = []
+        for source_id in (1, 2):
+            candidate_id = int(self.run_sql(database, as_actor(
+                ADMIN_ID,
+                f"SELECT id FROM storage_v2_allocate_generation({source_id}, 'fixture', '{{}}')"
+            )))
+            self.run_sql(database, as_actor(ADMIN_ID, f"""
+SELECT storage_v2_seal_generation({candidate_id}, 0);
+SELECT storage_v2_verify_generation({candidate_id}, '{'a' * 64}');
+SELECT storage_v2_mark_release_candidate({candidate_id});
+"""))
+            evidence_id = str(uuid.uuid4())
+            self.run_sql(database, f"""
+INSERT INTO storage_v2_release_candidate_evidence(
+    id, source_id, generation_id, commit_sha, source_watermark_sha256,
+    adapter_profile_id, analysis_profile_id, search_profile_id,
+    manifest, manifest_sha256
+) VALUES ('{evidence_id}', {source_id}, {candidate_id}, '{'c' * 40}',
+          '{'b' * 64}', 'fixture-adapter', 'fixture-analysis', 'fixture-search',
+          '{{"status":"PASS"}}', digest('{{"status":"PASS"}}', 'sha256'))
+""")
+            candidates.append(candidate_id)
+            evidence_ids.append(evidence_id)
+
+        def activation_call(entries: list[dict], activation_id: str | None = None,
+                            digest_override: str | None = None,
+                            schema_version: str | None = "mainrag.storage-v2.activation-set.v1") -> str:
+            manifest = {
+                "activation_id": activation_id or str(uuid.uuid4()),
+                "code_commit_sha": "c" * 40,
+                "schema_sha256": "d" * 64,
+                "backend_package_sha256": "e" * 64,
+                "aggregate_evidence_sha256": "f" * 64,
+                "sources": entries,
+            }
+            if schema_version is not None:
+                manifest["schema_version"] = schema_version
+            literal = json.dumps(manifest, sort_keys=True).replace("'", "''")
+            digest = self.run_sql(database, f"""SELECT encode(digest(
+                convert_to('{literal}'::jsonb::TEXT, 'UTF8'), 'sha256'), 'hex')""")
+            return (f"SELECT storage_v2_activate_candidate_set('{literal}'::jsonb, "
+                    f"'{digest_override or digest}')")
+
+        entries = [{"source_id": source_id,
+                    "candidate_generation_id": candidate_id,
+                    "expected_active_generation_id": None,
+                    "evidence_id": evidence_id,
+                    "evidence_manifest_sha256": self.run_sql(database,
+                        f"SELECT encode(manifest_sha256, 'hex') FROM storage_v2_release_candidate_evidence WHERE id='{evidence_id}'"),
+                    "source_watermark_sha256": "b" * 64}
+                   for source_id, candidate_id, evidence_id in zip((1, 2), candidates, evidence_ids)]
+        call = activation_call(entries)
+        pointers = "SELECT string_agg(id || ':' || COALESCE(active_generation_id::TEXT, 'NULL'), ',' ORDER BY id) FROM logical_source"
+        self.assert_sql_fails(database, as_actor(WRITER_ID, call),
+                              "candidate-set activation requires administrator authority")
+        self.assert_sql_fails(database, as_actor(ADMIN_ID, activation_call(entries[:1])),
+                              "candidate set does not cover every registered source")
+        self.assert_sql_fails(database, as_actor(ADMIN_ID,
+            activation_call(entries, schema_version=None)),
+            "exact approved candidate-set manifest identity is required")
+        self.assert_sql_fails(database, as_actor(ADMIN_ID,
+            activation_call([entries[0], entries[0]])),
+            "candidate set contains duplicate source")
+        self.assert_sql_fails(database, as_actor(ADMIN_ID,
+            activation_call(entries, digest_override="0" * 64)),
+            "exact approved candidate-set manifest identity is required")
+        self.assert_sql_fails(database, as_actor(ADMIN_ID,
+            activation_call([{**entries[0], "expected_active_generation_id": candidates[0]},
+                             entries[1]])),
+            "candidate, pointer or qualification evidence drift")
+        self.assert_sql_fails(database, as_actor(ADMIN_ID,
+            activation_call([{**entries[0], "candidate_generation_id": candidates[1]}, entries[1]])),
+            "candidate, pointer or qualification evidence drift")
+        self.assertEqual(self.run_sql(database, pointers), "1:NULL,2:NULL")
+
+        self.run_sql(database, """
+CREATE FUNCTION fixture_fail_second_activation() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.source_id = 2 AND NEW.status = 'active' THEN
+        RAISE EXCEPTION 'fixture second-source failure';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER fixture_fail_second_activation
+    BEFORE UPDATE ON source_generation
+    FOR EACH ROW EXECUTE FUNCTION fixture_fail_second_activation();
+""")
+        self.assert_sql_fails(database, as_actor(ADMIN_ID, call),
+                              "fixture second-source failure")
+        self.assertEqual(self.run_sql(database, pointers), "1:NULL,2:NULL")
+        self.assertEqual(self.run_sql(database,
+            "SELECT COUNT(*) FROM storage_v2_activation_set_evidence"), "0")
+        self.run_sql(database, "DROP TRIGGER fixture_fail_second_activation ON source_generation")
+        result = self.run_sql(database, as_actor(ADMIN_ID, call))
+        self.assertIn("ACTIVATION_STATEMENT_COMPLETE", result)
+        self.assertEqual(self.run_sql(database, pointers),
+                         f"1:{candidates[0]},2:{candidates[1]}")
+        self.assertEqual(self.run_sql(database,
+            "SELECT COUNT(*) FROM storage_v2_activation_set_evidence"), "1")
+        self.assert_sql_fails(database, as_actor(ADMIN_ID, call),
+                              "activation identity was already used")
 
     def test_generation_identity_activation_membership_and_isolation(self) -> None:
         database = self.create_database()
