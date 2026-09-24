@@ -34,9 +34,20 @@ CONFIGURATION = {
 }
 
 
+class ObservationError(ValueError):
+    """Static public validation reason, never raw input or operational details."""
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
-        raise ValueError(message)
+        raise ObservationError(message)
+
+
+def expected_configuration(execution_profile: str) -> dict:
+    configuration = CONFIGURATION.copy()
+    if execution_profile == "hosted-ci-local-postgres":
+        configuration["indexed_lexical_version"] = "hf_bge_wordpiece"
+    return configuration
 
 
 def number(value: object, *, integer: bool = False) -> bool:
@@ -80,7 +91,7 @@ def summarize(raw: dict, code_sha: str, execution_profile: str) -> dict:
     require(raw.get("corpus_items") == len(documents), "corpus count mismatch")
     require(raw.get("query_set_sha256") == harness.sha256_file(harness.QUERIES), "query suite identity mismatch")
     require(raw.get("query_sql_sha256") == harness.sha256_file(harness.HERE / "current_path_query.sql"), "query implementation mismatch")
-    require(raw.get("configuration") == CONFIGURATION, "fixture configuration drift")
+    require(raw.get("configuration") == expected_configuration(execution_profile), "fixture configuration drift")
     require(raw.get("fixture_definition_sha256") == fixture_definition_sha256(), "fixture schema or scaffold definition mismatch")
     require(bool(re.fullmatch(r"[0-9a-f]{64}", raw.get("schema_columns_sha256", ""))), "schema identity missing")
     require(bool(re.fullmatch(r"[0-9]+(?:\.[0-9]+)*(?: \([^\n]+\))?", raw.get("backend_version", ""))), "backend version missing")
@@ -141,7 +152,7 @@ def summarize(raw: dict, code_sha: str, execution_profile: str) -> dict:
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "code_sha": code_sha, "execution_profile": execution_profile,
         "subject": {key: raw[key] for key in ("corpus_sha256", "corpus_items", "query_set_sha256", "query_sql_sha256", "schema_columns_sha256", "fixture_definition_sha256", "backend_version")},
-        "configuration": CONFIGURATION.copy(), "ingest": copy.deepcopy(ingest),
+        "configuration": copy.deepcopy(raw["configuration"]), "ingest": copy.deepcopy(ingest),
         "stable_chunk_count": raw["stable_chunk_count"], "queries": evaluated,
         "warm_latency": harness.latency_summary(all_samples),
         "result_identity_sha256": hashlib.sha256(json.dumps(identities, sort_keys=True).encode()).hexdigest(),
@@ -200,6 +211,8 @@ def collect_report(paths: list[Path], code_sha: str, execution_profile: str, tol
         status = "FAIL" if errors else "PASS"
     except FileNotFoundError:
         status, errors = "NOT_RUN", ["required_fixture_log_missing"]
+    except ObservationError as error:
+        status, errors = "FAIL", [str(error)]
     except (ValueError, KeyError, TypeError):
         status, errors = "FAIL", ["invalid_or_failed_fixture_observation"]
     return {"status": status, "timing_tolerance": tolerance, "differences": errors, "runs": runs}
@@ -210,6 +223,8 @@ def validate_report(report: dict) -> None:
     schema = json.loads((harness.HERE / "supported-baseline.schema.json").read_text())
     jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).validate(report)
     harness.ensure_public_manifest(report)
+    for run in report["runs"]:
+        require(run["configuration"] == expected_configuration(run["execution_profile"]), "report configuration contradicts execution profile")
     if len(report["runs"]) != 2:
         require(report["status"] != "PASS" and bool(report["differences"]), "incomplete runs cannot pass")
         return
