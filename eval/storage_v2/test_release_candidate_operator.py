@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import copy
+import io
 import json
 import stat
 import tempfile
@@ -23,6 +24,56 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ReleaseCandidateOperatorTests(unittest.TestCase):
+    def test_build_uses_unpredictable_public_source_reference(self) -> None:
+        result = {"active_generation_before": None, "active_generation_after": None,
+                  "item_count": 1, "generation_id": 2, "generation_seq": 1,
+                  "source_watermark_sha256": "c" * 64, "reused_generation": False,
+                  "telemetry": {}}
+        references = []
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(MODULE, "request", return_value=result), \
+             patch.object(MODULE, "source_state", return_value={
+                 "server_instance_id": "fixture", "active_generation_id": None}), \
+             patch.object(MODULE, "validate_telemetry"), \
+             patch.object(MODULE, "publish_telemetry"), \
+             patch("builtins.print") as output:
+            for index in range(2):
+                checkpoint = Path(temporary) / f"checkpoint-{index}.json"
+                arguments = Namespace(api_url="http://fixture.invalid", source_id=1,
+                                      commit_sha="a" * 40, checkpoint=checkpoint)
+                MODULE.build(arguments, "private-token")
+                value = json.loads(checkpoint.read_text())
+                references.append(value["source_ref"])
+                self.assertEqual(len(value["source_ref"]), 64)
+                self.assertNotEqual(value["source_ref"], MODULE.sha256_text("mainrag.issue-66.source:1"))
+                self.assertEqual(json.loads(output.call_args.args[0])["source_ref"], value["source_ref"])
+                self.assertEqual(stat.S_IMODE(checkpoint.stat().st_mode), 0o600)
+                original = checkpoint.read_bytes()
+                with self.assertRaisesRegex(RuntimeError, "checkpoint already exists"):
+                    MODULE.build(arguments, "private-token")
+                self.assertEqual(checkpoint.read_bytes(), original)
+        self.assertNotEqual(*references)
+
+    def test_http_error_does_not_expose_protected_response_body(self) -> None:
+        error = urllib.error.HTTPError("http://fixture.invalid", 409, "conflict", {},
+                                       io.BytesIO(b"private-source-content"))
+        with patch.object(MODULE.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaisesRegex(RuntimeError, "API request failed with HTTP 409") as caught:
+                MODULE.request("http://fixture.invalid", "private-token", "GET", "/state")
+        self.assertNotIn("private-source-content", str(caught.exception))
+        self.assertNotIn("private-token", str(caught.exception))
+
+    def test_create_only_checkpoint_cannot_replace_an_existing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            checkpoint = Path(temporary) / "checkpoint.json"
+            MODULE.atomic_private_json(checkpoint, {"identity": "first"}, replace=False)
+            original = checkpoint.read_bytes()
+            with self.assertRaises(FileExistsError):
+                MODULE.atomic_private_json(checkpoint, {"identity": "second"}, replace=False)
+            self.assertEqual(checkpoint.read_bytes(), original)
+            self.assertEqual(stat.S_IMODE(checkpoint.stat().st_mode), 0o600)
+            self.assertEqual(sorted(path.name for path in checkpoint.parent.iterdir()), [checkpoint.name])
+
     def test_query_seed_summary_counts_repeated_queries_not_independent_cases(self) -> None:
         seeds = [{"query": "private-query", "expects_match": True,
                   "expected_path_sha256": str(index)} for index in range(5)]
