@@ -164,7 +164,9 @@ python3 ops/storage-v2/release-candidate.py build \
 
 python3 ops/storage-v2/release-candidate.py verify \
   --source-id SOURCE_ID --commit-sha FULL_DEPLOYED_SHA \
-  --checkpoint PROTECTED_CHECKPOINT --output PROTECTED_EVIDENCE
+  --checkpoint PROTECTED_CHECKPOINT --output PROTECTED_EVIDENCE \
+  --gold-suite PROTECTED_GOLD_SUITE \
+  --expected-gold-suite-sha256 REVIEWED_SUITE_SHA256
 ```
 
 The build operator checks the existing pack root before the build POST. Its
@@ -185,6 +187,24 @@ and named-generation reads, the applicable intelligence commands, latency and
 resource gates, records accepted dual-read evidence, and only then submits the
 qualification envelope. Raw checkpoints, seeds, result sets, and evidence stay
 outside Git with mode `0600`.
+
+Verification also requires a protected, mode-0600 gold-suite JSON file whose
+raw SHA-256 was reviewed and supplied explicitly. Schema
+`mainrag.storage-v2.gold-suite.v1` binds `source_id`, `generation_id`,
+`commit_sha`, `source_watermark_sha256`, `adapter_profile_id`,
+`analysis_profile_id`, `search_profile_id`, a nonempty `source_class`, and
+`cases`. Each case has an opaque 64-character hexadecimal `id`, a `query`, an
+`expected_path_sha256`, and boolean `expects_match`. At least one positive and
+one negative case with distinct queries are required; all cases must pass the
+existing quality, latency, and degradation gates. Single-term cases use the
+server's body-backed literal coverage proof; other queries require identical
+ordered current and candidate paths. Gold cases join the dual-read query set.
+The suite digest and class are recorded in private qualification evidence.
+Digest matching does not itself establish representative class coverage; the
+reviewed suite and later all-source aggregate must prove that separately.
+Failed automatic seeds still fail qualification even if gold cases pass.
+Before the restart/resume build request, verification rechecks the pack reserve
+and records its free-byte readback in protected attempt evidence.
 
 A failed query gate writes a protected `FAIL` artifact to the requested output
 before returning nonzero. It records each query's quality, measured latency,

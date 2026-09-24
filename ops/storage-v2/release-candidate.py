@@ -8,7 +8,9 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
+import stat
 import struct
 import tempfile
 import time
@@ -269,6 +271,88 @@ def query_seed_summary(seeds: list[dict[str, Any]]) -> dict[str, Any]:
         "positive_case_count": sum(seed["expects_match"] is True for seed in seeds),
         "negative_case_count": sum(seed["expects_match"] is False for seed in seeds),
         "representative_gold_coverage": "NOT_ESTABLISHED",
+    }
+
+
+def load_gold_suite(arguments: argparse.Namespace, checkpoint: dict[str, Any],
+                    verified: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Bind a protected, reviewed source-class suite to this exact candidate."""
+    path = arguments.gold_suite
+    expected = arguments.expected_gold_suite_sha256
+    if path is None or not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise RuntimeError("an expected protected gold-suite digest is required")
+    metadata = path.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise RuntimeError("gold suite must be a private regular file")
+    raw = path.read_bytes()
+    if len(raw) > 1024 * 1024 or hashlib.sha256(raw).hexdigest() != expected:
+        raise RuntimeError("gold suite size or reviewed digest differs")
+    def unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate JSON key")
+            value[key] = item
+        return value
+
+    try:
+        suite = json.loads(raw, object_pairs_hook=unique_keys)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise RuntimeError("gold suite is not valid JSON") from error
+    if not isinstance(suite, dict) or suite.get("schema_version") != "mainrag.storage-v2.gold-suite.v1":
+        raise RuntimeError("gold suite schema differs")
+    bindings = {
+        "source_id": checkpoint["source_id"],
+        "generation_id": checkpoint["generation_id"],
+        "commit_sha": checkpoint["commit_sha"],
+        "source_watermark_sha256": checkpoint["source_watermark_sha256"],
+        "adapter_profile_id": verified["adapter_profile_id"],
+        "analysis_profile_id": verified["analysis_profile_id"],
+        "search_profile_id": verified["search_profile_id"],
+    }
+    if any(type(suite.get(key)) is not type(value) or suite[key] != value
+           for key, value in bindings.items()):
+        raise RuntimeError("gold suite candidate identity differs")
+    source_class = suite.get("source_class")
+    cases = suite.get("cases")
+    if not isinstance(source_class, str) or not 1 <= len(source_class) <= 80:
+        raise RuntimeError("gold suite has no source class")
+    if not isinstance(cases, list) or not 2 <= len(cases) <= 256:
+        raise RuntimeError("gold suite needs bounded positive and negative cases")
+    seen_ids: set[str] = set()
+    seen_cases: set[tuple[str, str, bool]] = set()
+    positive = negative = 0
+    for case in cases:
+        if not isinstance(case, dict) or set(case) != {
+            "id", "query", "expected_path_sha256", "expects_match",
+        }:
+            raise RuntimeError("gold suite case shape differs")
+        if not isinstance(case["id"], str) or not re.fullmatch(r"[0-9a-f]{64}", case["id"]):
+            raise RuntimeError("gold suite case ID must be opaque SHA-256")
+        if not isinstance(case["query"], str) or not 1 <= len(case["query"].encode()) <= 512:
+            raise RuntimeError("gold suite query size differs")
+        if not isinstance(case["expected_path_sha256"], str) or not re.fullmatch(
+            r"[0-9a-f]{64}", case["expected_path_sha256"]
+        ) or type(case["expects_match"]) is not bool:
+            raise RuntimeError("gold suite expectation differs")
+        identity = (case["query"], case["expected_path_sha256"], case["expects_match"])
+        if case["id"] in seen_ids or identity in seen_cases:
+            raise RuntimeError("gold suite contains duplicate cases")
+        seen_ids.add(case["id"])
+        seen_cases.add(identity)
+        positive += case["expects_match"]
+        negative += not case["expects_match"]
+    if not positive or not negative or len({case["query"] for case in cases}) < 2:
+        raise RuntimeError("gold suite lacks positive, negative, or distinct queries")
+    return cases, {
+        "schema_version": "mainrag.storage-v2.gold-suite-summary.v1",
+        "suite_sha256": expected,
+        "source_class": source_class,
+        "case_count": len(cases),
+        "positive_case_count": positive,
+        "negative_case_count": negative,
+        "distinct_query_count": len({case["query"] for case in cases}),
+        "representative_coverage": "SUITE_DIGEST_BOUND_REVIEW_EXTERNAL",
     }
 
 
@@ -540,6 +624,11 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
     state = source_state(arguments.api_url, token, arguments.source_id, checkpoint["generation_seq"])
     if state["server_instance_id"] == checkpoint["server_instance_id"]:
         raise RuntimeError("API restart was not observed after candidate construction")
+    progress["phase"] = "resource_before_resume"
+    free_before_resume = shutil.disk_usage(arguments.pack_root).free
+    progress["free_bytes_before_resume"] = free_before_resume
+    if free_before_resume < arguments.minimum_free_bytes:
+        raise RuntimeError("resource reserve is below the approved minimum before resume")
     progress["phase"] = "restart_resume"
     repeated = request(
         arguments.api_url,
@@ -578,6 +667,9 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
         or verified["status"] not in {"verified", "release_candidate"}
     ):
         raise RuntimeError("server verification returned a different candidate identity")
+    progress["phase"] = "gold_suite"
+    gold_cases, gold_summary = load_gold_suite(arguments, checkpoint, verified)
+    progress["gold_suite_summary"] = gold_summary
     intelligence = verify_intelligence(
         arguments.api_url, token, arguments.source_id, checkpoint["generation_seq"],
         verified["intelligence_export"], progress,
@@ -590,8 +682,12 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
     quality_passed = True
     performance_passed = True
     degradation_passed = True
-    for ordinal, seed in enumerate(verified["query_seeds"], 1):
-        pending = {"ordinal": ordinal, "id": seed["id"], "query_sha256": sha256_text(seed["query"])}
+    for ordinal, (kind, seed) in enumerate(
+        [("automatic", seed) for seed in verified["query_seeds"]]
+        + [("gold", case) for case in gold_cases], 1
+    ):
+        pending = {"ordinal": ordinal, "kind": kind, "id": seed["id"],
+                   "query_sha256": sha256_text(seed["query"])}
         progress["pending_query"] = pending
         common = {"query": seed["query"], "source_id": arguments.source_id, "limit": 10}
         progress["phase"] = "search_current"
@@ -618,21 +714,28 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             current_by_path.setdefault(sha256_text(result["file_path"]), []).append(
                 f"legacy:{int(result['chunk_id'])}"
             )
-        coverage = request(
-            arguments.api_url, token, "POST",
-            f"/api/v1/admin/sources/{arguments.source_id}/storage-v2-candidate-query-evidence",
-            {"generation_id": checkpoint["generation_id"], "commit_sha": arguments.commit_sha,
-             "query": seed["query"],
-             "candidate_occurrence_ids": [hit["chunk_id"] for hit in storage["results"]],
-             "current_chunk_ids": [hit["chunk_id"] for hit in current["results"]]},
-        )
-        query_coverage.append(coverage)
+        # The body-backed literal proof supports a single lexical term. Other
+        # reviewed gold queries require exact ordered-path equality instead.
+        literal = bool(re.fullmatch(r"[\w]{1,128}", seed["query"])) and len(seed["query"].encode()) <= 128
+        coverage = None
+        if kind == "automatic" or literal:
+            coverage = request(
+                arguments.api_url, token, "POST",
+                f"/api/v1/admin/sources/{arguments.source_id}/storage-v2-candidate-query-evidence",
+                {"generation_id": checkpoint["generation_id"], "commit_sha": arguments.commit_sha,
+                 "query": seed["query"],
+                 "candidate_occurrence_ids": [hit["chunk_id"] for hit in storage["results"]],
+                 "current_chunk_ids": [hit["chunk_id"] for hit in current["results"]]},
+            )
+            query_coverage.append(coverage)
         gates = search_query_gates(seed, current, storage, arguments.max_query_ms, coverage, checkpoint)
         quality_passed &= gates["quality_passed"]
         performance_passed &= gates["performance_passed"]
         degradation_passed &= gates["degradation_passed"]
-        fixture = {"id": seed["id"], "query": seed["query"], "phrase": False, "k": 10,
-                   "coverage_evidence_sha256": sha256_text(json.dumps(coverage, sort_keys=True))}
+        fixture = {"id": seed["id"], "kind": kind, "query": seed["query"],
+                   "phrase": False, "k": 10}
+        if coverage is not None:
+            fixture["coverage_evidence_sha256"] = sha256_text(json.dumps(coverage, sort_keys=True))
         comparisons.append({
             "fixture": fixture,
             "normalized_query": seed["query"],
@@ -649,6 +752,7 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             "intelligence": intelligence,
             "query_results": query_results, "comparisons": comparisons,
             "query_seed_summary": progress["query_seed_summary"],
+            "gold_suite_summary": gold_summary,
             "query_coverage": query_coverage,
             "checks": {"quality": quality_passed and bool(query_results),
                        "performance": performance_passed and bool(query_results),
@@ -710,6 +814,7 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             "dual_read_artifact_sha256": dual["artifact_sha256"],
             "query_results": query_results,
             "query_seed_summary": progress["query_seed_summary"],
+            "gold_suite_summary": gold_summary,
             "query_coverage_sha256": sha256_text(json.dumps(query_coverage, sort_keys=True)),
             "intelligence": intelligence,
             "resource": {"free_bytes": free_bytes, "minimum_free_bytes": arguments.minimum_free_bytes},
@@ -756,11 +861,16 @@ def main() -> int:
     parser.add_argument("--minimum-free-bytes", type=int, default=40 * 1024**3)
     parser.add_argument("--maximum-build-bytes", type=int)
     parser.add_argument("--max-query-ms", type=int, default=2000)
+    parser.add_argument("--gold-suite", type=Path)
+    parser.add_argument("--expected-gold-suite-sha256")
     arguments = parser.parse_args()
     if len(arguments.commit_sha) != 40 or any(c not in "0123456789abcdef" for c in arguments.commit_sha):
         parser.error("--commit-sha must be a full lowercase Git SHA")
     if arguments.phase == "verify" and arguments.output is None:
         parser.error("verify requires --output")
+    if arguments.phase == "verify" and (arguments.gold_suite is None or
+                                        arguments.expected_gold_suite_sha256 is None):
+        parser.error("verify requires --gold-suite and --expected-gold-suite-sha256")
     if arguments.phase == "build" and (arguments.maximum_build_bytes is None or
                                        arguments.maximum_build_bytes <= 0):
         parser.error("build requires a positive --maximum-build-bytes estimate")
