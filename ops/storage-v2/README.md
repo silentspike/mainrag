@@ -109,6 +109,33 @@ final manifest is PASS and its evidence boundary has been accepted. Search/read
 availability during an adapter is determined by that reviewed adapter; the
 preflight does not silently claim it.
 
+## Atomic candidate-set activation boundary
+
+Migration 057 adds `storage_v2_activate_candidate_set` and a compact activation
+receipt table. Installing the migration does not call the function or change a
+pointer. Its protected JSON manifest uses schema
+`mainrag.storage-v2.activation-set.v1`, a unique `activation_id`, exact
+`code_commit_sha`, `schema_sha256`, `backend_package_sha256`,
+`aggregate_evidence_sha256`, and a `sources` array covering **every** registered
+source, including the benchmark source. Each source entry binds `source_id`,
+`candidate_generation_id`, `expected_active_generation_id` (or JSON null),
+`evidence_id`, `evidence_manifest_sha256`, and
+`source_watermark_sha256`. The expected manifest SHA-256 is calculated over
+PostgreSQL `jsonb::text`, and a fresh approval must name that exact digest.
+
+One function call locks the source registry, pointers, generations, and
+qualification evidence against concurrent writes; rejects incomplete sets,
+duplicate sources, stale pointers, non-candidates, and mismatched evidence; then
+calls the controlled per-source activation function in one statement. An error
+rolls the entire statement back. The returned pointer-set digest is a statement
+result, not a COMMIT or application-switch proof. The caller must explicitly
+COMMIT, read back every pointer/status and the receipt, and complete the coupled
+default-read switch and post-activation ingest gate. The function cannot observe
+live adapter watermarks, writers, actual package installation, representative
+quality, resource headroom, or the application default selector. Those gates and
+fresh owner approval must be proven before any live call. There is no production
+activation command here while the final candidate set is incomplete.
+
 Apply the storage-v2 migrations as the database runtime/table owner. The
 controlled-write triggers deliberately require the table owner and the
 `SECURITY DEFINER` functions to have the same identity. Applying migrations as
