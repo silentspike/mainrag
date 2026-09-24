@@ -10,6 +10,7 @@ import stat
 import tempfile
 import unittest
 import urllib.error
+import uuid
 from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
@@ -506,10 +507,13 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                              MODULE.sha256_text(json.dumps(proof, sort_keys=True)))
             self.assertEqual(dual_request["query_set_sha256"], MODULE.query_set_sha256(comparisons))
             manifest = calls[6].args[4]["manifest"]
+            evidence_id = calls[6].args[4]["evidence_id"]
+            self.assertEqual(uuid.UUID(evidence_id).version, 4)
             self.assertEqual(manifest["query_coverage_sha256"],
                              MODULE.sha256_text(json.dumps([proof], sort_keys=True)))
             self.assertTrue(manifest["query_results"][0]["coverage"]["all_candidate_hits_supported"])
             artifact = json.loads(arguments.output.read_text())
+            self.assertEqual(artifact["qualification"]["evidence_id"], evidence_id)
             self.assertEqual(artifact["query_coverage"], [proof])
             self.assertEqual(artifact["result"], qualified)
             self.assertEqual(stat.S_IMODE(arguments.output.stat().st_mode), 0o600)
