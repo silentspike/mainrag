@@ -29,6 +29,25 @@ successful analyses. Deferred legacy streaming reads and explicit-path sync I/O
 remain partial/not measured. Initial and unchanged eager filesystem syncs both
 include probe/content reads; a hash skip does not imply zero I/O.
 
+The opt-in Rust test
+`services::index::baseline_tests::postgres_supported_source_initial_and_repeat`
+runs `IndexService::index_source` twice with the real filesystem adapter,
+default chunker, intelligence parser and PostgreSQL writes. It requires
+`MAINRAG_CPU_MODE=true` and an explicit `MAINRAG_INDEX_TEST_DATABASE_URL` whose
+database name is `mainrag_index_fixture`; it creates and removes its own schema
+and public source directory. CI executes it in a separate process. No runtime
+configuration is changed by the test. A socket trap rejects accidental vector
+dependency access.
+
+Its two JSON observations distinguish logical input, actual adapter content
+reads (including the binary probe), parser calls, processing/skips, created
+chunks and elapsed time. Assertions reconstruct the stored file and compare
+persisted chunk IDs across the unchanged repeat. This is an eager-filesystem,
+CPU-mode, minimal-schema integration fixture, not evidence for streaming,
+other adapters, production RLS/migrations, search quality or all-source
+candidate acceptance. It does not turn the separate SQL microbenchmark into a
+passing aggregate baseline.
+
 This harness measures the repository's current PostgreSQL full-text query shape
 against a frozen public fixture. It is the baseline/comparison contract for
 storage-v2 work; it does not replace the broader golden-set ownership in
