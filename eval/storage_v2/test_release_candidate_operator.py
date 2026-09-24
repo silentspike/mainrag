@@ -26,6 +26,46 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ReleaseCandidateOperatorTests(unittest.TestCase):
+    def write_gold_suite(self, directory: Path, checkpoint: dict, verified: dict,
+                         cases: list[dict]) -> tuple[Path, str]:
+        path = directory / "gold-suite.json"
+        suite = {
+            "schema_version": "mainrag.storage-v2.gold-suite.v1",
+            "source_class": "fixture-class",
+            **{key: checkpoint[key] for key in ("source_id", "generation_id", "commit_sha",
+                                                  "source_watermark_sha256")},
+            **{key: verified[key] for key in ("adapter_profile_id", "analysis_profile_id",
+                                                "search_profile_id")},
+            "cases": cases,
+        }
+        MODULE.atomic_private_json(path, suite, replace=False)
+        return path, MODULE.hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def test_gold_suite_rejects_stale_unreviewed_and_nonprivate_inputs(self) -> None:
+        checkpoint = {"source_id": 1, "generation_id": 2, "commit_sha": "a" * 40,
+                      "source_watermark_sha256": "b" * 64}
+        verified = {"adapter_profile_id": "adapter", "analysis_profile_id": "analysis",
+                    "search_profile_id": "search"}
+        cases = [{"id": "1" * 64, "query": "positive query",
+                  "expected_path_sha256": "c" * 64, "expects_match": True},
+                 {"id": "2" * 64, "query": "negative query",
+                  "expected_path_sha256": "0" * 64, "expects_match": False}]
+        with tempfile.TemporaryDirectory() as temporary:
+            path, digest = self.write_gold_suite(Path(temporary), checkpoint, verified, cases)
+            arguments = Namespace(gold_suite=path, expected_gold_suite_sha256=digest)
+            loaded, summary = MODULE.load_gold_suite(arguments, checkpoint, verified)
+            self.assertEqual(loaded, cases)
+            self.assertEqual(summary["case_count"], 2)
+            arguments.expected_gold_suite_sha256 = "0" * 64
+            with self.assertRaisesRegex(RuntimeError, "reviewed digest"):
+                MODULE.load_gold_suite(arguments, checkpoint, verified)
+            arguments.expected_gold_suite_sha256 = digest
+            with self.assertRaisesRegex(RuntimeError, "candidate identity"):
+                MODULE.load_gold_suite(arguments, {**checkpoint, "generation_id": 3}, verified)
+            path.chmod(0o644)
+            with self.assertRaisesRegex(RuntimeError, "private regular file"):
+                MODULE.load_gold_suite(arguments, checkpoint, verified)
+
     def test_build_uses_unpredictable_public_source_reference(self) -> None:
         result = {"active_generation_before": None, "active_generation_after": None,
                   "item_count": 1, "generation_id": 2, "generation_seq": 1,
@@ -290,7 +330,8 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                 directory = Path(temporary)
                 arguments = Namespace(checkpoint=directory / "checkpoint.json",
                                       output=directory / "attempt.json", source_id=1,
-                                      commit_sha="a" * 40, api_url="http://fixture.invalid", max_query_ms=2000)
+                                      commit_sha="a" * 40, api_url="http://fixture.invalid",
+                                      max_query_ms=2000, pack_root=directory, minimum_free_bytes=0)
                 checkpoint = {"source_id": 1, "source_ref": "b" * 64, "commit_sha": "a" * 40,
                               "generation_id": 2, "generation_seq": 1, "item_count": 1,
                               "source_watermark_sha256": "c" * 64, "active_generation_id": None,
@@ -302,6 +343,7 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                 verified = {**checkpoint, "status": "verified", "intelligence_export": {},
                             "query_seeds": seeds}
                 with patch.object(MODULE, "source_state", return_value={"server_instance_id": "after"}), \
+                     patch.object(MODULE, "load_gold_suite", return_value=([], {})), \
                      patch.object(MODULE, "validate_telemetry"), \
                      patch.object(MODULE, "verify_intelligence", return_value={}), \
                      patch.object(MODULE, "request", side_effect=[repeated, verified, current,
@@ -380,6 +422,7 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                 replies.append(error)
                 intelligence = {"commands": ["card"], "result_sha256": {"card": "f" * 64}}
                 with patch.object(MODULE, "source_state", return_value={"server_instance_id": "after"}), \
+                     patch.object(MODULE, "load_gold_suite", return_value=([], {})), \
                      patch.object(MODULE, "validate_telemetry"), \
                      patch.object(MODULE, "verify_intelligence", return_value=intelligence), \
                      patch.object(MODULE, "request", side_effect=replies) as request:
@@ -524,35 +567,111 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                     "evidence_id": "fixture-evidence", "artifact_sha256": "e" * 64}
             qualified = {**identity, "status": "release_candidate", "evidence_id": "fixture-qualified",
                          "active_generation_id": None}
+            positive = {"id": "1" * 64, "query": "reviewed positive query",
+                        "expected_path_sha256": MODULE.sha256_text("fixture.txt"), "expects_match": True}
+            negative = {"id": "2" * 64, "query": "reviewed negative query",
+                        "expected_path_sha256": "0" * 64, "expects_match": False}
+            arguments.gold_suite, arguments.expected_gold_suite_sha256 = self.write_gold_suite(
+                directory, checkpoint, verified, [positive, negative])
+            empty = {"results": [], "took_ms": 1}
             with patch.object(MODULE, "source_state", return_value={"server_instance_id": "after"}), \
                  patch.object(MODULE, "validate_telemetry"), \
                  patch.object(MODULE, "verify_intelligence", return_value={}), \
                  patch.object(MODULE, "publish_telemetry"), patch("builtins.print"), \
                  patch.object(MODULE, "request", side_effect=[repeated, verified, current, storage,
-                                                             proof, dual, qualified]) as request:
+                                                             proof, current, current, empty, empty,
+                                                             dual, qualified]) as request:
                 MODULE.verify(arguments, "private-token")
             calls = request.call_args_list
-            self.assertEqual(len(calls), 7)
+            self.assertEqual(len(calls), 11)
             self.assertEqual(calls[4].args[4]["candidate_occurrence_ids"], [11, 12])
             self.assertEqual(calls[4].args[4]["current_chunk_ids"], [1])
             self.assertEqual(calls[4].args[4]["query"], seed["query"])
-            dual_request = calls[5].args[4]
+            dual_request = calls[9].args[4]
             comparisons = dual_request["queries"]
+            self.assertEqual(len(comparisons), 3)
+            self.assertEqual([item["fixture"]["kind"] for item in comparisons],
+                             ["automatic", "gold", "gold"])
             self.assertEqual(comparisons[0]["fixture"]["coverage_evidence_sha256"],
                              MODULE.sha256_text(json.dumps(proof, sort_keys=True)))
             self.assertEqual(dual_request["query_set_sha256"], MODULE.query_set_sha256(comparisons))
-            manifest = calls[6].args[4]["manifest"]
-            evidence_id = calls[6].args[4]["evidence_id"]
+            manifest = calls[10].args[4]["manifest"]
+            evidence_id = calls[10].args[4]["evidence_id"]
             self.assertEqual(uuid.UUID(evidence_id).version, 4)
             self.assertEqual(manifest["query_coverage_sha256"],
                              MODULE.sha256_text(json.dumps([proof], sort_keys=True)))
             self.assertTrue(manifest["query_results"][0]["coverage"]["all_candidate_hits_supported"])
+            self.assertEqual(manifest["gold_suite_summary"]["suite_sha256"],
+                             arguments.expected_gold_suite_sha256)
+            self.assertEqual(manifest["gold_suite_summary"]["case_count"], 2)
             artifact = json.loads(arguments.output.read_text())
             self.assertEqual(artifact["qualification"]["evidence_id"], evidence_id)
             self.assertEqual(artifact["query_coverage"], [proof])
             self.assertEqual(artifact["result"], qualified)
             self.assertEqual(stat.S_IMODE(arguments.output.stat().st_mode), 0o600)
             self.assertNotIn("private-token", arguments.output.read_text())
+
+    def test_failing_gold_case_stops_before_dual_read_or_qualification(self) -> None:
+        seed, current, storage, proof, identity = self.coverage_fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            arguments = Namespace(checkpoint=directory / "checkpoint.json",
+                                  output=directory / "result.json", source_id=1,
+                                  commit_sha="a" * 40, api_url="http://fixture.invalid",
+                                  max_query_ms=2000, pack_root=directory, minimum_free_bytes=0)
+            checkpoint = {**identity, "source_ref": "b" * 64, "item_count": 2,
+                          "source_watermark_sha256": "c" * 64, "active_generation_id": None,
+                          "server_instance_id": "before", "build": {"fixture_sha256": "d" * 64}}
+            MODULE.atomic_private_json(arguments.checkpoint, checkpoint)
+            repeated = {**checkpoint, "reused_generation": True, "telemetry": {},
+                        "active_generation_before": None, "active_generation_after": None}
+            verified = {**checkpoint, "status": "verified", "intelligence_export": {},
+                        "query_seeds": [seed], "checks": {key: "PASS" for key in MODULE.CHECKS},
+                        "adapter_profile_id": "adapter", "analysis_profile_id": "analysis",
+                        "search_profile_id": "search"}
+            cases = [{"id": "1" * 64, "query": "reviewed positive query",
+                      "expected_path_sha256": MODULE.sha256_text("fixture.txt"),
+                      "expects_match": True},
+                     {"id": "2" * 64, "query": "reviewed negative query",
+                      "expected_path_sha256": "0" * 64, "expects_match": False}]
+            arguments.gold_suite, arguments.expected_gold_suite_sha256 = self.write_gold_suite(
+                directory, checkpoint, verified, cases)
+            empty = {"results": [], "took_ms": 1}
+            with patch.object(MODULE, "source_state", return_value={"server_instance_id": "after"}), \
+                 patch.object(MODULE, "validate_telemetry"), \
+                 patch.object(MODULE, "verify_intelligence", return_value={}), \
+                 patch.object(MODULE, "request", side_effect=[repeated, verified, current, storage,
+                                                             proof, current, current, empty, storage]) as request:
+                with self.assertRaisesRegex(RuntimeError, "candidate search"):
+                    MODULE.verify(arguments, "private-token")
+            self.assertEqual(request.call_count, 9)
+            self.assertFalse(any("dual-read" in call.args[3] or "qualify" in call.args[3]
+                                 for call in request.call_args_list))
+            artifact = json.loads(arguments.output.read_text())
+            self.assertEqual(artifact["status"], "FAIL")
+            self.assertEqual(artifact["gold_suite_summary"]["suite_sha256"],
+                             arguments.expected_gold_suite_sha256)
+            self.assertFalse(artifact["query_results"][-1]["quality_passed"])
+
+    def test_verify_checks_reserve_before_resume_build_post(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            arguments = Namespace(checkpoint=directory / "checkpoint.json",
+                                  output=directory / "result.json", source_id=1,
+                                  commit_sha="a" * 40, api_url="http://fixture.invalid",
+                                  pack_root=directory, minimum_free_bytes=50)
+            MODULE.atomic_private_json(arguments.checkpoint, {
+                "source_id": 1, "commit_sha": "a" * 40, "generation_seq": 1,
+                "server_instance_id": "before"})
+            with patch.object(MODULE, "source_state", return_value={"server_instance_id": "after"}), \
+                 patch.object(MODULE.shutil, "disk_usage", return_value=SimpleNamespace(free=49)), \
+                 patch.object(MODULE, "request") as request:
+                with self.assertRaisesRegex(RuntimeError, "before resume"):
+                    MODULE.verify(arguments, "private-token")
+            request.assert_not_called()
+            artifact = json.loads(arguments.output.read_text())
+            self.assertEqual(artifact["failed_gate"], "resource_before_resume")
+            self.assertEqual(artifact["free_bytes_before_resume"], 49)
 
     def test_proven_new_hits_may_not_displace_or_reorder_baseline_paths(self) -> None:
         seed, current, storage, evidence, checkpoint = self.coverage_fixture()
