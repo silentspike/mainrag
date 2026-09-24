@@ -48,6 +48,76 @@ other adapters, production RLS/migrations, search quality or all-source
 candidate acceptance. It does not turn the separate SQL microbenchmark into a
 passing aggregate baseline.
 
+## Actual-ingest frozen-corpus comparison
+
+The committed measured snapshot is
+[`baselines/supported-current-path.json`](baselines/supported-current-path.json).
+Its original tested commit and observations are preserved, not relabeled to
+the later evidence commit. See [the acceptance mapping](ACCEPTANCE-55.md) for
+the hosted run, exact artifact identity, coverage and non-claims. A future
+runtime/profile/schema change requires fresh measurements; this snapshot is
+not automatically current acceptance for another candidate package.
+
+On hosted CI or a qualified Rust build-server checkout, with an isolated
+`mainrag_index_fixture` database, `MAINRAG_CPU_MODE=true`, the explicit
+`MAINRAG_INDEX_TEST_DATABASE_URL`, pinned `TOKENIZER_ASSET_PATH`, Python
+`jsonschema` and Cargo available, one command runs the complete baseline:
+
+```bash
+bash eval/storage_v2/run_supported_baseline.sh \
+  supported-baseline.json EXACT_CHECKOUT_COMMIT hosted-ci-local-postgres
+```
+
+Do not run Cargo locally on hosts requiring remote Rust execution. The wrapper
+checks the checkout identity and read-only writer inventory before either
+fixture, requires clean tracked code before and after execution, then validates
+the two runs and their comparison. It does not
+create a general-purpose database or stop a live writer. The report retains
+the inventory names/classes/content hashes and its explicit external-writer
+limitation; an unaccounted writer blocks acceptance. Fixture command failures
+cannot pass merely because partial stdout contains a successful test summary.
+Private temporary capture files are removed after report generation; hosted
+fixture output and failed comparison artifacts remain in the CI run.
+
+The opt-in test
+`services::index::baseline_tests::postgres_supported_frozen_corpus_baseline`
+extends this path to all twelve checked-in corpus documents. It reconstructs
+stored file bodies, verifies unchanged chunk identity and measures actual
+source reads, parser calls and stored compressed chunk bytes. The eleven
+checked-in queries then run against a view over the **ingested chunks**, not
+preloaded document rows. Both this fixture and the older SQL microbenchmark
+use `current_path_query.sql`. Matched chunks and scored channel rows remain
+separate from the returned Top-10 list.
+
+CI runs two independent fixture processes, each with three query warmups and
+30 measured iterations per query. The first roundtrip is recorded separately;
+it is not an OS cold-cache claim. To validate their captured observations:
+
+```bash
+python3 eval/storage_v2/supported_baseline.py \
+  --log corpus-baseline-1.log --log corpus-baseline-2.log \
+  --code-sha EXACT_TESTED_COMMIT \
+  --execution-profile hosted-ci-local-postgres \
+  --output supported-baseline.json
+```
+
+The schema-validated report binds code, corpus, query suite/template, fixture
+definitions, observed schema columns, backend version, lexical asset and
+configuration. It reuses common Recall@10, MRR and latency helpers. Exact work
+and result identities must agree; warm p50/p95/p99 must each remain within the
+documented default 50% relative tolerance. Failures remain `FAIL`, produce a
+nonzero exit and are retained as CI artifacts. Missing/partial observations,
+zero tests, incomplete query suites and nonfinite timings cannot produce a
+passing report. Existing output files are never overwritten.
+
+The active lexical profile and legacy indexed lexical-version label are
+recorded separately: their existing default names differ. This measurement
+does not change tokenizer or indexing policy. Timing from the separate
+`remote-test-fixture-tunnel` profile includes its connection roundtrips and
+must not be compared directly with hosted local-PostgreSQL timings. This is
+actual current-path ingestion plus the measured PostgreSQL FTS query shape,
+not a full hybrid API, production schema/RLS or all-source cutover claim.
+
 This harness measures the repository's current PostgreSQL full-text query shape
 against a frozen public fixture. It is the baseline/comparison contract for
 storage-v2 work; it does not replace the broader golden-set ownership in

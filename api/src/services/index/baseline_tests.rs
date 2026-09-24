@@ -7,6 +7,9 @@ use tokio_postgres::NoTls;
 
 const CONTENT: &str = "pub fn baseline_helper() -> usize { 42 }\npub fn baseline_entry() -> usize { baseline_helper() }\n";
 
+#[path = "corpus_baseline.rs"]
+mod corpus;
+
 struct FixtureDirectory(std::path::PathBuf);
 
 impl Drop for FixtureDirectory {
@@ -16,7 +19,7 @@ impl Drop for FixtureDirectory {
     }
 }
 
-async fn exercise(client: &tokio_postgres::Client, pool: PostgresPool) -> anyhow::Result<()> {
+async fn create_schema(client: &tokio_postgres::Client) -> anyhow::Result<()> {
     client
         .batch_execute(include_str!("intelligence_retry_fixture.sql"))
         .await?;
@@ -32,6 +35,11 @@ async fn exercise(client: &tokio_postgres::Client, pool: PostgresPool) -> anyhow
          qdrant_point_count BIGINT, drift_count BIGINT, status TEXT, details TEXT);",
         )
         .await?;
+    Ok(())
+}
+
+async fn exercise(client: &tokio_postgres::Client, pool: PostgresPool) -> anyhow::Result<()> {
+    create_schema(client).await?;
     let path =
         std::env::temp_dir().join(format!("mainrag-ingest-baseline-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&path)?;
@@ -138,6 +146,16 @@ async fn exercise(client: &tokio_postgres::Client, pool: PostgresPool) -> anyhow
 #[tokio::test]
 #[ignore = "requires an explicitly isolated PostgreSQL fixture and CPU mode"]
 async fn postgres_supported_source_initial_and_repeat() -> anyhow::Result<()> {
+    run_fixture(false).await
+}
+
+#[tokio::test]
+#[ignore = "requires an explicitly isolated PostgreSQL fixture and CPU mode"]
+async fn postgres_supported_frozen_corpus_baseline() -> anyhow::Result<()> {
+    run_fixture(true).await
+}
+
+async fn run_fixture(frozen_corpus: bool) -> anyhow::Result<()> {
     ensure!(
         cpu_mode_enabled(),
         "CPU mode must be configured before starting the test process"
@@ -161,10 +179,13 @@ async fn postgres_supported_source_initial_and_repeat() -> anyhow::Result<()> {
     let pool = deadpool_postgres::Pool::builder(deadpool_postgres::Manager::new(config, NoTls))
         .max_size(4)
         .build()?;
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        exercise(&admin, pool.clone()),
-    )
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        if frozen_corpus {
+            corpus::exercise(&admin, pool.clone()).await
+        } else {
+            exercise(&admin, pool.clone()).await
+        }
+    })
     .await;
     pool.close();
     let cleanup = admin
