@@ -37,7 +37,10 @@ def source(source_id: int = 1) -> dict:
                          "status": "release_candidate", "item_count": 2,
                          "verification_manifest_sha256": "a" * 64,
                          "evidence_id": "fixture-evidence", "commit_sha": "b" * 40,
-                         "source_watermark_sha256": "c" * 64}],
+                         "source_watermark_sha256": "c" * 64,
+                         "qualification_manifest": {"status": "PASS", "checks": {}},
+                         "qualification_manifest_sha256": "d" * 64,
+                         "qualification_manifest_digest_matches": True}],
     }
 
 

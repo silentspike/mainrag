@@ -48,7 +48,11 @@ LEFT JOIN LATERAL (
         'verification_manifest_sha256', generation.verification_manifest_sha256,
         'evidence_id', evidence.id,
         'commit_sha', evidence.commit_sha,
-        'source_watermark_sha256', evidence.source_watermark_sha256
+        'source_watermark_sha256', evidence.source_watermark_sha256,
+        'qualification_manifest', evidence.manifest,
+        'qualification_manifest_sha256', encode(evidence.manifest_sha256, 'hex'),
+        'qualification_manifest_digest_matches',
+            evidence.manifest_sha256 = digest(convert_to(evidence.manifest::TEXT, 'UTF8'), 'sha256')
     ) ORDER BY generation.generation_seq) AS value
     FROM source_generation AS generation
     LEFT JOIN storage_v2_release_candidate_evidence AS evidence
@@ -158,7 +162,10 @@ def capture(rows: list[dict], operator_commit_sha: str) -> tuple[dict, dict]:
             generation_ids.add(generation_id)
             generation_sequences.add(generation_seq)
             if generation["status"] == "release_candidate" and not all(
-                generation.get(key) for key in ("evidence_id", "commit_sha", "source_watermark_sha256")
+                generation.get(key) for key in (
+                    "evidence_id", "commit_sha", "source_watermark_sha256",
+                    "qualification_manifest", "qualification_manifest_sha256",
+                )
             ):
                 raise RuntimeError("release candidate is missing qualification evidence")
             generation_counts[generation["status"]] += 1
