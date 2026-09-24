@@ -347,43 +347,9 @@ def setup_database(database: TemporaryPostgres, documents: list[tuple[str, bytes
 def query_sql(query_text: str, phrase: bool) -> str:
     constructor = "phraseto_tsquery" if phrase else "websearch_to_tsquery"
     query = sql_literal(query_text)
-    return f"""
-        WITH q AS (
-            SELECT
-                {constructor}('simple', {query}) AS simple_q,
-                {constructor}('english', {query}) AS english_q
-        ),
-        channel AS (
-            SELECT d.id, d.path,
-                   ts_rank_cd(d.fts_simple, q.simple_q, 1)::double precision AS score
-            FROM documents d CROSS JOIN q
-            WHERE d.fts_simple @@ q.simple_q
-            UNION ALL
-            SELECT d.id, d.path,
-                   (ts_rank_cd(d.fts_english, q.english_q, 1) * 0.8)::double precision AS score
-            FROM documents d CROSS JOIN q
-            WHERE d.fts_english @@ q.english_q
-        ),
-        grouped AS (
-            SELECT id, path, MAX(score) AS score
-            FROM channel
-            GROUP BY id, path
-        ),
-        top_results AS (
-            SELECT id, path, score
-            FROM grouped
-            ORDER BY score DESC, path ASC, id ASC
-            LIMIT 10
-        )
-        SELECT json_build_object(
-            'matched_documents', (SELECT COUNT(*) FROM grouped),
-            'scored_channel_rows', (SELECT COUNT(*) FROM channel),
-            'results', COALESCE(
-                (SELECT json_agg(path ORDER BY score DESC, path ASC, id ASC) FROM top_results),
-                '[]'::json
-            )
-        );
-    """
+    return (HERE / "current_path_query.sql").read_text(encoding="utf-8").format(
+        constructor=constructor, query=query
+    )
 
 
 def execute_query(database: PsqlSession, query: dict[str, Any]) -> tuple[dict[str, Any], float]:
