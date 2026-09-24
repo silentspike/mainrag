@@ -1,0 +1,814 @@
+{
+  "schema_version": "storage-v2-supported-comparison/v1",
+  "status": "PASS",
+  "maintenance_gate": {
+    "status": "PASS",
+    "mode": "read-only",
+    "checked_count": 22,
+    "checked": [
+      {
+        "path": "api/src/api/handlers/admin.rs",
+        "class": "api-entrypoint",
+        "sha256": "e4d7cac06251a30d24903e0ea7a6d1c82766f055d5e76f16329d3020ca2b46e6",
+        "status": "PASS"
+      },
+      {
+        "path": "api/src/api/handlers/watch.rs",
+        "class": "api-entrypoint",
+        "sha256": "3f3ba62ecde8466e609a62fd39921fd12f230e8b619ec90435af3f52e5c568e5",
+        "status": "PASS"
+      },
+      {
+        "path": "api/src/main.rs",
+        "class": "runtime-supervisor",
+        "sha256": "4807a106a37444d738f95eaa4128c844918cbc05bc696bb3ad96d7786f575975",
+        "status": "PASS"
+      },
+      {
+        "path": "api/src/services/index.rs",
+        "class": "runtime-writer",
+        "sha256": "11a57dcb743a4689061a63b5f736a0a284cc652b5e86668d4e3b4e521a24e8bc",
+        "status": "PASS"
+      },
+      {
+        "path": "api/src/services/index/intelligence_retry_tests.rs",
+        "class": "test-fixture-writer",
+        "sha256": "508290f55e76fd127ef81d8db3a986c236ef922480c106ba75df3fd0983c1232",
+        "status": "PASS"
+      },
+      {
+        "path": "api/src/services/index/baseline_tests.rs",
+        "class": "test-fixture-writer",
+        "sha256": "0616a7a30689241f3770150990159ebaab708e65d2c5fbc7870071af9263f27f",
+        "status": "PASS"
+      },
+      {
+        "path": "api/src/services/index/corpus_baseline.rs",
+        "class": "test-fixture-writer",
+        "sha256": "24995ec2c2c5a8039e82334bf05b84c4b2c5a2df14207e1948e8584d226eea56",
+        "status": "PASS"
+      },
+      {
+        "path": "api/src/services/intelligence.rs",
+        "class": "runtime-writer",
+        "sha256": "f0094d82093317b19bd57edb81181f655eac419d9daa43ee7244ee84b6963f9c",
+        "status": "PASS"
+      },
+      {
+        "path": "api/src/services/outbox_worker.rs",
+        "class": "runtime-writer",
+        "sha256": "111fcbbae58f7142d4f5d22ccb7a758230b6520061ba9dbf984902f3d608418d",
+        "status": "PASS"
+      },
+      {
+        "path": "api/src/services/qdrant.rs",
+        "class": "runtime-writer",
+        "sha256": "bcb81bc8be1b85f933bc06d6b389a9736ebfb708337b843192e15266f61ca76c",
+        "status": "PASS"
+      },
+      {
+        "path": "api/src/services/qdrant/bootstrap/tests.rs",
+        "class": "test-fixture-writer",
+        "sha256": "bd78a918d276d955cec05299bc20d6915e261f4495ec425f3aef4b6ddd095f70",
+        "status": "PASS"
+      },
+      {
+        "path": "api/src/services/query_expander.rs",
+        "class": "runtime-writer",
+        "sha256": "213fdb0b605d5338c6777eee3b722152aa02a72e4cae2f19a9e2a9054dfbe9b2",
+        "status": "PASS"
+      },
+      {
+        "path": "cli/src/client/api.rs",
+        "class": "operator-client",
+        "sha256": "f4fb087168aa269164616b5a18711fc29b96a693142821997d5dfe80aa4fe344",
+        "status": "PASS"
+      },
+      {
+        "path": "cli/src/commands/add.rs",
+        "class": "operator-entrypoint",
+        "sha256": "904ba4fe1f7c756f04d9a048ea59d6b51068061989f675b03d7f74b8378ef878",
+        "status": "PASS"
+      },
+      {
+        "path": "cli/src/commands/backfill.rs",
+        "class": "operator-entrypoint",
+        "sha256": "93576645b6e4f0e2be8668f9c77d97bf514870ddd0a0a1ec4407b2206f7a113f",
+        "status": "PASS"
+      },
+      {
+        "path": "cli/src/commands/source.rs",
+        "class": "operator-entrypoint",
+        "sha256": "f37fb0a19a19a6c904c5b00b35748548483832a9652e5329cd5a945f9a39eb61",
+        "status": "PASS"
+      },
+      {
+        "path": "cli/src/commands/watch.rs",
+        "class": "operator-entrypoint",
+        "sha256": "409f1b48fd8b88cdf86345ef3834787dc8867e7d46a55cd868579238045c76a4",
+        "status": "PASS"
+      },
+      {
+        "path": "ops/migration/import-mainrag.py",
+        "class": "migration-writer",
+        "sha256": "a1ebf20b07cfd9191f92f5b33a396f5b1c211f08bfda8e95445363e9926bcdca",
+        "status": "PASS"
+      },
+      {
+        "path": "scripts/backfill-visibility.py",
+        "class": "maintenance-writer",
+        "sha256": "6b13abf63ae40f30f2587e3c210dc3c4178e6f2280c881bcbe354a071e4e8145",
+        "status": "PASS"
+      },
+      {
+        "path": "scripts/load_synonyms_to_qdrant.py",
+        "class": "maintenance-writer",
+        "sha256": "760345a49fab8ca4ed40c85f6e2dbfffa3187c562dbdf84043f215c6dcc0df59",
+        "status": "PASS"
+      },
+      {
+        "path": "scripts/migrate-embeddings-gte.py",
+        "class": "maintenance-writer",
+        "sha256": "9ccb5a48d254b79d13763b79eaea7f2a6b6b88db62b042b197968631d8bc81ec",
+        "status": "PASS"
+      },
+      {
+        "path": "scripts/reembed-cch.py",
+        "class": "maintenance-writer",
+        "sha256": "af4e7bc69a7d77389df1e05e98a6f69437d1d6fc7903701640b640ed15775f89",
+        "status": "PASS"
+      }
+    ],
+    "limitations": "This inventory does not prove that unknown external writers do not exist and performs no service action.",
+    "required_operator_actions": [
+      "Confirm the inventory against the target environment.",
+      "Quiesce applicable writers through separately authorized operating procedures.",
+      "Re-run this read-only gate after the code revision or inventory changes."
+    ],
+    "errors": []
+  },
+  "timing_tolerance": 0.5,
+  "differences": [],
+  "runs": [
+    {
+      "schema_version": "storage-v2-supported-baseline/v1",
+      "status": "PASS",
+      "recorded_at": "2026-09-24T17:44:19.905374+00:00",
+      "code_sha": "871dfec180618b0c92ffc0bb0992dd25430387a9",
+      "execution_profile": "hosted-ci-local-postgres",
+      "subject": {
+        "corpus_sha256": "4bfb8ce2bbd58abccc0c38d5a92c9c2f6fc153e8f311e06ad6c4ebacdc3e06b0",
+        "corpus_items": 12,
+        "query_set_sha256": "239d4dbbc89b4b331899a6046d1a34bc80c5e8f602ddc799642c975fd779efaa",
+        "query_sql_sha256": "4fd80b9fe220ce1d74e7958c4db08755cc54050e99c1126c8250f226b4983ea1",
+        "schema_columns_sha256": "730bd6322dfa47eff5921de6c3e1d6e4eb34febb1e26ad963ffcbb0ee9e0963c",
+        "fixture_definition_sha256": "6adc7a5d8b7fa6cc0c1bd96937207fa3d01584173846d91f390717067e154c87",
+        "backend_version": "18.6 (Debian 18.6-1.pgdg13+2)"
+      },
+      "configuration": {
+        "active_lexical_profile": "hf_bge_wordpiece",
+        "chunker": "semantic",
+        "chunker_version": "semantic-v1",
+        "concurrency": 1,
+        "cpu_mode": true,
+        "embedding_model_id": "BAAI/bge-base-en-v1.5",
+        "indexed_lexical_version": "hf_bge_wordpiece",
+        "lexical_asset_sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+        "measured_iterations_per_query": 30,
+        "warmups_per_query": 3
+      },
+      "ingest": [
+        {
+          "chunk_compressed_bytes": 1826,
+          "chunks_created": 12,
+          "elapsed_ms": 475.42915200000004,
+          "errors": 0,
+          "files_processed": 12,
+          "files_skipped": 0,
+          "logical_input_bytes": 2576,
+          "phase": "initial",
+          "source_io": {
+            "adapter_read_bytes": 5152,
+            "content_read_coverage": "COMPLETE",
+            "deferred_read_bytes": 0,
+            "device_read_bytes": null,
+            "excluded": [
+              "filesystem_metadata",
+              "walker_configuration",
+              "pack_reads",
+              "device_io"
+            ],
+            "total_content_read_bytes": 5152
+          },
+          "status": "PASS",
+          "work": {
+            "chunker_calls": 12,
+            "intelligence_parser_calls": 12
+          }
+        },
+        {
+          "chunk_compressed_bytes": 1826,
+          "chunks_created": 0,
+          "elapsed_ms": 29.150873,
+          "errors": 0,
+          "files_processed": 0,
+          "files_skipped": 12,
+          "logical_input_bytes": 2576,
+          "phase": "unchanged",
+          "source_io": {
+            "adapter_read_bytes": 5152,
+            "content_read_coverage": "COMPLETE",
+            "deferred_read_bytes": 0,
+            "device_read_bytes": null,
+            "excluded": [
+              "filesystem_metadata",
+              "walker_configuration",
+              "pack_reads",
+              "device_io"
+            ],
+            "total_content_read_bytes": 5152
+          },
+          "status": "PASS",
+          "work": {
+            "chunker_calls": 0,
+            "intelligence_parser_calls": 0
+          }
+        }
+      ],
+      "stable_chunk_count": 12,
+      "queries": [
+        {
+          "id": "and-generation",
+          "results": [
+            "generations.md",
+            "mutable-decoy.md"
+          ],
+          "matched_chunks": 2,
+          "scored_channel_rows": 4,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 3.051428,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.105,
+            "p95_ms": 1.145,
+            "p99_ms": 1.153,
+            "min_ms": 1.064,
+            "max_ms": 1.155
+          }
+        },
+        {
+          "id": "or-storage-generation",
+          "results": [
+            "storage.md",
+            "generations.md"
+          ],
+          "matched_chunks": 2,
+          "scored_channel_rows": 4,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.16143,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.127,
+            "p95_ms": 1.149,
+            "p99_ms": 1.15,
+            "min_ms": 1.099,
+            "max_ms": 1.15
+          }
+        },
+        {
+          "id": "not-mutable",
+          "results": [
+            "generations.md",
+            "authorization.md",
+            "migration.md"
+          ],
+          "matched_chunks": 3,
+          "scored_channel_rows": 6,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.1346100000000001,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.121,
+            "p95_ms": 1.145,
+            "p99_ms": 1.151,
+            "min_ms": 1.099,
+            "max_ms": 1.153
+          }
+        },
+        {
+          "id": "phrase-activation",
+          "results": [
+            "generations.md"
+          ],
+          "matched_chunks": 1,
+          "scored_channel_rows": 2,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.145791,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.098,
+            "p95_ms": 1.12,
+            "p99_ms": 1.122,
+            "min_ms": 1.073,
+            "max_ms": 1.123
+          }
+        },
+        {
+          "id": "grouped-storage",
+          "results": [
+            "storage.md"
+          ],
+          "matched_chunks": 1,
+          "scored_channel_rows": 2,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.098783,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.107,
+            "p95_ms": 1.13,
+            "p99_ms": 1.13,
+            "min_ms": 1.077,
+            "max_ms": 1.13
+          }
+        },
+        {
+          "id": "exact-identifier",
+          "results": [
+            "generations.md"
+          ],
+          "matched_chunks": 1,
+          "scored_channel_rows": 2,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.111697,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.116,
+            "p95_ms": 1.173,
+            "p99_ms": 1.189,
+            "min_ms": 1.061,
+            "max_ms": 1.194
+          }
+        },
+        {
+          "id": "authorization-isolation",
+          "results": [
+            "authorization.md"
+          ],
+          "matched_chunks": 1,
+          "scored_channel_rows": 2,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.1609800000000001,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.136,
+            "p95_ms": 1.175,
+            "p99_ms": 1.178,
+            "min_ms": 1.094,
+            "max_ms": 1.178
+          }
+        },
+        {
+          "id": "complete-fallback",
+          "results": [
+            "search.md"
+          ],
+          "matched_chunks": 1,
+          "scored_channel_rows": 2,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.173803,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.136,
+            "p95_ms": 1.183,
+            "p99_ms": 1.192,
+            "min_ms": 1.108,
+            "max_ms": 1.193
+          }
+        },
+        {
+          "id": "legacy-split-merge",
+          "results": [
+            "legacy.md"
+          ],
+          "matched_chunks": 1,
+          "scored_channel_rows": 2,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.1231380000000002,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.112,
+            "p95_ms": 1.148,
+            "p99_ms": 1.217,
+            "min_ms": 1.081,
+            "max_ms": 1.243
+          }
+        },
+        {
+          "id": "common-source",
+          "results": [
+            "common-beta.md",
+            "common-alpha.md",
+            "generations.md",
+            "authorization.md"
+          ],
+          "matched_chunks": 4,
+          "scored_channel_rows": 8,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.1386479999999999,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.102,
+            "p95_ms": 1.128,
+            "p99_ms": 1.134,
+            "min_ms": 1.083,
+            "max_ms": 1.134
+          }
+        },
+        {
+          "id": "negative-no-match",
+          "results": [],
+          "matched_chunks": 0,
+          "scored_channel_rows": 0,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.0929410000000002,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.085,
+            "p95_ms": 1.112,
+            "p99_ms": 1.144,
+            "min_ms": 1.056,
+            "max_ms": 1.155
+          }
+        }
+      ],
+      "warm_latency": {
+        "samples": 330,
+        "p50_ms": 1.112,
+        "p95_ms": 1.16,
+        "p99_ms": 1.186,
+        "min_ms": 1.056,
+        "max_ms": 1.243
+      },
+      "result_identity_sha256": "99b3e51ddc23b6f4ceae1ac3cc087a41f888b4959659ec07fa262148a063eab4",
+      "limitations": [
+        "Minimal fixture schema; no production migration or RLS acceptance.",
+        "Measured FTS query shape over actual persisted chunks; not full hybrid API search.",
+        "Eager filesystem CPU-mode only; no streaming or other-adapter acceptance.",
+        "First query roundtrip is not an operating-system cold-cache proof.",
+        "Content reads exclude metadata, walker configuration, pack reads and device I/O."
+      ]
+    },
+    {
+      "schema_version": "storage-v2-supported-baseline/v1",
+      "status": "PASS",
+      "recorded_at": "2026-09-24T17:44:19.907734+00:00",
+      "code_sha": "871dfec180618b0c92ffc0bb0992dd25430387a9",
+      "execution_profile": "hosted-ci-local-postgres",
+      "subject": {
+        "corpus_sha256": "4bfb8ce2bbd58abccc0c38d5a92c9c2f6fc153e8f311e06ad6c4ebacdc3e06b0",
+        "corpus_items": 12,
+        "query_set_sha256": "239d4dbbc89b4b331899a6046d1a34bc80c5e8f602ddc799642c975fd779efaa",
+        "query_sql_sha256": "4fd80b9fe220ce1d74e7958c4db08755cc54050e99c1126c8250f226b4983ea1",
+        "schema_columns_sha256": "730bd6322dfa47eff5921de6c3e1d6e4eb34febb1e26ad963ffcbb0ee9e0963c",
+        "fixture_definition_sha256": "6adc7a5d8b7fa6cc0c1bd96937207fa3d01584173846d91f390717067e154c87",
+        "backend_version": "18.6 (Debian 18.6-1.pgdg13+2)"
+      },
+      "configuration": {
+        "active_lexical_profile": "hf_bge_wordpiece",
+        "chunker": "semantic",
+        "chunker_version": "semantic-v1",
+        "concurrency": 1,
+        "cpu_mode": true,
+        "embedding_model_id": "BAAI/bge-base-en-v1.5",
+        "indexed_lexical_version": "hf_bge_wordpiece",
+        "lexical_asset_sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+        "measured_iterations_per_query": 30,
+        "warmups_per_query": 3
+      },
+      "ingest": [
+        {
+          "chunk_compressed_bytes": 1826,
+          "chunks_created": 12,
+          "elapsed_ms": 478.26572600000003,
+          "errors": 0,
+          "files_processed": 12,
+          "files_skipped": 0,
+          "logical_input_bytes": 2576,
+          "phase": "initial",
+          "source_io": {
+            "adapter_read_bytes": 5152,
+            "content_read_coverage": "COMPLETE",
+            "deferred_read_bytes": 0,
+            "device_read_bytes": null,
+            "excluded": [
+              "filesystem_metadata",
+              "walker_configuration",
+              "pack_reads",
+              "device_io"
+            ],
+            "total_content_read_bytes": 5152
+          },
+          "status": "PASS",
+          "work": {
+            "chunker_calls": 12,
+            "intelligence_parser_calls": 12
+          }
+        },
+        {
+          "chunk_compressed_bytes": 1826,
+          "chunks_created": 0,
+          "elapsed_ms": 29.87076,
+          "errors": 0,
+          "files_processed": 0,
+          "files_skipped": 12,
+          "logical_input_bytes": 2576,
+          "phase": "unchanged",
+          "source_io": {
+            "adapter_read_bytes": 5152,
+            "content_read_coverage": "COMPLETE",
+            "deferred_read_bytes": 0,
+            "device_read_bytes": null,
+            "excluded": [
+              "filesystem_metadata",
+              "walker_configuration",
+              "pack_reads",
+              "device_io"
+            ],
+            "total_content_read_bytes": 5152
+          },
+          "status": "PASS",
+          "work": {
+            "chunker_calls": 0,
+            "intelligence_parser_calls": 0
+          }
+        }
+      ],
+      "stable_chunk_count": 12,
+      "queries": [
+        {
+          "id": "and-generation",
+          "results": [
+            "generations.md",
+            "mutable-decoy.md"
+          ],
+          "matched_chunks": 2,
+          "scored_channel_rows": 4,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 2.927887,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.155,
+            "p95_ms": 1.215,
+            "p99_ms": 1.262,
+            "min_ms": 1.1,
+            "max_ms": 1.275
+          }
+        },
+        {
+          "id": "or-storage-generation",
+          "results": [
+            "storage.md",
+            "generations.md"
+          ],
+          "matched_chunks": 2,
+          "scored_channel_rows": 4,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.168264,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.157,
+            "p95_ms": 1.2,
+            "p99_ms": 1.206,
+            "min_ms": 1.133,
+            "max_ms": 1.207
+          }
+        },
+        {
+          "id": "not-mutable",
+          "results": [
+            "generations.md",
+            "authorization.md",
+            "migration.md"
+          ],
+          "matched_chunks": 3,
+          "scored_channel_rows": 6,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.178933,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.152,
+            "p95_ms": 1.195,
+            "p99_ms": 1.199,
+            "min_ms": 1.12,
+            "max_ms": 1.2
+          }
+        },
+        {
+          "id": "phrase-activation",
+          "results": [
+            "generations.md"
+          ],
+          "matched_chunks": 1,
+          "scored_channel_rows": 2,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.197168,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.13,
+            "p95_ms": 1.185,
+            "p99_ms": 1.195,
+            "min_ms": 1.111,
+            "max_ms": 1.195
+          }
+        },
+        {
+          "id": "grouped-storage",
+          "results": [
+            "storage.md"
+          ],
+          "matched_chunks": 1,
+          "scored_channel_rows": 2,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.122046,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.149,
+            "p95_ms": 1.25,
+            "p99_ms": 1.27,
+            "min_ms": 1.114,
+            "max_ms": 1.277
+          }
+        },
+        {
+          "id": "exact-identifier",
+          "results": [
+            "generations.md"
+          ],
+          "matched_chunks": 1,
+          "scored_channel_rows": 2,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.143727,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.146,
+            "p95_ms": 1.17,
+            "p99_ms": 1.177,
+            "min_ms": 1.119,
+            "max_ms": 1.18
+          }
+        },
+        {
+          "id": "authorization-isolation",
+          "results": [
+            "authorization.md"
+          ],
+          "matched_chunks": 1,
+          "scored_channel_rows": 2,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.126204,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.135,
+            "p95_ms": 1.175,
+            "p99_ms": 1.197,
+            "min_ms": 1.077,
+            "max_ms": 1.202
+          }
+        },
+        {
+          "id": "complete-fallback",
+          "results": [
+            "search.md"
+          ],
+          "matched_chunks": 1,
+          "scored_channel_rows": 2,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.15591,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.148,
+            "p95_ms": 1.175,
+            "p99_ms": 1.18,
+            "min_ms": 1.119,
+            "max_ms": 1.181
+          }
+        },
+        {
+          "id": "legacy-split-merge",
+          "results": [
+            "legacy.md"
+          ],
+          "matched_chunks": 1,
+          "scored_channel_rows": 2,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.149688,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.134,
+            "p95_ms": 1.159,
+            "p99_ms": 1.163,
+            "min_ms": 1.108,
+            "max_ms": 1.164
+          }
+        },
+        {
+          "id": "common-source",
+          "results": [
+            "common-beta.md",
+            "common-alpha.md",
+            "generations.md",
+            "authorization.md"
+          ],
+          "matched_chunks": 4,
+          "scored_channel_rows": 8,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.155378,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.146,
+            "p95_ms": 1.184,
+            "p99_ms": 1.403,
+            "min_ms": 1.118,
+            "max_ms": 1.49
+          }
+        },
+        {
+          "id": "negative-no-match",
+          "results": [],
+          "matched_chunks": 0,
+          "scored_channel_rows": 0,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "status": "PASS",
+          "first_ms": 1.135711,
+          "warm_latency": {
+            "samples": 30,
+            "p50_ms": 1.123,
+            "p95_ms": 1.198,
+            "p99_ms": 1.246,
+            "min_ms": 1.092,
+            "max_ms": 1.259
+          }
+        }
+      ],
+      "warm_latency": {
+        "samples": 330,
+        "p50_ms": 1.143,
+        "p95_ms": 1.194,
+        "p99_ms": 1.257,
+        "min_ms": 1.077,
+        "max_ms": 1.49
+      },
+      "result_identity_sha256": "99b3e51ddc23b6f4ceae1ac3cc087a41f888b4959659ec07fa262148a063eab4",
+      "limitations": [
+        "Minimal fixture schema; no production migration or RLS acceptance.",
+        "Measured FTS query shape over actual persisted chunks; not full hybrid API search.",
+        "Eager filesystem CPU-mode only; no streaming or other-adapter acceptance.",
+        "First query roundtrip is not an operating-system cold-cache proof.",
+        "Content reads exclude metadata, walker configuration, pack reads and device I/O."
+      ]
+    }
+  ]
+}

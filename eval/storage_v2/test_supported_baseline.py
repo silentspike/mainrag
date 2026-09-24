@@ -54,6 +54,14 @@ def comparison_report(runs):
 
 
 class SupportedBaselineTests(unittest.TestCase):
+    def test_committed_supported_baseline_is_valid_measured_evidence(self):
+        report = json.loads((harness.HERE / "baselines/supported-current-path.json").read_text())
+        baseline.validate_report(report)
+        self.assertEqual(report["status"], "PASS")
+        self.assertEqual(len(report["runs"]), 2)
+        self.assertEqual(report["runs"][0]["result_identity_sha256"], report["runs"][1]["result_identity_sha256"])
+        self.assertTrue(all(len(run["queries"]) == 11 and run["warm_latency"]["samples"] == 330 for run in report["runs"]))
+
     def test_inventory_failure_blocks_otherwise_passing_runs(self):
         run = self.summarize()
         report = comparison_report([run, copy.deepcopy(run)])
