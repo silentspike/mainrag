@@ -147,9 +147,27 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def prebuild_pack_capacity(arguments: argparse.Namespace) -> dict[str, int]:
+    """Leave the approved pack reserve intact even at estimated peak build use."""
+    if arguments.minimum_free_bytes < 0 or arguments.maximum_build_bytes <= 0:
+        raise RuntimeError("pack reserve and maximum build estimate must be valid")
+    if not arguments.pack_root.is_dir():
+        raise RuntimeError("pack root is not an existing directory")
+    free_bytes = shutil.disk_usage(arguments.pack_root).free
+    required_bytes = arguments.minimum_free_bytes + arguments.maximum_build_bytes
+    if free_bytes < required_bytes:
+        raise RuntimeError("insufficient pack capacity before candidate build")
+    return {
+        "free_bytes_before_build": free_bytes,
+        "minimum_free_bytes": arguments.minimum_free_bytes,
+        "maximum_build_bytes": arguments.maximum_build_bytes,
+    }
+
+
 def build(arguments: argparse.Namespace, token: str) -> None:
     if arguments.checkpoint.exists() or arguments.checkpoint.is_symlink():
         raise RuntimeError("checkpoint already exists; preserve it and use verify")
+    pack_capacity = prebuild_pack_capacity(arguments)
     result = request(
         arguments.api_url,
         token,
@@ -174,6 +192,7 @@ def build(arguments: argparse.Namespace, token: str) -> None:
         "item_count": int(result["item_count"]),
         "server_instance_id": state["server_instance_id"],
         "active_generation_id": state["active_generation_id"],
+        "pack_capacity_before_build": pack_capacity,
         "build": result,
         "captured_at_unix": int(time.time()),
     }
@@ -735,12 +754,18 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--pack-root", type=Path, default=Path("/data/mainrag/storage-v2-66/packs"))
     parser.add_argument("--minimum-free-bytes", type=int, default=40 * 1024**3)
+    parser.add_argument("--maximum-build-bytes", type=int)
     parser.add_argument("--max-query-ms", type=int, default=2000)
     arguments = parser.parse_args()
     if len(arguments.commit_sha) != 40 or any(c not in "0123456789abcdef" for c in arguments.commit_sha):
         parser.error("--commit-sha must be a full lowercase Git SHA")
     if arguments.phase == "verify" and arguments.output is None:
         parser.error("verify requires --output")
+    if arguments.phase == "build" and (arguments.maximum_build_bytes is None or
+                                       arguments.maximum_build_bytes <= 0):
+        parser.error("build requires a positive --maximum-build-bytes estimate")
+    if arguments.minimum_free_bytes < 0:
+        parser.error("--minimum-free-bytes must be non-negative")
     token = os.environ.get(arguments.token_env)
     if not token:
         parser.error(f"token environment variable {arguments.token_env} is empty")
