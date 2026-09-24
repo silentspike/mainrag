@@ -671,10 +671,10 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
     ):
         if verified["checks"].get(name) != "PASS":
             raise RuntimeError(f"server verification did not pass {name}")
-    evidence_id = str(uuid.uuid5(
-        uuid.NAMESPACE_URL,
-        f"mainrag:storage-v2:rc:{arguments.source_id}:{checkpoint['generation_id']}:{arguments.commit_sha}",
-    ))
+    # This identifier may leave the protected environment. Keep it independent
+    # of enumerable source/generation IDs and retain it in failure evidence
+    # before the qualification POST so an unknown outcome can be reconciled.
+    evidence_id = str(uuid.uuid4())
     qualification = {
         "evidence_id": evidence_id,
         "generation_id": checkpoint["generation_id"],
