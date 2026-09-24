@@ -169,6 +169,9 @@ mod chunk_reuse_tests;
 #[cfg(test)]
 mod intelligence_retry_tests;
 
+#[cfg(test)]
+mod baseline_tests;
+
 /// Max length for CCH (Contextual Chunk Header) prefix
 #[allow(dead_code)]
 const CCH_MAX_LENGTH: usize = 300;
