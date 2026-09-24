@@ -13,6 +13,7 @@ import urllib.error
 import uuid
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -33,6 +34,7 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
         references = []
         with tempfile.TemporaryDirectory() as temporary, \
              patch.object(MODULE, "request", return_value=result), \
+             patch.object(MODULE.shutil, "disk_usage", return_value=SimpleNamespace(free=100)), \
              patch.object(MODULE, "source_state", return_value={
                  "server_instance_id": "fixture", "active_generation_id": None}), \
              patch.object(MODULE, "validate_telemetry"), \
@@ -41,7 +43,9 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
             for index in range(2):
                 checkpoint = Path(temporary) / f"checkpoint-{index}.json"
                 arguments = Namespace(api_url="http://fixture.invalid", source_id=1,
-                                      commit_sha="a" * 40, checkpoint=checkpoint)
+                                      commit_sha="a" * 40, checkpoint=checkpoint,
+                                      pack_root=Path(temporary), minimum_free_bytes=50,
+                                      maximum_build_bytes=30)
                 MODULE.build(arguments, "private-token")
                 value = json.loads(checkpoint.read_text())
                 references.append(value["source_ref"])
@@ -49,11 +53,42 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                 self.assertNotEqual(value["source_ref"], MODULE.sha256_text("mainrag.issue-66.source:1"))
                 self.assertEqual(json.loads(output.call_args.args[0])["source_ref"], value["source_ref"])
                 self.assertEqual(stat.S_IMODE(checkpoint.stat().st_mode), 0o600)
+                self.assertEqual(value["pack_capacity_before_build"], {
+                    "free_bytes_before_build": 100, "minimum_free_bytes": 50,
+                    "maximum_build_bytes": 30})
                 original = checkpoint.read_bytes()
                 with self.assertRaisesRegex(RuntimeError, "checkpoint already exists"):
                     MODULE.build(arguments, "private-token")
                 self.assertEqual(checkpoint.read_bytes(), original)
         self.assertNotEqual(*references)
+
+    def test_build_rejects_insufficient_pack_capacity_before_post(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(MODULE.shutil, "disk_usage", return_value=SimpleNamespace(free=79)), \
+             patch.object(MODULE, "request") as request:
+            checkpoint = Path(temporary) / "checkpoint.json"
+            arguments = Namespace(api_url="http://fixture.invalid", source_id=1,
+                                  commit_sha="a" * 40, checkpoint=checkpoint,
+                                  pack_root=Path(temporary), minimum_free_bytes=50,
+                                  maximum_build_bytes=30)
+            with self.assertRaisesRegex(RuntimeError, "insufficient pack capacity"):
+                MODULE.build(arguments, "private-token")
+            request.assert_not_called()
+            self.assertFalse(checkpoint.exists())
+
+    def test_build_rejects_missing_estimate_and_pack_root_before_post(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, patch.object(MODULE, "request") as request:
+            arguments = Namespace(api_url="http://fixture.invalid", source_id=1,
+                                  commit_sha="a" * 40, checkpoint=Path(temporary) / "checkpoint.json",
+                                  pack_root=Path(temporary), minimum_free_bytes=50,
+                                  maximum_build_bytes=0)
+            with self.assertRaisesRegex(RuntimeError, "maximum build estimate"):
+                MODULE.build(arguments, "private-token")
+            arguments.maximum_build_bytes = 30
+            arguments.pack_root = Path(temporary) / "missing"
+            with self.assertRaisesRegex(RuntimeError, "pack root"):
+                MODULE.build(arguments, "private-token")
+            request.assert_not_called()
 
     def test_http_error_does_not_expose_protected_response_body(self) -> None:
         error = urllib.error.HTTPError("http://fixture.invalid", 409, "conflict", {},
