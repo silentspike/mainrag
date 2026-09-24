@@ -50,6 +50,14 @@ passing aggregate baseline.
 
 ## Actual-ingest frozen-corpus comparison
 
+The committed measured snapshot is
+[`baselines/supported-current-path.json`](baselines/supported-current-path.json).
+Its original tested commit and observations are preserved, not relabeled to
+the later evidence commit. See [the acceptance mapping](ACCEPTANCE-55.md) for
+the hosted run, exact artifact identity, coverage and non-claims. A future
+runtime/profile/schema change requires fresh measurements; this snapshot is
+not automatically current acceptance for another candidate package.
+
 On hosted CI or a qualified Rust build-server checkout, with an isolated
 `mainrag_index_fixture` database, `MAINRAG_CPU_MODE=true`, the explicit
 `MAINRAG_INDEX_TEST_DATABASE_URL`, pinned `TOKENIZER_ASSET_PATH`, Python
