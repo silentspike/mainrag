@@ -162,11 +162,31 @@ python3 ops/storage-v2/candidate-inventory.py \
 
 The output file is create-only and mode 0600. It contains private source
 registration, configuration, benchmark classification, active pointers and
-generation/evidence identities. Standard output contains only counts, random
+generation/evidence identities, including persisted qualification manifests and
+their database-recomputed digest comparisons. Standard output contains only counts, random
 opaque source references and a digest of the protected snapshot. The command
 does not read source content, certify a current adapter watermark or qualify any
 candidate. Refresh writer, source, resource and installed-package state before
 each source run; the snapshot alone is not an acceptance gate.
+
+Audit that snapshot without printing its private source or manifest data:
+
+```bash
+python3 ops/storage-v2/candidate-aggregate-audit.py \
+  --inventory PROTECTED_INVENTORY \
+  --expected-inventory-sha256 REVIEWED_INVENTORY_SHA256 \
+  --protected-output PROTECTED_AGGREGATE_AUDIT
+```
+
+The audit creates a mode-0600, create-only per-source blocker report. Standard
+output contains only counts, blocker classes and protected artifact hashes. It
+checks current candidate presence, persisted PASS labels, qualification-manifest
+digest consistency, benchmark classification and gold-suite binding. Its status
+remains `BLOCKED` even when those persisted shapes are complete: a database
+snapshot cannot prove current adapter watermarks, writer state, package identity,
+representative gold review, per-class aggregate quality, resource/recovery
+budget, benchmark results, or unchanged legacy state. Those external gates need
+their own current evidence before a candidate-set manifest can be accepted.
 
 Run construction only with an exact deployed commit and the protected inventory:
 
