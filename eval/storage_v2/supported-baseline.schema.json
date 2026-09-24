@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Actual current-path public fixture baseline comparison",
+  "type": "object", "additionalProperties": false,
+  "required": ["status", "timing_tolerance", "differences", "runs"],
+  "properties": {
+    "status": {"enum": ["PASS", "FAIL", "BLOCKED", "SKIP", "NOT_RUN"]},
+    "timing_tolerance": {"type": "number", "minimum": 0, "maximum": 5},
+    "differences": {"type": "array", "items": {"type": "string"}},
+    "runs": {"type": "array", "maxItems": 2, "items": {"$ref": "#/$defs/run"}}
+  },
+  "$defs": {
+    "count": {"type": "integer", "minimum": 0},
+    "duration": {"type": "number", "minimum": 0},
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "latency": {
+      "type": "object", "additionalProperties": false,
+      "required": ["samples", "p50_ms", "p95_ms", "p99_ms", "min_ms", "max_ms"],
+      "properties": {
+        "samples": {"type": "integer", "minimum": 30},
+        "p50_ms": {"$ref": "#/$defs/duration"}, "p95_ms": {"$ref": "#/$defs/duration"},
+        "p99_ms": {"$ref": "#/$defs/duration"}, "min_ms": {"$ref": "#/$defs/duration"}, "max_ms": {"$ref": "#/$defs/duration"}
+      }
+    },
+    "ingest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["phase", "status", "logical_input_bytes", "source_io", "work", "files_processed", "files_skipped", "chunks_created", "chunk_compressed_bytes", "elapsed_ms", "errors"],
+      "properties": {
+        "phase": {"enum": ["initial", "unchanged"]}, "status": {"const": "PASS"},
+        "logical_input_bytes": {"$ref": "#/$defs/count"},
+        "files_processed": {"$ref": "#/$defs/count"}, "files_skipped": {"$ref": "#/$defs/count"},
+        "chunks_created": {"$ref": "#/$defs/count"}, "chunk_compressed_bytes": {"type": "integer", "minimum": 1},
+        "elapsed_ms": {"$ref": "#/$defs/duration"}, "errors": {"const": 0},
+        "work": {
+          "type": "object", "additionalProperties": false,
+          "required": ["chunker_calls", "intelligence_parser_calls"],
+          "properties": {"chunker_calls": {"$ref": "#/$defs/count"}, "intelligence_parser_calls": {"$ref": "#/$defs/count"}}
+        },
+        "source_io": {
+          "type": "object", "additionalProperties": false,
+          "required": ["adapter_read_bytes", "deferred_read_bytes", "total_content_read_bytes", "device_read_bytes", "content_read_coverage", "excluded"],
+          "properties": {
+            "adapter_read_bytes": {"$ref": "#/$defs/count"}, "deferred_read_bytes": {"const": 0},
+            "total_content_read_bytes": {"$ref": "#/$defs/count"}, "device_read_bytes": {"type": "null"},
+            "content_read_coverage": {"const": "COMPLETE"},
+            "excluded": {"const": ["filesystem_metadata", "walker_configuration", "pack_reads", "device_io"]}
+          }
+        }
+      }
+    },
+    "query": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "results", "matched_chunks", "scored_channel_rows", "recall_at_10", "mrr_at_10", "status", "first_ms", "warm_latency"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1}, "results": {"type": "array", "maxItems": 10, "items": {"type": "string"}},
+        "matched_chunks": {"$ref": "#/$defs/count"}, "scored_channel_rows": {"$ref": "#/$defs/count"},
+        "recall_at_10": {"type": "number", "minimum": 0, "maximum": 1},
+        "mrr_at_10": {"type": "number", "minimum": 0, "maximum": 1},
+        "status": {"enum": ["PASS", "FAIL"]}, "first_ms": {"$ref": "#/$defs/duration"},
+        "warm_latency": {"$ref": "#/$defs/latency"}
+      }
+    },
+    "run": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "status", "recorded_at", "code_sha", "execution_profile", "subject", "configuration", "ingest", "stable_chunk_count", "queries", "warm_latency", "result_identity_sha256", "limitations"],
+      "properties": {
+        "schema_version": {"const": "storage-v2-supported-baseline/v1"}, "status": {"enum": ["PASS", "FAIL"]},
+        "recorded_at": {"type": "string", "format": "date-time"}, "code_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "execution_profile": {"enum": ["hosted-ci-local-postgres", "remote-test-fixture-tunnel"]},
+        "subject": {
+          "type": "object", "additionalProperties": false,
+          "required": ["corpus_sha256", "corpus_items", "query_set_sha256", "query_sql_sha256", "schema_columns_sha256", "fixture_definition_sha256", "backend_version"],
+          "properties": {
+            "corpus_sha256": {"$ref": "#/$defs/sha"}, "corpus_items": {"type": "integer", "minimum": 1},
+            "query_set_sha256": {"$ref": "#/$defs/sha"}, "query_sql_sha256": {"$ref": "#/$defs/sha"},
+            "schema_columns_sha256": {"$ref": "#/$defs/sha"}, "backend_version": {"type": "string", "minLength": 1}
+            , "fixture_definition_sha256": {"$ref": "#/$defs/sha"}
+          }
+        },
+        "configuration": {
+          "const": {"cpu_mode": true, "chunker": "semantic", "chunker_version": "semantic-v1", "active_lexical_profile": "hf_bge_wordpiece", "indexed_lexical_version": "tiktoken-cl100k", "embedding_model_id": "BAAI/bge-base-en-v1.5", "lexical_asset_sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66", "warmups_per_query": 3, "measured_iterations_per_query": 30, "concurrency": 1}
+        },
+        "ingest": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/ingest"}},
+        "stable_chunk_count": {"type": "integer", "minimum": 1},
+        "queries": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/query"}},
+        "warm_latency": {"$ref": "#/$defs/latency"}, "result_identity_sha256": {"$ref": "#/$defs/sha"},
+        "limitations": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+      }
+    }
+  }
+}

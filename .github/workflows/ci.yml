@@ -203,6 +203,34 @@ jobs:
           cargo test -p mainrag-api --lib chunk_reuse_tests -- --nocapture | tee chunk-reuse-tests.log
           python3 -c 'from pathlib import Path; assert "4 passed; 0 failed; 1 ignored;" in Path("chunk-reuse-tests.log").read_text(), "Expected all four chunk reuse regressions and the opt-in benchmark"'
 
+      - name: Measure and compare the supported frozen-corpus baseline
+        shell: bash
+        env:
+          MAINRAG_INDEX_TEST_DATABASE_URL: postgres://fixture:fixture_only@localhost:5432/mainrag_index_fixture
+          MAINRAG_CPU_MODE: 'true'
+          TOKENIZER_ASSET_PATH: ${{ runner.temp }}/chunk-reuse-tokenizer.json
+        run: |
+          for attempt in 1 2; do
+            cargo test -p mainrag-api --lib services::index::baseline_tests::postgres_supported_frozen_corpus_baseline -- --ignored --exact --nocapture | tee "corpus-baseline-${attempt}.log"
+          done
+      - name: Validate supported-path observations without hiding missing runs
+        if: always()
+        shell: bash
+        run: |
+          python3 -m pip install --disable-pip-version-check jsonschema
+          python3 eval/storage_v2/supported_baseline.py \
+            --log corpus-baseline-1.log --log corpus-baseline-2.log \
+            --code-sha "$(git rev-parse HEAD)" \
+            --execution-profile hosted-ci-local-postgres \
+            --output supported-baseline.json
+      - name: Preserve public supported-path baseline including comparison failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: supported-current-path-baseline
+          path: supported-baseline.json
+          if-no-files-found: warn
+
   docs-links:
     name: docs link sanity
     runs-on: ubuntu-24.04
