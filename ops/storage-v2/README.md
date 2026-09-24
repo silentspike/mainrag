@@ -122,7 +122,26 @@ database account.
 ## Source release candidates
 
 Candidate construction is source-bounded and never changes an active pointer.
-Run it only with an exact deployed commit and a protected source inventory:
+First capture the complete registered source and generation state through a
+read-only PostgreSQL snapshot. Use a committed operator checkout and an owned
+protected output path outside Git:
+
+```bash
+python3 ops/storage-v2/candidate-inventory.py \
+  --database mainrag --local-postgres \
+  --operator-commit-sha FULL_OPERATOR_COMMIT \
+  --protected-output PROTECTED_INVENTORY
+```
+
+The output file is create-only and mode 0600. It contains private source
+registration, configuration, benchmark classification, active pointers and
+generation/evidence identities. Standard output contains only counts, random
+opaque source references and a digest of the protected snapshot. The command
+does not read source content, certify a current adapter watermark or qualify any
+candidate. Refresh writer, source, resource and installed-package state before
+each source run; the snapshot alone is not an acceptance gate.
+
+Run construction only with an exact deployed commit and the protected inventory:
 
 ```bash
 mainrag source build-candidate SOURCE --commit-sha FULL_DEPLOYED_SHA
