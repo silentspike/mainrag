@@ -78,11 +78,12 @@ def request(api_url: str, token: str, method: str, path: str, body: object | Non
         with urllib.request.urlopen(call, timeout=24 * 3600) as response:
             return json.load(response)
     except urllib.error.HTTPError as error:
-        detail = error.read(4096).decode("utf-8", "replace")
-        raise RuntimeError(f"API request failed with HTTP {error.code}: {detail}") from error
+        # API error bodies can contain protected source or query details. The
+        # status is sufficient for the private failure artifact and console.
+        raise RuntimeError(f"API request failed with HTTP {error.code}") from error
 
 
-def atomic_private_json(path: Path, value: object) -> None:
+def atomic_private_json(path: Path, value: object, *, replace: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
@@ -92,7 +93,12 @@ def atomic_private_json(path: Path, value: object) -> None:
             output.write("\n")
             output.flush()
             os.fsync(output.fileno())
-        os.replace(temporary_name, path)
+        if replace:
+            os.replace(temporary_name, path)
+        else:
+            # Create-only publication keeps an earlier build checkpoint intact
+            # even when another process creates it after the preflight check.
+            os.link(temporary_name, path)
     finally:
         if os.path.exists(temporary_name):
             os.unlink(temporary_name)
@@ -142,6 +148,8 @@ def sha256_text(value: str) -> str:
 
 
 def build(arguments: argparse.Namespace, token: str) -> None:
+    if arguments.checkpoint.exists() or arguments.checkpoint.is_symlink():
+        raise RuntimeError("checkpoint already exists; preserve it and use verify")
     result = request(
         arguments.api_url,
         token,
@@ -155,7 +163,9 @@ def build(arguments: argparse.Namespace, token: str) -> None:
     state = source_state(arguments.api_url, token, arguments.source_id, int(result["generation_seq"]))
     checkpoint = {
         "schema_version": 1,
-        "source_ref": sha256_text(f"mainrag.issue-66.source:{arguments.source_id}"),
+        # This reference may be published. A hash of a small numeric source ID
+        # is enumerable, so use a random opaque value retained in the checkpoint.
+        "source_ref": os.urandom(32).hex(),
         "source_id": arguments.source_id,
         "commit_sha": arguments.commit_sha,
         "generation_id": int(result["generation_id"]),
@@ -167,7 +177,10 @@ def build(arguments: argparse.Namespace, token: str) -> None:
         "build": result,
         "captured_at_unix": int(time.time()),
     }
-    atomic_private_json(arguments.checkpoint, checkpoint)
+    try:
+        atomic_private_json(arguments.checkpoint, checkpoint, replace=False)
+    except FileExistsError as error:
+        raise RuntimeError("checkpoint appeared during build; inspect server state") from error
     publish_telemetry(result["telemetry"])
     print(json.dumps({
         "status": "VERIFIED",
@@ -658,10 +671,10 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
     ):
         if verified["checks"].get(name) != "PASS":
             raise RuntimeError(f"server verification did not pass {name}")
-    evidence_id = str(uuid.uuid5(
-        uuid.NAMESPACE_URL,
-        f"mainrag:storage-v2:rc:{arguments.source_id}:{checkpoint['generation_id']}:{arguments.commit_sha}",
-    ))
+    # This identifier may leave the protected environment. Keep it independent
+    # of enumerable source/generation IDs and retain it in failure evidence
+    # before the qualification POST so an unknown outcome can be reconciled.
+    evidence_id = str(uuid.uuid4())
     qualification = {
         "evidence_id": evidence_id,
         "generation_id": checkpoint["generation_id"],
