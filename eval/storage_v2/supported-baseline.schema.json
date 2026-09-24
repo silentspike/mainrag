@@ -78,7 +78,16 @@
           }
         },
         "configuration": {
-          "const": {"cpu_mode": true, "chunker": "semantic", "chunker_version": "semantic-v1", "active_lexical_profile": "hf_bge_wordpiece", "indexed_lexical_version": "tiktoken-cl100k", "embedding_model_id": "BAAI/bge-base-en-v1.5", "lexical_asset_sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66", "warmups_per_query": 3, "measured_iterations_per_query": 30, "concurrency": 1}
+          "type": "object", "additionalProperties": false,
+          "required": ["cpu_mode", "chunker", "chunker_version", "active_lexical_profile", "indexed_lexical_version", "embedding_model_id", "lexical_asset_sha256", "warmups_per_query", "measured_iterations_per_query", "concurrency"],
+          "properties": {
+            "cpu_mode": {"const": true}, "chunker": {"const": "semantic"}, "chunker_version": {"const": "semantic-v1"},
+            "active_lexical_profile": {"const": "hf_bge_wordpiece"},
+            "indexed_lexical_version": {"enum": ["tiktoken-cl100k", "hf_bge_wordpiece"]},
+            "embedding_model_id": {"const": "BAAI/bge-base-en-v1.5"},
+            "lexical_asset_sha256": {"const": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"},
+            "warmups_per_query": {"const": 3}, "measured_iterations_per_query": {"const": 30}, "concurrency": {"const": 1}
+          }
         },
         "ingest": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/ingest"}},
         "stable_chunk_count": {"type": "integer", "minimum": 1},

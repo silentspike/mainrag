@@ -23,7 +23,7 @@ def observation():
         "query_sql_sha256": harness.sha256_file(harness.HERE / "current_path_query.sql"),
         "schema_columns_sha256": "a"*64, "backend_version": "18.3",
         "fixture_definition_sha256": baseline.fixture_definition_sha256(),
-        "configuration": baseline.CONFIGURATION.copy(), "stable_chunk_count": count,
+        "configuration": baseline.expected_configuration("hosted-ci-local-postgres"), "stable_chunk_count": count,
         "vector_connection_attempts": 0, "outbox_rows": 0, "ledger_rows": 2,
         "ingest": [{"phase": phase, "status": "PASS", "logical_input_bytes": size,
                     "files_processed": 0 if i else count, "files_skipped": count if i else 0,
@@ -42,6 +42,17 @@ def observation():
 
 
 class SupportedBaselineTests(unittest.TestCase):
+    def test_execution_profile_preserves_observed_lexical_version(self):
+        raw = observation()
+        hosted = self.summarize(raw)
+        self.assertEqual(hosted["configuration"]["indexed_lexical_version"], "hf_bge_wordpiece")
+        with self.assertRaisesRegex(ValueError, "configuration drift"):
+            baseline.summarize(raw, "b"*40, "remote-test-fixture-tunnel")
+        raw["configuration"] = baseline.expected_configuration("remote-test-fixture-tunnel")
+        remote = baseline.summarize(raw, "b"*40, "remote-test-fixture-tunnel")
+        self.assertEqual(remote["configuration"]["indexed_lexical_version"], "tiktoken-cl100k")
+        self.assertIn("identity differs: execution_profile", baseline.compare(hosted, remote, 0.5))
+
     def test_missing_and_failed_runs_remain_distinct(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "absent.log"
