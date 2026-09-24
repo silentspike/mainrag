@@ -5,6 +5,7 @@ import json
 import unittest
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from eval.storage_v2 import harness
 from eval.storage_v2 import supported_baseline as baseline
@@ -41,7 +42,29 @@ def observation():
     }
 
 
+def writer_gate():
+    return {"status": "PASS", "mode": "read-only", "checked_count": 1,
+            "checked": [{"path": "api/fixture.rs", "class": "test-fixture-writer", "sha256": "a"*64, "status": "PASS"}],
+            "limitations": "synthetic validator fixture", "required_operator_actions": [], "errors": []}
+
+
+def comparison_report(runs):
+    return {"schema_version": "storage-v2-supported-comparison/v1", "status": "PASS", "maintenance_gate": writer_gate(),
+            "timing_tolerance": 0.5, "differences": [], "runs": runs}
+
+
 class SupportedBaselineTests(unittest.TestCase):
+    def test_inventory_failure_blocks_otherwise_passing_runs(self):
+        run = self.summarize()
+        report = comparison_report([run, copy.deepcopy(run)])
+        report["maintenance_gate"]["status"] = "FAIL"
+        report["maintenance_gate"]["errors"] = ["synthetic undeclared writer"]
+        with self.assertRaises(ValueError):
+            baseline.validate_report(report)
+        report["status"] = "BLOCKED"
+        report["differences"] = ["writer_inventory_not_accepted"]
+        baseline.validate_report(report)
+
     def test_execution_profile_preserves_observed_lexical_version(self):
         raw = observation()
         hosted = self.summarize(raw)
@@ -54,7 +77,7 @@ class SupportedBaselineTests(unittest.TestCase):
         self.assertIn("identity differs: execution_profile", baseline.compare(hosted, remote, 0.5))
 
     def test_missing_and_failed_runs_remain_distinct(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with patch.object(harness, "check_writers", return_value=writer_gate()), tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "absent.log"
             missing = baseline.collect_report([path, path], "b"*40, "hosted-ci-local-postgres", 0.5)
             self.assertEqual(missing["status"], "NOT_RUN")
@@ -66,7 +89,7 @@ class SupportedBaselineTests(unittest.TestCase):
 
     def test_schema_and_semantics_reject_forged_aggregate_pass(self):
         result = self.summarize()
-        report = {"status": "PASS", "timing_tolerance": 0.5, "differences": [], "runs": [result, copy.deepcopy(result)]}
+        report = comparison_report([result, copy.deepcopy(result)])
         report["runs"][1]["code_sha"] = "c"*40
         with self.assertRaisesRegex(ValueError, "differences were altered"):
             baseline.validate_report(report)
@@ -79,7 +102,7 @@ class SupportedBaselineTests(unittest.TestCase):
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(result["warm_latency"]["samples"], 330)
         self.assertEqual(baseline.compare(result, copy.deepcopy(result), 0.5), [])
-        baseline.validate_report({"status": "PASS", "timing_tolerance": 0.5, "differences": [], "runs": [result, copy.deepcopy(result)]})
+        baseline.validate_report(comparison_report([result, copy.deepcopy(result)]))
 
     def test_sql_row_aliases_and_logical_bytes_cannot_replace_observations(self):
         for field in ("work", "source_io"):
@@ -150,6 +173,6 @@ class SupportedBaselineTests(unittest.TestCase):
         row = "corpus baseline: " + json.dumps(observation())
         success = row + "\ntest result: ok. 1 passed; 0 failed; 0 ignored;"
         self.assertEqual(baseline.from_log(success), observation())
-        for text in (row, success+"\n"+row, "0 passed; 0 failed; 0 ignored;"):
+        for text in (row, success+"\n"+row, "0 passed; 0 failed; 0 ignored;", success+"\nfixture_command_failed"):
             with self.assertRaises(ValueError):
                 baseline.from_log(text)

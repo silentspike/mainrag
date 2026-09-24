@@ -50,6 +50,27 @@ passing aggregate baseline.
 
 ## Actual-ingest frozen-corpus comparison
 
+On hosted CI or a qualified Rust build-server checkout, with an isolated
+`mainrag_index_fixture` database, `MAINRAG_CPU_MODE=true`, the explicit
+`MAINRAG_INDEX_TEST_DATABASE_URL`, pinned `TOKENIZER_ASSET_PATH`, Python
+`jsonschema` and Cargo available, one command runs the complete baseline:
+
+```bash
+bash eval/storage_v2/run_supported_baseline.sh \
+  supported-baseline.json EXACT_CHECKOUT_COMMIT hosted-ci-local-postgres
+```
+
+Do not run Cargo locally on hosts requiring remote Rust execution. The wrapper
+checks the checkout identity and read-only writer inventory before either
+fixture, requires clean tracked code before and after execution, then validates
+the two runs and their comparison. It does not
+create a general-purpose database or stop a live writer. The report retains
+the inventory names/classes/content hashes and its explicit external-writer
+limitation; an unaccounted writer blocks acceptance. Fixture command failures
+cannot pass merely because partial stdout contains a successful test summary.
+Private temporary capture files are removed after report generation; hosted
+fixture output and failed comparison artifacts remain in the CI run.
+
 The opt-in test
 `services::index::baseline_tests::postgres_supported_frozen_corpus_baseline`
 extends this path to all twelve checked-in corpus documents. It reconstructs

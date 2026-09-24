@@ -210,19 +210,23 @@ jobs:
           MAINRAG_CPU_MODE: 'true'
           TOKENIZER_ASSET_PATH: ${{ runner.temp }}/chunk-reuse-tokenizer.json
         run: |
-          for attempt in 1 2; do
-            cargo test -p mainrag-api --lib services::index::baseline_tests::postgres_supported_frozen_corpus_baseline -- --ignored --exact --nocapture | tee "corpus-baseline-${attempt}.log"
-          done
+          python3 -m pip install --disable-pip-version-check jsonschema
+          bash eval/storage_v2/run_supported_baseline.sh \
+            supported-baseline.json "$(git rev-parse HEAD)" hosted-ci-local-postgres
       - name: Validate supported-path observations without hiding missing runs
         if: always()
         shell: bash
         run: |
           python3 -m pip install --disable-pip-version-check jsonschema
-          python3 eval/storage_v2/supported_baseline.py \
-            --log corpus-baseline-1.log --log corpus-baseline-2.log \
-            --code-sha "$(git rev-parse HEAD)" \
-            --execution-profile hosted-ci-local-postgres \
-            --output supported-baseline.json
+          if [[ -f supported-baseline.json ]]; then
+            python3 -c 'import json; from eval.storage_v2.supported_baseline import validate_report; report=json.load(open("supported-baseline.json")); validate_report(report); assert report["status"] == "PASS", report["status"]'
+          else
+            python3 eval/storage_v2/supported_baseline.py \
+              --log corpus-baseline-1.log --log corpus-baseline-2.log \
+              --code-sha "$(git rev-parse HEAD)" \
+              --execution-profile hosted-ci-local-postgres \
+              --output supported-baseline.json
+          fi
       - name: Preserve public supported-path baseline including comparison failures
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

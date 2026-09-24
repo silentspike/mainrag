@@ -60,6 +60,7 @@ def number(value: object, *, integer: bool = False) -> bool:
 
 
 def from_log(text: str) -> dict:
+    require("fixture_command_failed" not in text, "fixture command failed despite partial output")
     rows = [line.removeprefix("corpus baseline: ") for line in text.splitlines()
             if line.startswith("corpus baseline: ")]
     require(len(rows) == 1, "exactly one corpus observation is required")
@@ -202,6 +203,7 @@ def main() -> int:
 
 def collect_report(paths: list[Path], code_sha: str, execution_profile: str, tolerance: float) -> dict:
     require(number(tolerance) and tolerance <= 5, "invalid timing tolerance")
+    inventory = harness.check_writers()
     runs = []
     try:
         require(len(paths) == 2, "two independent fixture runs required")
@@ -215,7 +217,12 @@ def collect_report(paths: list[Path], code_sha: str, execution_profile: str, tol
         status, errors = "FAIL", [str(error)]
     except (ValueError, KeyError, TypeError):
         status, errors = "FAIL", ["invalid_or_failed_fixture_observation"]
-    return {"status": status, "timing_tolerance": tolerance, "differences": errors, "runs": runs}
+    if inventory["status"] != "PASS":
+        errors.append("writer_inventory_not_accepted")
+        if status != "FAIL":
+            status = "BLOCKED"
+    return {"schema_version": "storage-v2-supported-comparison/v1", "status": status,
+            "maintenance_gate": inventory, "timing_tolerance": tolerance, "differences": errors, "runs": runs}
 
 
 def validate_report(report: dict) -> None:
@@ -223,14 +230,23 @@ def validate_report(report: dict) -> None:
     schema = json.loads((harness.HERE / "supported-baseline.schema.json").read_text())
     jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).validate(report)
     harness.ensure_public_manifest(report)
+    gate = report["maintenance_gate"]
+    require(gate["checked_count"] == len(gate["checked"]), "writer count mismatch")
+    require(len({entry["path"] for entry in gate["checked"]}) == gate["checked_count"], "duplicate writer entries")
+    require(gate["status"] != "PASS" or not gate["errors"], "writer errors cannot pass")
     for run in report["runs"]:
         require(run["configuration"] == expected_configuration(run["execution_profile"]), "report configuration contradicts execution profile")
     if len(report["runs"]) != 2:
         require(report["status"] != "PASS" and bool(report["differences"]), "incomplete runs cannot pass")
         return
     errors = compare(*report["runs"], report["timing_tolerance"])
+    status = "FAIL" if errors else "PASS"
+    if gate["status"] != "PASS":
+        errors.append("writer_inventory_not_accepted")
+        if status == "PASS":
+            status = "BLOCKED"
     require(report["differences"] == errors, "comparison differences were altered")
-    require(report["status"] == ("FAIL" if errors else "PASS"), "comparison status contradicts observations")
+    require(report["status"] == status, "comparison status contradicts observations")
 
 
 if __name__ == "__main__":

@@ -2,14 +2,32 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Actual current-path public fixture baseline comparison",
   "type": "object", "additionalProperties": false,
-  "required": ["status", "timing_tolerance", "differences", "runs"],
+  "required": ["schema_version", "status", "maintenance_gate", "timing_tolerance", "differences", "runs"],
   "properties": {
+    "schema_version": {"const": "storage-v2-supported-comparison/v1"},
+    "maintenance_gate": {"$ref": "#/$defs/writers"},
     "status": {"enum": ["PASS", "FAIL", "BLOCKED", "SKIP", "NOT_RUN"]},
     "timing_tolerance": {"type": "number", "minimum": 0, "maximum": 5},
     "differences": {"type": "array", "items": {"type": "string"}},
     "runs": {"type": "array", "maxItems": 2, "items": {"$ref": "#/$defs/run"}}
   },
   "$defs": {
+    "writers": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "mode", "checked_count", "checked", "limitations", "required_operator_actions", "errors"],
+      "properties": {
+        "status": {"enum": ["PASS", "FAIL"]}, "mode": {"const": "read-only"},
+        "checked_count": {"type": "integer", "minimum": 1},
+        "checked": {"type": "array", "minItems": 1, "items": {
+          "type": "object", "additionalProperties": false, "required": ["path", "class", "sha256", "status"],
+          "properties": {"path": {"type": "string", "pattern": "^(api|cli|scripts|ops)/"},
+            "class": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/sha"}, "status": {"const": "PASS"}}
+        }},
+        "limitations": {"type": "string"},
+        "required_operator_actions": {"type": "array", "items": {"type": "string"}},
+        "errors": {"type": "array", "items": {"type": "string"}}
+      }
+    },
     "count": {"type": "integer", "minimum": 0},
     "duration": {"type": "number", "minimum": 0},
     "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
