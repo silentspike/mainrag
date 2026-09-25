@@ -10,8 +10,7 @@ pub struct Config {
     pub tei: TeiConfig,
     pub jwt: JwtConfig,
     pub ocr: OcrConfig,
-    /// Durable root for storage-v2 pack files. The shadow endpoint is the only
-    /// caller until activation is approved separately.
+    /// Durable root for storage-v2 pack files.
     pub storage_v2_pack_root: PathBuf,
     /// Bounded pack read/write buffer for the storage-v2 shadow slice.
     pub storage_v2_pack_io_buffer_bytes: usize,
@@ -37,6 +36,9 @@ pub struct ServerConfig {
     /// Exact activation manifest binding for the opt-in active storage-v2 read path.
     /// Absence keeps legacy reads as the application default.
     pub storage_v2_default_read_manifest_sha256: Option<String>,
+    /// Exact installed runtime identity for regular active storage-v2 ingest.
+    /// It is installed together with the approved default-read selector.
+    pub storage_v2_active_ingest_commit_sha: Option<String>,
     pub cors_origins: Vec<String>,
     /// HMAC pepper for API-Key hashing (env: API_KEY_PEPPER)
     pub api_key_pepper: String,
@@ -115,7 +117,7 @@ impl Config {
             );
         }
 
-        Ok(Config {
+        let config = Config {
             server: ServerConfig {
                 host: env::var("API_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
                 port: env::var("API_PORT")
@@ -140,6 +142,20 @@ impl Config {
                         Ok(value)
                     } else {
                         anyhow::bail!("MAINRAG_STORAGE_V2_DEFAULT_READ_MANIFEST_SHA256 must be a lowercase SHA-256")
+                    }
+                })
+                .transpose()?,
+                storage_v2_active_ingest_commit_sha: env::var(
+                    "MAINRAG_STORAGE_V2_ACTIVE_INGEST_COMMIT_SHA",
+                )
+                .ok()
+                .map(|value| {
+                    if value.len() == 40
+                        && value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    {
+                        Ok(value)
+                    } else {
+                        anyhow::bail!("MAINRAG_STORAGE_V2_ACTIVE_INGEST_COMMIT_SHA must be a lowercase Git SHA")
                     }
                 })
                 .transpose()?,
@@ -282,7 +298,18 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("data/storage-v2/packs")),
             storage_v2_pack_io_buffer_bytes,
-        })
+        };
+        if config
+            .server
+            .storage_v2_default_read_manifest_sha256
+            .is_some()
+            != config.server.storage_v2_active_ingest_commit_sha.is_some()
+        {
+            anyhow::bail!(
+                "active storage-v2 read selector and ingest commit must be configured together"
+            );
+        }
+        Ok(config)
     }
 
     pub fn database_url(&self) -> String {

@@ -177,7 +177,8 @@ INSERT INTO storage_v2_release_candidate_evidence(
                 f"WHERE id='{evidence_id}'"
             )
             entries.append({"source_id": source_id, "candidate_generation_id": generation_id,
-                            "expected_active_generation_id": None, "evidence_id": evidence_id,
+                            "expected_active_generation_id": None,
+                            "candidate_commit_sha": "c" * 40, "evidence_id": evidence_id,
                             "evidence_manifest_sha256": evidence_digest,
                             "source_watermark_sha256": "b" * 64})
 
@@ -255,6 +256,9 @@ INSERT INTO storage_v2_release_candidate_evidence(
         self.assertEqual(self.sql("SELECT has_function_privilege('mainrag', "
                                   "'storage_v2_search_active(text,jsonb,jsonb,bigint,bigint,boolean)', "
                                   "'EXECUTE')"), "t")
+        self.assertEqual(self.sql("SELECT has_function_privilege('mainrag', "
+                                  "'storage_v2_require_complete_active_set(text)', "
+                                  "'EXECUTE')"), "t")
         source_state = self.source_state(ADMIN, digest, 1)
         self.assertEqual(source_state["source_id"], 1)
         self.assertEqual(source_state["generation_seq"], 1)
@@ -304,17 +308,17 @@ ALTER TABLE storage_v2_activation_set_evidence
 """)
         self.assert_sql_fails(
             self.actor(ADMIN, f"SELECT storage_v2_active_source_state('{digest}',1)"),
-            "complete activated source set and exact receipt are required",
+            "active pointer set differs from its latest receipt",
         )
         self.assert_sql_fails(
             self.actor(ADMIN, f"SELECT storage_v2_search_active('{digest}',"
                        "'{\"type\":\"term\",\"value\":\"alpha\"}'::jsonb)"),
-            "complete activated source set and exact receipt are required",
+            "active pointer set differs from its latest receipt",
         )
         self.assert_sql_fails(
             self.actor(ADMIN, f"SELECT storage_v2_active_intelligence_command('{digest}',"
                        "'card')"),
-            "complete activated source set and exact receipt are required",
+            "active pointer set differs from its latest receipt",
         )
         self.sql("""
 ALTER TABLE storage_v2_activation_set_evidence
@@ -327,6 +331,7 @@ ALTER TABLE storage_v2_activation_set_evidence
         self.command(self.database, file=ROOT / "migrations/059_storage_v2_active_source_state.sql")
         self.command(self.database, file=ROOT / "migrations/060_storage_v2_active_search_pointer_receipt.sql")
         self.command(self.database, file=ROOT / "migrations/061_storage_v2_active_intelligence.sql")
+        self.command(self.database, file=ROOT / "migrations/065_storage_v2_active_ingest_receipts.sql")
         self.assertEqual(self.search(ADMIN, digest), ordinary)
         self.assertEqual(self.source_state(ADMIN, digest, 1), source_state)
         self.assertEqual(self.intelligence(ADMIN, digest, "card")["source_count"], 2)
@@ -360,6 +365,65 @@ ALTER TABLE storage_v2_activation_set_evidence
                        + "','{\"type\":\"term\",\"value\":\"alpha\"}'::jsonb)"),
             "complete activated source set and exact receipt are required",
         )
+        # A routine verified generation advances one source without making the
+        # complete active read set fail its receipt check.
+        old_id = self.source_state(ADMIN, digest, 1)["active_generation_id"]
+        updated = "alpha source1 updated"
+        node, view, body_digest = self.make_projection(updated)
+        witness = json.dumps({
+            "source_watermark_sha256": "7" * 64,
+            "adapter_profile_id": "fixture-adapter-v1",
+            "is_test": False,
+            "commit_sha": "c" * 40,
+        }, sort_keys=True)
+        run = int(self.sql(self.admin(
+            "SELECT (storage_v2_begin_shadow_ingest("
+            f"1,'{'6' * 64}','{'7' * 64}','fixture-adapter-v1',"
+            f"'synthetic-snapshot','{witness}'::JSONB,FALSE)).id"
+        )))
+        self.stage(run, "source-1.txt", updated, node, view, body_digest,
+                   user_id=ADMIN)
+        self.complete_analysis(body_digest)
+        document = int(self.sql(self.admin(
+            "SELECT id FROM storage_v2_put_search_document("
+            f"'active-fixture','node',{node},'{updated}',ARRAY[]::TEXT[])"
+        )))
+        self.sql(self.admin(
+            f"SELECT storage_v2_bind_search_document({view},0,{document},1.0)"
+        ))
+        self.commit(run, 1, user_id=ADMIN)
+        new_id = int(self.sql(
+            f"SELECT generation_id FROM storage_v2_ingest_run WHERE id={run}"
+        ))
+        verification = "8" * 64
+        self.sql(self.admin(
+            f"SELECT storage_v2_verify_generation({new_id},'{verification}')"
+        ))
+        activate = (
+            f"SELECT storage_v2_activate_regular_ingest('{digest}',1,{new_id},"
+            f"{old_id},'fixture','synthetic-one',"
+            f"'{'7' * 64}','{verification}','{'9' * 64}')"
+        )
+        self.assert_sql_fails(
+            self.actor(ADMIN, activate.replace(f",{old_id},", ",999999,")),
+            "regular ingest active pointer drift",
+        )
+        self.assert_sql_fails(
+            self.actor(ADMIN, activate.replace("'" + "7" * 64 + "'",
+                                               "'" + "0" * 64 + "'")),
+            "regular ingest generation, root or watermark drift",
+        )
+        self.assert_sql_fails(
+            self.actor(ADMIN, activate.replace("'synthetic-one'", "'wrong-source'")),
+            "regular ingest source registry drift",
+        )
+        self.assertEqual(self.source_state(ADMIN, digest, 1)["active_generation_id"], old_id)
+        receipt = json.loads(self.sql("SET ROLE mainrag; " + self.admin(activate)))
+        self.assertEqual(receipt["status"], "ACTIVE_INGEST_COMMITTED")
+        self.assertEqual(self.source_state(ADMIN, digest, 1)["active_generation_id"], new_id)
+        self.assertEqual(self.search(ADMIN, digest)["total"], 2)
+        self.assertEqual(self.intelligence(ADMIN, digest, "card")["source_count"], 2)
+        self.assert_sql_fails(self.actor(ADMIN, activate), "regular ingest active pointer drift")
         self.sql("INSERT INTO sources(id,name,type,path) VALUES "
                  "(4,'late-source','fixture','late-source')")
         self.assert_sql_fails(

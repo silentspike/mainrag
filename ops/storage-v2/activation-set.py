@@ -351,6 +351,7 @@ def make_plan(audit: dict, audit_sha: str, acceptance: dict,
             "dropin": "/etc/systemd/system/mainrag-api.service.d/90-storage-v2-default-read.conf",
             "environment_file": "/etc/mainrag/storage-v2-default-read.env",
             "coupling_max_seconds": 300,
+            "active_ingest_commit_env_name": "MAINRAG_STORAGE_V2_ACTIVE_INGEST_COMMIT_SHA",
         },
         "candidate_set_sha256": audit["candidate_set_sha256"],
         "before_pointer_set_sha256": sha256(canonical([

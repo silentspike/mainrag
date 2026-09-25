@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -27,6 +28,7 @@ UNIT = "mainrag-api.service"
 DROPIN = Path("/etc/systemd/system/mainrag-api.service.d/90-storage-v2-default-read.conf")
 ENV_FILE = Path("/etc/mainrag/storage-v2-default-read.env")
 ENV_NAME = "MAINRAG_STORAGE_V2_DEFAULT_READ_MANIFEST_SHA256"
+ACTIVE_COMMIT_ENV_NAME = "MAINRAG_STORAGE_V2_ACTIVE_INGEST_COMMIT_SHA"
 API_BINARY = Path("/opt/mainrag/api/mainrag-api")
 DEFAULT_SWITCH_CONTRACT = {
     "unit": UNIT,
@@ -34,6 +36,7 @@ DEFAULT_SWITCH_CONTRACT = {
     "dropin": str(DROPIN),
     "environment_file": str(ENV_FILE),
     "coupling_max_seconds": 300,
+    "active_ingest_commit_env_name": ACTIVE_COMMIT_ENV_NAME,
 }
 
 
@@ -45,7 +48,7 @@ def systemctl(*arguments: str) -> str:
     return result.stdout.strip()
 
 
-def read_service_state() -> tuple[int, str]:
+def read_service_state() -> tuple[int, str, str]:
     if systemctl("is-active", UNIT) != "active":
         raise RuntimeError("API service is not active")
     pid = systemctl("show", UNIT, "--property=MainPID", "--value")
@@ -54,9 +57,11 @@ def read_service_state() -> tuple[int, str]:
     values = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
     selected = [value.partition(b"=")[2].decode("ascii") for value in values
                 if value.startswith((ENV_NAME + "=").encode())]
-    if len(selected) > 1:
-        raise RuntimeError("API default selector is ambiguous")
-    return int(pid), selected[0] if selected else ""
+    commits = [value.partition(b"=")[2].decode("ascii") for value in values
+               if value.startswith((ACTIVE_COMMIT_ENV_NAME + "=").encode())]
+    if len(selected) > 1 or len(commits) > 1:
+        raise RuntimeError("API default selector or active ingest commit is ambiguous")
+    return int(pid), selected[0] if selected else "", commits[0] if commits else ""
 
 
 def api_read_path(url: str, token_file: Path | None) -> str:
@@ -91,8 +96,9 @@ def api_read_path(url: str, token_file: Path | None) -> str:
     return value["read_path"]
 
 
-def switch_file_state(expected: str) -> str:
-    env_content = (ENV_NAME + "=" + expected + "\n").encode()
+def switch_file_state(expected: str, commit: str) -> str:
+    env_content = (ENV_NAME + "=" + expected + "\n"
+                   + ACTIVE_COMMIT_ENV_NAME + "=" + commit + "\n").encode()
     dropin_content = ("[Service]\nEnvironmentFile=" + str(ENV_FILE) + "\n").encode()
     exists = (ENV_FILE.exists(), DROPIN.exists())
     if ENV_FILE.is_symlink() or DROPIN.is_symlink():
@@ -130,12 +136,14 @@ def service_binary_sha256(pid: int) -> str:
     return hashlib.sha256(executable.read_bytes()).hexdigest()
 
 
-def verify_restarted_api(url: str, token_file: Path | None, expected: str) -> int:
+def verify_restarted_api(url: str, token_file: Path | None,
+                         expected: str, commit: str) -> int:
     deadline = time.monotonic() + 20
     while True:
         try:
-            pid, selected = read_service_state()
-            if selected == expected and api_read_path(url, token_file) == "storage_v2_active":
+            pid, selected, active_commit = read_service_state()
+            if selected == expected and active_commit == commit \
+                    and api_read_path(url, token_file) == "storage_v2_active":
                 return pid
         except (RuntimeError, OSError):
             pass
@@ -169,16 +177,20 @@ def switch(args: argparse.Namespace) -> dict:
         "installed_binary_sha256"):
         raise RuntimeError("installed API binary differs from activation plan")
     intended = plan["manifest_sha256"]
-    file_state = switch_file_state(intended)
-    pid, current = read_service_state()
+    runtime_commit = manifest.get("code_commit_sha")
+    if not isinstance(runtime_commit, str) or re.fullmatch(r"[0-9a-f]{40}", runtime_commit) is None:
+        raise RuntimeError("active ingest runtime commit is invalid")
+    file_state = switch_file_state(intended, runtime_commit)
+    pid, current, current_commit = read_service_state()
     if service_binary_sha256(pid) != plan["installed_binary_sha256"]:
         raise RuntimeError("running API binary differs from activation plan")
     current_api = api_read_path(args.api_url, args.api_token_file)
-    if file_state == "NEW" and (current or current_api != "current"):
+    if file_state == "NEW" and (current or current_commit or current_api != "current"):
         raise RuntimeError("API default selector was already changed")
     if file_state == "EXACT_EXISTING" and not (
-        (current == intended and current_api == "storage_v2_active")
-        or (not current and current_api == "current")
+        (current == intended and current_commit == runtime_commit
+         and current_api == "storage_v2_active")
+        or (not current and not current_commit and current_api == "current")
     ):
         raise RuntimeError("existing API default selector is inconsistent")
     result = {"schema_version": "mainrag.storage-v2.default-switch.v1",
@@ -188,13 +200,16 @@ def switch(args: argparse.Namespace) -> dict:
     OPERATOR.private_write(args.output, result)
     try:
         if file_state == "NEW":
-            atomic_create(ENV_FILE, (ENV_NAME + "=" + intended + "\n").encode())
+            atomic_create(ENV_FILE, (ENV_NAME + "=" + intended + "\n"
+                                     + ACTIVE_COMMIT_ENV_NAME + "="
+                                     + runtime_commit + "\n").encode())
             atomic_create(DROPIN, ("[Service]\nEnvironmentFile=" + str(ENV_FILE)
                                    + "\n").encode())
         if current_api == "current":
             systemctl("daemon-reload")
             systemctl("restart", UNIT)
-            pid = verify_restarted_api(args.api_url, args.api_token_file, intended)
+            pid = verify_restarted_api(args.api_url, args.api_token_file,
+                                       intended, runtime_commit)
         if service_binary_sha256(pid) != plan["installed_binary_sha256"]:
             raise RuntimeError("restarted API binary differs from activation plan")
         OPERATOR.verify_committed(

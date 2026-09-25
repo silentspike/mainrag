@@ -704,10 +704,101 @@ pub async fn admin_delete_source(
 }
 
 /// Sync/Index a source - this is the real implementation
+#[cfg(feature = "storage-v2-retrieval")]
+fn active_ingest_response(
+    result: &crate::services::active_ingest::ActiveIngestResult,
+) -> serde_json::Value {
+    let changed = result.status == "ACTIVE_INGEST_COMMITTED";
+    serde_json::json!({
+        "status": "completed",
+        "source_id": result.source_id,
+        "stats": {
+            "files_processed": if changed { result.item_count } else { 0 },
+            "files_skipped": 0,
+            "chunks_created": 0,
+            "embeddings_generated": 0,
+            "errors": 0,
+            "source_io": result.source_io,
+        },
+        "error_details": [],
+        "storage_v2": {
+            "status": result.status,
+            "sync_mode": result.sync_mode,
+            "generation_id": result.generation_id,
+            "generation_seq": result.generation_seq,
+            "item_count": result.item_count,
+            "changed_item_count": result.changed_item_count,
+            "telemetry": result.telemetry,
+            "receipt": result.receipt,
+        }
+    })
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
+async fn run_active_ingest(
+    state: &Arc<AppState>,
+    user_id: Uuid,
+    source_id: i64,
+    manifest: String,
+    commit: String,
+) -> Result<Json<serde_json::Value>> {
+    use crate::services::active_ingest::{
+        commit_active_source, prepare_active_source, ActiveIngestPreparation,
+    };
+
+    let pack_root = state.config.storage_v2_pack_root.clone();
+    let io_buffer_bytes = state.config.storage_v2_pack_io_buffer_bytes;
+    let prepared = state
+        .rls_client
+        .with_rls(user_id, true, move |transaction| {
+            Box::pin(async move {
+                prepare_active_source(
+                    &**transaction,
+                    source_id,
+                    &manifest,
+                    &commit,
+                    &pack_root,
+                    io_buffer_bytes,
+                )
+                .await
+                .map_err(|error| {
+                    tracing::error!(error = %format!("{error:#}"),
+                    "ordinary active storage-v2 ingest preparation failed");
+                    AppError::Internal("ordinary active storage-v2 ingest failed".to_string())
+                })
+            })
+        })
+        .await?;
+    let result = match prepared {
+        ActiveIngestPreparation::NoChange(result) => result,
+        ActiveIngestPreparation::Candidate(candidate) => {
+            let pack_root = state.config.storage_v2_pack_root.clone();
+            let io_buffer_bytes = state.config.storage_v2_pack_io_buffer_bytes;
+            state
+                .rls_client
+                .with_rls(user_id, true, move |transaction| {
+                    Box::pin(async move {
+                        commit_active_source(&**transaction, candidate, &pack_root, io_buffer_bytes)
+                            .await
+                            .map_err(|error| {
+                                tracing::error!(error = %format!("{error:#}"),
+                                "ordinary active storage-v2 ingest activation failed");
+                                AppError::Internal(
+                                    "ordinary active storage-v2 ingest failed".to_string(),
+                                )
+                            })
+                    })
+                })
+                .await?
+        }
+    };
+    Ok(Json(active_ingest_response(&result)))
+}
+
 pub async fn admin_sync_source(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
-    Extension(_claims): Extension<Arc<crate::auth::Claims>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
 ) -> Result<Json<serde_json::Value>> {
     use crate::services::IndexService;
 
@@ -728,6 +819,31 @@ pub async fn admin_sync_source(
             "test sources can only use the explicit storage-v2 shadow endpoint".to_string(),
         ));
     }
+
+    #[cfg(feature = "storage-v2-retrieval")]
+    if let Some(manifest) = state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .clone()
+    {
+        let commit = state
+            .config
+            .server
+            .storage_v2_active_ingest_commit_sha
+            .clone()
+            .ok_or_else(|| {
+                AppError::Internal(
+                    "active storage-v2 ingest runtime identity is unavailable".to_string(),
+                )
+            })?;
+        let user_id = Uuid::parse_str(&claims.sub)
+            .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
+        return run_active_ingest(&state, user_id, id, manifest, commit).await;
+    }
+
+    #[cfg(not(feature = "storage-v2-retrieval"))]
+    let _ = claims;
 
     // K3: IndexService manages its own DB connections from the pool.
     // No RLS setup needed here — IndexService handles it internally.
@@ -914,7 +1030,7 @@ pub struct SyncFilesRequest {
 pub async fn admin_sync_files(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
-    Extension(_claims): Extension<Arc<crate::auth::Claims>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
     JsonBody(req): JsonBody<SyncFilesRequest>,
 ) -> Result<Json<serde_json::Value>> {
     use crate::services::IndexService;
@@ -945,6 +1061,31 @@ pub async fn admin_sync_files(
             ));
         }
     }
+
+    #[cfg(feature = "storage-v2-retrieval")]
+    if let Some(manifest) = state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .clone()
+    {
+        let commit = state
+            .config
+            .server
+            .storage_v2_active_ingest_commit_sha
+            .clone()
+            .ok_or_else(|| {
+                AppError::Internal(
+                    "active storage-v2 ingest runtime identity is unavailable".to_string(),
+                )
+            })?;
+        let user_id = Uuid::parse_str(&claims.sub)
+            .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
+        return run_active_ingest(&state, user_id, id, manifest, commit).await;
+    }
+
+    #[cfg(not(feature = "storage-v2-retrieval"))]
+    let _ = claims;
 
     // Convert strings to PathBuf
     let files: Vec<std::path::PathBuf> = req.files.iter().map(std::path::PathBuf::from).collect();
