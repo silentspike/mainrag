@@ -145,6 +145,13 @@ search excludes benchmark sources; an explicit benchmark scope requires an
 administrator. Source filters remain available without naming a generation.
 Installing the migration does not select this read path.
 
+Migration 059 adds `storage_v2_active_source_state` for source inspection under
+the same complete-set receipt guard. `mainrag source state NAME` requests this
+active state only when the API has the exact manifest configured. An explicit
+`--generation SEQUENCE` retains named candidate inspection. Active inspection
+checks the entire source set before delegating to source RLS and benchmark scope;
+it returns the activation digest and selected read path with the state counts.
+
 The API keeps legacy reads as the default unless
 `MAINRAG_STORAGE_V2_DEFAULT_READ_MANIFEST_SHA256` names that exact reviewed
 activation manifest. With that setting, an omitted `read_path` uses the active
