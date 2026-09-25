@@ -1223,10 +1223,12 @@ where
     }
 
     let stabilization_started = Instant::now();
-    let final_sync = match mode {
-        SliceMode::PublicFixture => plugin.sync(source_path).await?,
-        SliceMode::ReleaseCandidate => plugin.sync_for_storage_v2(source_path).await?,
+    let final_observed_sync = match mode {
+        SliceMode::PublicFixture => plugin.sync_observed(source_path).await?,
+        SliceMode::ReleaseCandidate => plugin.sync_for_storage_v2_observed(source_path).await?,
     };
+    let final_adapter_read_bytes = final_observed_sync.application_read_bytes;
+    let final_sync = final_observed_sync.result;
     if !final_sync.errors.is_empty() {
         bail!("source adapter returned errors during the final watermark check");
     }
@@ -1344,7 +1346,12 @@ where
         bail!("active generation changed during the shadow slice");
     }
     measurements.record_stage(ShadowIngestStage::Seal, verification_started.elapsed());
-    measurements.deferred_source_read_bytes = source_read_bytes(&files)?;
+    record_final_source_reads(
+        &mut measurements,
+        final_adapter_read_bytes,
+        &files,
+        &final_files,
+    )?;
     measurements.record_total(total_started.elapsed());
     Ok(ShadowSliceResult {
         run_id: run.id,
@@ -1371,6 +1378,29 @@ fn source_read_bytes(files: &[SliceFile]) -> Result<u64> {
             .checked_add(file.source_reads.bytes())
             .context("source read counter overflow")
     })
+}
+
+fn record_final_source_reads(
+    measurements: &mut ShadowIngestMeasurements,
+    final_adapter_read_bytes: Option<u64>,
+    files: &[SliceFile],
+    final_files: &[SliceFile],
+) -> Result<()> {
+    measurements.adapter_source_read_bytes = match (
+        measurements.adapter_source_read_bytes,
+        final_adapter_read_bytes,
+    ) {
+        (Some(initial), Some(final_scan)) => Some(
+            initial
+                .checked_add(final_scan)
+                .context("adapter source read counter overflow")?,
+        ),
+        _ => None,
+    };
+    measurements.deferred_source_read_bytes = source_read_bytes(files)?
+        .checked_add(source_read_bytes(final_files)?)
+        .context("deferred source read counter overflow")?;
+    Ok(())
 }
 
 async fn canonical_fixture_hash(files: &mut [SliceFile]) -> Result<(String, u64)> {
@@ -2547,6 +2577,64 @@ mod tests {
         );
         assert_eq!(json["source_io"]["content_read_coverage"], "COMPLETE");
         assert!(json["source_io"]["device_read_bytes"].is_null());
+    }
+
+    #[tokio::test]
+    async fn final_watermark_scan_counts_both_adapter_and_deferred_reads() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-two-pass-reads-{}", Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let content = b"fn sample() {}\n";
+        std::fs::write(directory.0.join("sample.rs"), content).unwrap();
+        let plugin = plugins::get_plugin("fs").unwrap();
+        let root = directory.0.to_str().unwrap();
+
+        let initial = plugin.sync_for_storage_v2_observed(root).await.unwrap();
+        let mut files = initial
+            .result
+            .files
+            .into_iter()
+            .map(SliceFile::from)
+            .collect::<Vec<_>>();
+        canonical_fixture_hash(&mut files).await.unwrap();
+        files[0].load_verified_bytes().await.unwrap();
+
+        let final_scan = plugin.sync_for_storage_v2_observed(root).await.unwrap();
+        let mut final_files = final_scan
+            .result
+            .files
+            .into_iter()
+            .map(SliceFile::from)
+            .collect::<Vec<_>>();
+        canonical_fixture_hash(&mut final_files).await.unwrap();
+
+        let mut measurements = ShadowIngestMeasurements::default();
+        measurements.adapter_source_read_bytes = initial.application_read_bytes;
+        record_final_source_reads(
+            &mut measurements,
+            final_scan.application_read_bytes,
+            &files,
+            &final_files,
+        )
+        .unwrap();
+        let source_io = &measurements.to_telemetry_json()["source_io"];
+        assert_eq!(source_io["adapter_read_bytes"], 2 * content.len() as u64);
+        assert_eq!(
+            source_io["application_read_bytes"],
+            3 * content.len() as u64
+        );
+        assert_eq!(
+            source_io["total_content_read_bytes"],
+            5 * content.len() as u64
+        );
+        assert_eq!(source_io["content_read_coverage"], "COMPLETE");
+
+        measurements.adapter_source_read_bytes = initial.application_read_bytes;
+        record_final_source_reads(&mut measurements, None, &files, &final_files).unwrap();
+        assert!(
+            measurements.to_telemetry_json()["source_io"]["total_content_read_bytes"].is_null()
+        );
     }
 
     #[test]
