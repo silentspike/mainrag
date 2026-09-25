@@ -152,6 +152,11 @@ active state only when the API has the exact manifest configured. An explicit
 checks the entire source set before delegating to source RLS and benchmark scope;
 it returns the activation digest and selected read path with the state counts.
 
+Migration 060 applies the same exact pointer-set digest check to active search.
+The previous set-based evaluator is private; SQL clients use
+`storage_v2_search_active`, which rejects pointer drift before evaluating a
+query. The migration does not change active pointers or the configured default.
+
 The API keeps legacy reads as the default unless
 `MAINRAG_STORAGE_V2_DEFAULT_READ_MANIFEST_SHA256` names that exact reviewed
 activation manifest. With that setting, an omitted `read_path` uses the active
