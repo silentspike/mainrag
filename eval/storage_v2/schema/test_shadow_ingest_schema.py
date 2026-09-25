@@ -418,8 +418,8 @@ SELECT (storage_v2_finish_analysis_attempt(
         )
         self.assertEqual(returned_artifact, original_artifact)
         self.sql("INSERT INTO sources(id, name, type, path) VALUES "
-                 "(15, 'synthetic-shared-projection', 'fixture', 'synthetic-shared-projection')")
-        other_run = self.begin(15, "f" * 64, "e" * 64)
+                 "(9015, 'synthetic-shared-projection', 'fixture', 'synthetic-shared-projection')")
+        other_run = self.begin(9015, "f" * 64, "e" * 64)
         self.stage(other_run, "shared.txt", "alpha", node_a, view_a, digest_a)
         self.commit(other_run, 1)
         self.assertEqual(
@@ -436,7 +436,7 @@ SELECT (storage_v2_finish_analysis_attempt(
                 "SELECT COUNT(DISTINCT occurrence.source_id) || ':' || "
                 "COUNT(DISTINCT occurrence.view_id) FROM occurrence "
                 "JOIN artifact_version artifact ON artifact.id = occurrence.artifact_version_id "
-                f"WHERE artifact.expected_content_hash = '{digest_a}' AND occurrence.source_id IN (1, 15)"
+                f"WHERE artifact.expected_content_hash = '{digest_a}' AND occurrence.source_id IN (1, 9015)"
             ),
             "2:1",
             "global projections must be reusable without merging authorized occurrences",
