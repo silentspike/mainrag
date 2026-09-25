@@ -9,6 +9,7 @@ pub async fn run(
     client: &ApiClient,
     source: Option<&str>,
     generation: Option<&str>,
+    read_path: &str,
     include_test: bool,
     layer: Option<&str>,
     resource: Option<&str>,
@@ -20,6 +21,7 @@ pub async fn run(
         eprint!("{}", "Browsing layers...".cyan());
     }
 
+    let active = super::intelligence_active(client, read_path, generation).await?;
     if let Some(generation) = generation {
         let source = source.ok_or_else(|| anyhow::anyhow!("--generation requires --source"))?;
         let result = client
@@ -38,8 +40,24 @@ pub async fn run(
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
     }
+    if active {
+        let result = client
+            .active_intelligence(
+                "layers",
+                source,
+                include_test,
+                &[
+                    ("layer", layer),
+                    ("resource", resource),
+                    ("side_effect", side_effect),
+                ],
+            )
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
     if include_test {
-        anyhow::bail!("--include-test requires --generation and --source");
+        anyhow::bail!("--include-test requires a storage-v2 read path");
     }
     // Build URL with server-side filters
     let mut url = format!(

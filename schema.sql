@@ -593,3 +593,4 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag;
 \ir migrations/058_storage_v2_active_set_search.sql
 \ir migrations/059_storage_v2_active_source_state.sql
 \ir migrations/060_storage_v2_active_search_pointer_receipt.sql
+\ir migrations/061_storage_v2_active_intelligence.sql
