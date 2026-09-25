@@ -10,6 +10,7 @@
     {"path":"api/src/services/index/intelligence_retry_tests.rs","class":"test-fixture-writer","reason":"Test-only module explicitly exercises intelligence retry against an opt-in PostgreSQL fixture; not an ordinary runtime writer."},
     {"path":"api/src/services/index/baseline_tests.rs","class":"test-fixture-writer","reason":"Opt-in current-path ingestion measurement in an owned disposable fixture schema; no ordinary runtime writer."},
     {"path":"api/src/services/index/corpus_baseline.rs","class":"test-fixture-writer","reason":"Frozen public corpus ingestion and FTS measurement in the same isolated fixture; no production source writes."},
+    {"path":"api/src/services/shadow_slice/managed_append_tests.rs","class":"test-fixture-writer","reason":"Opt-in managed append ingestion exercise against an owned disposable PostgreSQL fixture; no production source writes."},
     {"path":"api/src/services/intelligence.rs","class":"runtime-writer","reason":"Writes source-bound intelligence and evidence state."},
     {"path":"api/src/services/outbox_worker.rs","class":"runtime-writer","reason":"Claims outbox work and mutates Qdrant plus delivery state."},
     {"path":"api/src/services/qdrant.rs","class":"runtime-writer","reason":"Implements Qdrant upsert, payload, and deletion operations."},

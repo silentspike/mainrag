@@ -41,8 +41,16 @@ async fn run(client: &mut Client, root: &Path, packs: &Path) -> Result<ShadowSli
     transaction
         .batch_execute(&format!("SET LOCAL app.user_id='{PRINCIPAL}'"))
         .await?;
-    let result = run_public_shadow_slice(&transaction, 63, "managed_append", root, packs, 4096, COMMIT)
-        .await?;
+    let result = run_public_shadow_slice(
+        &transaction,
+        63,
+        "managed_append",
+        root,
+        packs,
+        4096,
+        COMMIT,
+    )
+    .await?;
     transaction.commit().await?;
     Ok(result)
 }
@@ -53,12 +61,16 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
     let url = std::env::var("MAINRAG_INDEX_TEST_DATABASE_URL")
         .context("explicit fixture database URL required")?;
     let mut config: tokio_postgres::Config = url.parse()?;
-    ensure!(config.get_dbname() == Some("mainrag_index_fixture"),
-        "refusing non-fixture database");
+    ensure!(
+        config.get_dbname() == Some("mainrag_index_fixture"),
+        "refusing non-fixture database"
+    );
     let admin = connect(&config).await?;
     admin.batch_execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='mainrag') THEN CREATE ROLE mainrag; END IF; END $$;").await?;
     let database = format!("managed_append_{}", Uuid::new_v4().simple());
-    admin.batch_execute(&format!("CREATE DATABASE {database}")).await?;
+    admin
+        .batch_execute(&format!("CREATE DATABASE {database}"))
+        .await?;
     config.dbname(&database);
     let directory = Directory(std::env::temp_dir().join(format!("mainrag-{database}")));
     std::fs::create_dir_all(&directory.0)?;
@@ -157,7 +169,9 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
     }.await;
     drop(admin);
     let cleanup_admin = connect(&url.parse()?).await?;
-    let cleanup = cleanup_admin.batch_execute(&format!("DROP DATABASE {database} WITH (FORCE)")).await;
+    let cleanup = cleanup_admin
+        .batch_execute(&format!("DROP DATABASE {database} WITH (FORCE)"))
+        .await;
     cleanup?;
     result
 }

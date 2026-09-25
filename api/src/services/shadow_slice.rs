@@ -52,12 +52,15 @@ fn managed_fixture_hash(files: &[SliceFile]) -> Result<(String, u64)> {
     digest.update(b"mainrag.managed-append.snapshot.v2\0");
     let mut input_bytes = 0_u64;
     for file in files {
-        let content = file.content_sha256.context("managed segment lacks its digest")?;
+        let content = file
+            .content_sha256
+            .context("managed segment lacks its digest")?;
         digest.update((file.path.len() as u64).to_be_bytes());
         digest.update(file.path.as_bytes());
         digest.update(file.logical_length.to_be_bytes());
         digest.update(content);
-        input_bytes = input_bytes.checked_add(file.logical_length)
+        input_bytes = input_bytes
+            .checked_add(file.logical_length)
             .context("managed append logical byte count overflow")?;
     }
     Ok((hex::encode(digest.finalize()), input_bytes))
@@ -682,8 +685,9 @@ where
         .map(|row| row.get::<_, i64>("generation_id"))
         .unwrap_or(0);
     let managed_frontier = if source_type == "managed_append" {
-        client.query_opt(
-            "SELECT frontier.epoch, frontier.segment_count, frontier.chain, \
+        client
+            .query_opt(
+                "SELECT frontier.epoch, frontier.segment_count, frontier.chain, \
                     frontier.last_run_id, frontier.last_generation_id, \
                     frontier.appends_since_full \
                FROM storage_v2_managed_append_frontier frontier \
@@ -691,27 +695,31 @@ where
                  ON generation.id=frontier.last_generation_id \
               WHERE frontier.source_id=$1 AND frontier.adapter_profile_id=$2 \
                 AND generation.status IN ('verified', 'release_candidate')",
-            &[&source_id, &adapter_profile],
-        ).await?.map(|row| -> Result<ManagedFrontier> {
-            Ok(ManagedFrontier {
-                epoch: row.get("epoch"),
-                segment_count: usize::try_from(row.get::<_, i64>("segment_count"))?,
-                chain: hex::encode(row.get::<_, Vec<u8>>("chain")),
-                last_run_id: row.get("last_run_id"),
-                last_generation_id: row.get("last_generation_id"),
-                appends_since_full: u64::try_from(row.get::<_, i64>("appends_since_full"))?,
+                &[&source_id, &adapter_profile],
+            )
+            .await?
+            .map(|row| -> Result<ManagedFrontier> {
+                Ok(ManagedFrontier {
+                    epoch: row.get("epoch"),
+                    segment_count: usize::try_from(row.get::<_, i64>("segment_count"))?,
+                    chain: hex::encode(row.get::<_, Vec<u8>>("chain")),
+                    last_run_id: row.get("last_run_id"),
+                    last_generation_id: row.get("last_generation_id"),
+                    appends_since_full: u64::try_from(row.get::<_, i64>("appends_since_full"))?,
+                })
             })
-        }).transpose()?
+            .transpose()?
     } else {
         None
     };
-    let trusted_prefix = managed_frontier.as_ref().map(|frontier| {
-        plugins::managed_append::TrustedPrefix {
-            epoch: frontier.epoch.to_string(),
-            segments: frontier.segment_count,
-            chain: frontier.chain.clone(),
-        }
-    });
+    let trusted_prefix =
+        managed_frontier
+            .as_ref()
+            .map(|frontier| plugins::managed_append::TrustedPrefix {
+                epoch: frontier.epoch.to_string(),
+                segments: frontier.segment_count,
+                chain: frontier.chain.clone(),
+            });
     let managed_full_comparison = managed_frontier.as_ref().is_none_or(|frontier| {
         frontier.last_generation_id != predecessor_generation_id
             || frontier.appends_since_full + 1
@@ -721,9 +729,15 @@ where
         .ok_or_else(|| anyhow::anyhow!("source adapter is unavailable"))?;
     let (observed_sync, managed_identity) = if source_type == "managed_append" {
         let snapshot = plugins::managed_append::read_snapshot(
-            source_path, trusted_prefix.as_ref(), managed_full_comparison,
-        ).await?;
-        (snapshot.observed, Some((snapshot.epoch, snapshot.chain, snapshot.identities)))
+            source_path,
+            trusted_prefix.as_ref(),
+            managed_full_comparison,
+        )
+        .await?;
+        (
+            snapshot.observed,
+            Some((snapshot.epoch, snapshot.chain, snapshot.identities)),
+        )
     } else {
         let observed = match mode {
             SliceMode::PublicFixture => plugin.sync_observed(source_path).await?,
@@ -827,20 +841,26 @@ where
             bail!("idempotent storage-v2 run exists but its generation is not qualified");
         }
         if let Some((epoch, chain, _)) = &managed_identity {
-            if managed_frontier.as_ref().is_none_or(|frontier| {
-                frontier.last_generation_id != run.generation_id
-            }) {
+            if managed_frontier
+                .as_ref()
+                .is_none_or(|frontier| frontier.last_generation_id != run.generation_id)
+            {
                 let chain_bytes = hex::decode(chain)?;
-                let published: i64 = client.query_one(
-                    "SELECT storage_v2_publish_managed_append_frontier($1,$2,$3,$4,$5,TRUE)",
-                    &[
-                        &run.id,
-                        &managed_frontier.as_ref().map(|frontier| frontier.last_generation_id),
-                        &Uuid::parse_str(epoch)?,
-                        &i64::try_from(files.len())?,
-                        &chain_bytes,
-                    ],
-                ).await?.get(0);
+                let published: i64 = client
+                    .query_one(
+                        "SELECT storage_v2_publish_managed_append_frontier($1,$2,$3,$4,$5,TRUE)",
+                        &[
+                            &run.id,
+                            &managed_frontier
+                                .as_ref()
+                                .map(|frontier| frontier.last_generation_id),
+                            &Uuid::parse_str(epoch)?,
+                            &i64::try_from(files.len())?,
+                            &chain_bytes,
+                        ],
+                    )
+                    .await?
+                    .get(0);
                 if published != i64::try_from(files.len())? {
                     bail!("managed append restart omitted verified frontier items");
                 }
@@ -920,20 +940,28 @@ where
                 && frontier.segment_count > 0
             {
                 let prefix_files = &files[..frontier.segment_count];
-                let keys = prefix_files.iter().map(|file| file.item_key.clone()).collect::<Vec<_>>();
-                let digests = prefix_files.iter()
+                let keys = prefix_files
+                    .iter()
+                    .map(|file| file.item_key.clone())
+                    .collect::<Vec<_>>();
+                let digests = prefix_files
+                    .iter()
                     .map(|file| file.content_sha256.expect("managed digest").to_vec())
                     .collect::<Vec<_>>();
-                let lengths = prefix_files.iter()
+                let lengths = prefix_files
+                    .iter()
                     .map(|file| i64::try_from(file.logical_length))
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 if identities.len() != files.len() {
                     bail!("managed append identities changed before reuse");
                 }
-                let copied: i64 = client.query_one(
-                    "SELECT storage_v2_copy_managed_append_prefix($1,$2,$3,$4,$5)",
-                    &[&run.id, &frontier.last_run_id, &keys, &digests, &lengths],
-                ).await?.get(0);
+                let copied: i64 = client
+                    .query_one(
+                        "SELECT storage_v2_copy_managed_append_prefix($1,$2,$3,$4,$5)",
+                        &[&run.id, &frontier.last_run_id, &keys, &digests, &lengths],
+                    )
+                    .await?
+                    .get(0);
                 if copied != i64::try_from(keys.len())? {
                     bail!("managed append prefix copy omitted staged items");
                 }
@@ -951,7 +979,8 @@ where
     // finish per body. Source bytes are still loaded one group at a time.
     content_body::with_reader_epoch(client, async {
         for group in group_body_indices(&files)? {
-            let group = group.into_iter()
+            let group = group
+                .into_iter()
                 .filter(|index| !copied_keys.contains(&files[*index].item_key))
                 .collect::<Vec<_>>();
             if group.is_empty() {
@@ -1066,15 +1095,20 @@ where
         )?;
     }
     if result_pack_id.is_none() && !copied_keys.is_empty() {
-        let prior_pack = client.query_opt(
-            "SELECT body.pack_id, pack.stored_bytes FROM storage_v2_ingest_run_item item \
+        let prior_pack = client
+            .query_opt(
+                "SELECT body.pack_id, pack.stored_bytes FROM storage_v2_ingest_run_item item \
              JOIN artifact_version artifact ON artifact.id=item.artifact_version_id \
              JOIN content_node node ON node.id=artifact.content_root_node_id \
              JOIN content_body body ON body.id=node.body_id \
              JOIN content_pack pack ON pack.id=body.pack_id \
              WHERE item.run_id=$1 ORDER BY body.pack_id LIMIT 1",
-            &[&managed_frontier.as_ref().context("copied prefix lacks frontier")?.last_run_id],
-        ).await?;
+                &[&managed_frontier
+                    .as_ref()
+                    .context("copied prefix lacks frontier")?
+                    .last_run_id],
+            )
+            .await?;
         if let Some(row) = prior_pack {
             result_pack_id = Some(row.get("pack_id"));
             result_pack_stored_bytes = u64::try_from(row.get::<_, i64>("stored_bytes"))?;
@@ -1101,7 +1135,6 @@ where
     measurements.record_stage(ShadowIngestStage::ContentStore, content_started.elapsed());
 
     let parser = CodeParser::new()?;
-    let mut symbol_count = 0_usize;
     let mut controlled_retry_count = 0_usize;
     let mut controlled_retry_done = false;
     let score_stages = vec![
@@ -1157,7 +1190,9 @@ where
             if copied_keys.contains(&file.item_key) {
                 continue;
             }
-            let body = body.as_ref().context("shadow content store omitted a fixture body")?;
+            let body = body
+                .as_ref()
+                .context("shadow content store omitted a fixture body")?;
             let path = &file.path;
             let item_key = &file.item_key;
             let language = &file.language;
@@ -1368,7 +1403,6 @@ where
                     )
                     .await?
                     .get(0);
-                symbol_count += 1;
             }
             client
                 .execute(
@@ -1390,11 +1424,15 @@ where
     let stabilization_started = Instant::now();
     let (final_observed_sync, final_managed_identities) = if source_type == "managed_append" {
         let snapshot = plugins::managed_append::read_snapshot(
-            source_path, trusted_prefix.as_ref(), managed_full_comparison,
-        ).await?;
-        if managed_identity.as_ref().is_none_or(|(epoch, chain, _)| {
-            epoch != &snapshot.epoch || chain != &snapshot.chain
-        }) {
+            source_path,
+            trusted_prefix.as_ref(),
+            managed_full_comparison,
+        )
+        .await?;
+        if managed_identity
+            .as_ref()
+            .is_none_or(|(epoch, chain, _)| epoch != &snapshot.epoch || chain != &snapshot.chain)
+        {
             bail!("managed append manifest changed before sealing");
         }
         (snapshot.observed, Some(snapshot.identities))
@@ -1552,17 +1590,22 @@ where
         }
     } else if let Some((epoch, chain, _)) = &managed_identity {
         let chain_bytes = hex::decode(chain)?;
-        let published: i64 = client.query_one(
-            "SELECT storage_v2_publish_managed_append_frontier($1,$2,$3,$4,$5,$6)",
-            &[
-                &run.id,
-                &managed_frontier.as_ref().map(|frontier| frontier.last_generation_id),
-                &Uuid::parse_str(epoch)?,
-                &i64::try_from(files.len())?,
-                &chain_bytes,
-                &managed_full_comparison,
-            ],
-        ).await?.get(0);
+        let published: i64 = client
+            .query_one(
+                "SELECT storage_v2_publish_managed_append_frontier($1,$2,$3,$4,$5,$6)",
+                &[
+                    &run.id,
+                    &managed_frontier
+                        .as_ref()
+                        .map(|frontier| frontier.last_generation_id),
+                    &Uuid::parse_str(epoch)?,
+                    &i64::try_from(files.len())?,
+                    &chain_bytes,
+                    &managed_full_comparison,
+                ],
+            )
+            .await?
+            .get(0);
         if published != i64::try_from(files.len())? {
             bail!("managed append frontier omitted selected segments");
         }
@@ -1582,12 +1625,17 @@ where
         &final_files,
     )?;
     measurements.record_total(total_started.elapsed());
-    symbol_count = usize::try_from(client.query_one(
-        "SELECT COUNT(*) FROM storage_v2_symbol_occurrence symbol \
+    let symbol_count = usize::try_from(
+        client
+            .query_one(
+                "SELECT COUNT(*) FROM storage_v2_symbol_occurrence symbol \
          JOIN storage_v2_ingest_run_item item ON item.occurrence_id=symbol.occurrence_id \
          WHERE item.run_id=$1",
-        &[&run.id],
-    ).await?.get::<_, i64>(0))?;
+                &[&run.id],
+            )
+            .await?
+            .get::<_, i64>(0),
+    )?;
     Ok(ShadowSliceResult {
         run_id: run.id,
         source_id,
