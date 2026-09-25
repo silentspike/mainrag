@@ -32,13 +32,13 @@ pub struct ShadowIntelligenceQuery {
     pub include_test: bool,
 }
 
-#[cfg(feature = "storage-v2-intelligence")]
 pub async fn intelligence_default_read_path(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let active = state
-        .config
-        .server
-        .storage_v2_default_read_manifest_sha256
-        .is_some();
+    let active = cfg!(feature = "storage-v2-intelligence")
+        && state
+            .config
+            .server
+            .storage_v2_default_read_manifest_sha256
+            .is_some();
     Json(serde_json::json!({
         "read_path": if active { "storage_v2_active" } else { "current" }
     }))
