@@ -100,6 +100,11 @@ jobs:
       - run: cargo check --workspace --all-targets
       - name: Check storage-v2 API routes with features enabled
         run: cargo check -p mainrag-api --features storage-v2-retrieval --bin mainrag-api
+      - name: Verify final storage-v2 source read accounting
+        shell: bash
+        run: |
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib services::shadow_slice::tests::final_watermark_scan_counts_both_adapter_and_deferred_reads -- --exact --nocapture | tee final-source-reads-tests.log
+          python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("final-source-reads-tests.log").read_text(), "Expected the final source read accounting regression to execute"'
       - name: Verify CPU backfill route isolation
         shell: bash
         run: |
