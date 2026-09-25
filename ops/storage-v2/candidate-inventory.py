@@ -49,6 +49,9 @@ LEFT JOIN LATERAL (
         'evidence_id', evidence.id,
         'commit_sha', evidence.commit_sha,
         'source_watermark_sha256', evidence.source_watermark_sha256,
+        'adapter_profile_id', evidence.adapter_profile_id,
+        'analysis_profile_id', evidence.analysis_profile_id,
+        'search_profile_id', evidence.search_profile_id,
         'qualification_manifest', evidence.manifest,
         'qualification_manifest_sha256', encode(evidence.manifest_sha256, 'hex'),
         'qualification_manifest_digest_matches',
@@ -107,13 +110,18 @@ def read_sources(database: str, local_postgres: bool = False) -> list[dict]:
     return rows
 
 
-def capture(rows: list[dict], operator_commit_sha: str) -> tuple[dict, dict]:
+def capture(rows: list[dict], operator_commit_sha: str,
+            candidate_commit_sha: str) -> tuple[dict, dict]:
     if not rows:
         raise RuntimeError("source inventory is empty")
     if len(operator_commit_sha) != 40 or any(
         character not in "0123456789abcdef" for character in operator_commit_sha
     ):
         raise RuntimeError("exact lowercase operator commit SHA is required")
+    if len(candidate_commit_sha) != 40 or any(
+        character not in "0123456789abcdef" for character in candidate_commit_sha
+    ):
+        raise RuntimeError("exact lowercase candidate package commit SHA is required")
     seen: set[int] = set()
     protected = []
     type_counts: Counter[str] = Counter()
@@ -164,6 +172,7 @@ def capture(rows: list[dict], operator_commit_sha: str) -> tuple[dict, dict]:
             if generation["status"] == "release_candidate" and not all(
                 generation.get(key) for key in (
                     "evidence_id", "commit_sha", "source_watermark_sha256",
+                    "adapter_profile_id", "analysis_profile_id", "search_profile_id",
                     "qualification_manifest", "qualification_manifest_sha256",
                 )
             ):
@@ -183,6 +192,7 @@ def capture(rows: list[dict], operator_commit_sha: str) -> tuple[dict, dict]:
         "capture_status": "OBSERVED_ONLY",
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "operator_commit_sha": operator_commit_sha,
+        "candidate_commit_sha": candidate_commit_sha,
         "inventory_id": str(uuid.uuid4()),
         "sources": protected,
     }
@@ -210,6 +220,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", required=True)
     parser.add_argument("--operator-commit-sha", required=True)
+    parser.add_argument("--candidate-commit-sha", required=True)
     parser.add_argument("--protected-output", type=Path, required=True)
     parser.add_argument("--local-postgres", action="store_true")
     arguments = parser.parse_args()
@@ -238,7 +249,8 @@ def main() -> int:
         parser.error("protected inventory already exists")
     try:
         inventory, public = capture(
-            read_sources(arguments.database, arguments.local_postgres), arguments.operator_commit_sha
+            read_sources(arguments.database, arguments.local_postgres),
+            arguments.operator_commit_sha, arguments.candidate_commit_sha
         )
         private_create(arguments.protected_output, inventory)
     except FileExistsError:
