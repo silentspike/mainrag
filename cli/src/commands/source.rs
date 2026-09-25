@@ -17,7 +17,16 @@ pub async fn run(
             name,
             generation,
             include_test,
-        } => source_state(client, &name, generation.as_deref(), include_test, json_output).await,
+        } => {
+            source_state(
+                client,
+                &name,
+                generation.as_deref(),
+                include_test,
+                json_output,
+            )
+            .await
+        }
         SourceAction::ShadowSlice { name, commit_sha } => {
             shadow_slice(client, &name, &commit_sha, json_output).await
         }
@@ -113,9 +122,7 @@ async fn source_state(
     if let Some(generation) = generation {
         if generation.is_empty()
             || generation.starts_with('0')
-            || !generation
-                .parse::<i64>()
-                .is_ok_and(|sequence| sequence > 0)
+            || !generation.parse::<i64>().is_ok_and(|sequence| sequence > 0)
         {
             anyhow::bail!("--generation must be a positive storage-v2 generation sequence");
         }
