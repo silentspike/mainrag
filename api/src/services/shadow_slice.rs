@@ -529,7 +529,7 @@ where
     })
 }
 
-/// Run a bounded public fixture from the real source adapter through the
+/// Run a bounded public fixture from a supported source adapter through the
 /// storage-v2 body, graph, analysis, intelligence, search and generation APIs.
 /// The source must already exist and be marked `is_test`; this function never
 /// changes an active pointer or writes legacy mutable search state.
@@ -599,8 +599,10 @@ async fn run_storage_v2_slice<C>(
 where
     C: GenericClient + Sync,
 {
-    if (mode == SliceMode::PublicFixture && source_type != "fs") || !is_git_sha(commit_sha) {
-        bail!("shadow slice requires the filesystem adapter and an exact commit SHA");
+    if (mode == SliceMode::PublicFixture && !matches!(source_type, "fs" | "managed_append"))
+        || !is_git_sha(commit_sha)
+    {
+        bail!("shadow slice requires a supported fixture adapter and an exact commit SHA");
     }
     if !(4096..=1024 * 1024).contains(&io_buffer_bytes) {
         bail!("shadow slice I/O buffer must be between 4096 and 1048576 bytes");
@@ -666,6 +668,9 @@ where
         .unwrap_or(0);
     measurements.record_stage(ShadowIngestStage::ReadAndHash, adapter_started.elapsed());
     let adapter_profile = match mode {
+        SliceMode::PublicFixture if source_type == "managed_append" => {
+            "mainrag.managed-append-fixture.v1.full".to_string()
+        }
         SliceMode::PublicFixture => FIXTURE_ADAPTER_PROFILE.to_string(),
         SliceMode::ReleaseCandidate => release_adapter_profile(source_type)?,
     };
@@ -1533,6 +1538,9 @@ fn release_source_watermark(
 }
 
 fn release_adapter_profile(source_type: &str) -> Result<String> {
+    if source_type == "managed_append" {
+        return Ok("mainrag.managed-append-release-candidate.v1.full".to_string());
+    }
     if source_type == "fs" {
         return Ok("mainrag.fs-release-candidate.v2.fragment-1048576-newline-65536".to_string());
     }

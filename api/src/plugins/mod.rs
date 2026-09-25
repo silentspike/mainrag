@@ -10,6 +10,8 @@ use async_trait::async_trait;
 pub mod export;
 pub mod fs;
 pub mod git;
+#[cfg(feature = "storage-v2-retrieval")]
+pub mod managed_append;
 pub mod pdf;
 #[allow(dead_code)]
 pub mod pdf_cleanup;
@@ -127,6 +129,8 @@ pub fn detect_source_type(path: &str) -> String {
 pub fn get_plugin(source_type: &str) -> Option<Box<dyn SourcePlugin>> {
     match source_type {
         "fs" => Some(Box::new(fs::FilesystemPlugin::new())),
+        #[cfg(feature = "storage-v2-retrieval")]
+        "managed_append" => Some(Box::new(managed_append::ManagedAppendPlugin)),
         "git" => Some(Box::new(git::GitPlugin::new())),
         "web" => Some(Box::new(web::WebPlugin::new())),
         "pdf" => Some(Box::new(pdf::PdfPlugin::new())),
