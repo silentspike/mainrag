@@ -24,6 +24,8 @@ from pathlib import Path
 CATALOG_SQL = """
 BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SET LOCAL row_security = off;
+SET LOCAL lock_timeout = '5s';
+%TARGET_LOCK_SQL%
 SELECT jsonb_build_object(
   'database_oid', (SELECT oid FROM pg_database WHERE datname = current_database()),
   'relations', (
@@ -135,9 +137,45 @@ SELECT jsonb_build_object(
   'active_pointer_count', (
     SELECT count(*) FROM logical_source WHERE active_generation_id IS NOT NULL
   ),
+  'pointer_set_sha256', (
+    SELECT encode(digest(convert_to(COALESCE(jsonb_agg(jsonb_build_object(
+      'source_id', source.id,
+      'active_generation_id', source.active_generation_id
+    ) ORDER BY source.id), '[]'::jsonb)::text, 'UTF8'), 'sha256'), 'hex')
+    FROM logical_source AS source
+  ),
+  'open_reader_count', (
+    SELECT count(*) FROM content_reader_epoch WHERE finished_at IS NULL
+  ),
+  'building_run_count', (
+    SELECT count(*) FROM storage_v2_ingest_run WHERE status = 'building'
+  ),
+  'generations', (
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+      'id', generation.id,
+      'source_id', generation.source_id,
+      'sequence', generation.generation_seq,
+      'status', generation.status::text,
+      'item_count', generation.item_count,
+      'verification_manifest_sha256', generation.verification_manifest_sha256
+    ) ORDER BY generation.id), '[]'::jsonb)
+    FROM source_generation AS generation
+  ),
+  'packs', (
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+      'id', pack.id,
+      'status', pack.status::text,
+      'stored_bytes', pack.stored_bytes,
+      'live_bytes', pack.live_bytes,
+      'entry_count', pack.entry_count,
+      'manifest_sha256', encode(pack.manifest_sha256, 'hex')
+    ) ORDER BY pack.id), '[]'::jsonb)
+    FROM content_pack AS pack
+  ),
   'activation_receipt_relation_oid', (
     SELECT to_regclass('public.storage_v2_activation_set_evidence')::oid
-  )
+  ),
+  'exact_rows', (%EXACT_ROWS_SQL%)
 )::text;
 COMMIT;
 """
@@ -157,7 +195,38 @@ def unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def catalog(database: str, local_postgres: bool) -> dict:
+def validate_relation_names(relation_names: tuple[str, ...]) -> None:
+    if len(relation_names) > 64 or len(set(relation_names)) != len(relation_names) \
+            or any(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None
+                   for name in relation_names):
+        raise RuntimeError("exact-count relation list is invalid or exceeds its bound")
+
+
+def exact_rows_sql(relation_names: tuple[str, ...]) -> str:
+    validate_relation_names(relation_names)
+    if not relation_names:
+        return "'{}'::jsonb"
+    rows = ",\n".join(
+        f"('{name}', (SELECT count(*) FROM public.\"{name}\"))"
+        for name in relation_names
+    )
+    return ("SELECT jsonb_object_agg(name, row_count) FROM (VALUES\n"
+            + rows + "\n) AS counted(name, row_count)")
+
+
+def target_lock_sql(relation_names: tuple[str, ...]) -> str:
+    validate_relation_names(relation_names)
+    return "\n".join(
+        f'LOCK TABLE public."{name}" IN ACCESS SHARE MODE;'
+        for name in relation_names
+    )
+
+
+def catalog(database: str, local_postgres: bool,
+            relation_names: tuple[str, ...] = ()) -> dict:
+    count_sql = exact_rows_sql(relation_names)
+    statement = CATALOG_SQL.replace("%EXACT_ROWS_SQL%", count_sql).replace(
+        "%TARGET_LOCK_SQL%", target_lock_sql(relation_names))
     command = (["sudo", "-n", "-u", "postgres"] if local_postgres else []) + [
         "psql", "-X", "--no-psqlrc", "-qAt", "--set=ON_ERROR_STOP=1",
         "--dbname", database,
@@ -167,7 +236,7 @@ def catalog(database: str, local_postgres: bool) -> dict:
     environment["PGOPTIONS"] = (
         environment.get("PGOPTIONS", "") + " -c default_transaction_read_only=on"
     ).strip()
-    completed = subprocess.run(command, input=CATALOG_SQL, text=True,
+    completed = subprocess.run(command, input=statement, text=True,
                                capture_output=True, env=environment, check=False)
     if completed.returncode:
         raise RuntimeError("read-only cleanup catalog capture failed")
@@ -179,17 +248,30 @@ def catalog(database: str, local_postgres: bool) -> dict:
         raise RuntimeError("cleanup catalog response is invalid") from error
     required = {"database_oid", "relations", "columns", "constraints", "policies",
                 "triggers", "functions", "indexes", "dependencies",
-                "active_pointer_count", "activation_receipt_relation_oid"}
+                "active_pointer_count", "pointer_set_sha256", "open_reader_count",
+                "building_run_count", "generations", "packs",
+                "activation_receipt_relation_oid", "exact_rows"}
     if not isinstance(value, dict) or set(value) != required \
             or any(not isinstance(value[key], list) for key in required - {
-                "database_oid", "active_pointer_count", "activation_receipt_relation_oid"
+                "database_oid", "active_pointer_count", "activation_receipt_relation_oid",
+                "exact_rows", "pointer_set_sha256", "open_reader_count",
+                "building_run_count"
             }) or not (isinstance(value["database_oid"], str)
                        and value["database_oid"].isdecimal()) \
-            or type(value["active_pointer_count"]) is not int \
+            or any(type(value[key]) is not int or value[key] < 0 for key in (
+                "active_pointer_count", "open_reader_count", "building_run_count"
+            )) or not (isinstance(value["pointer_set_sha256"], str)
+                       and re.fullmatch(r"[0-9a-f]{64}", value["pointer_set_sha256"])) \
             or (value["activation_receipt_relation_oid"] is not None
                 and not (isinstance(value["activation_receipt_relation_oid"], str)
-                         and value["activation_receipt_relation_oid"].isdecimal())):
+                         and value["activation_receipt_relation_oid"].isdecimal())) \
+            or not isinstance(value["exact_rows"], dict) \
+            or set(value["exact_rows"]) != set(relation_names) \
+            or any(type(count) is not int or count < 0
+                   for count in value["exact_rows"].values()):
         raise RuntimeError("cleanup catalog response is incomplete")
+    if len(value["generations"]) > 100000 or len(value["packs"]) > 100000:
+        raise RuntimeError("cleanup catalog generation or pack inventory exceeds its bound")
     return value
 
 
@@ -216,6 +298,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", required=True)
     parser.add_argument("--local-postgres", action="store_true")
+    parser.add_argument("--count-relation", action="append", default=[])
     parser.add_argument("--output", required=True, type=Path)
     arguments = parser.parse_args()
     if re.fullmatch(r"[A-Za-z0-9_-]+", arguments.database) is None:
@@ -223,13 +306,14 @@ def main() -> int:
     if arguments.output.exists() or arguments.output.is_symlink():
         parser.error("protected output already exists")
     try:
-        observed = catalog(arguments.database, arguments.local_postgres)
+        observed = catalog(arguments.database, arguments.local_postgres,
+                           tuple(arguments.count_relation))
         artifact = {"schema_version": "mainrag.storage-v2.cleanup-catalog.v1",
                     "status": "OBSERVED_ONLY", "catalog": observed,
                     "observed_at_unix": int(time.time()),
                     "before_state_sha256": hashlib.sha256(canonical(observed)).hexdigest(),
                     "operator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                    "limitations": ["No exact row counts or reviewed dispositions.",
+                    "limitations": ["Only explicitly requested relations have exact row counts; no reviewed dispositions.",
                                     "No Qdrant, runtime caller, export or pack reachability inventory.",
                                     "No post-activation acceptance or deletion authority."]}
         digest = private_create(arguments.output, artifact)
@@ -239,6 +323,7 @@ def main() -> int:
         parser.error("protected cleanup catalog output is unavailable")
     print(json.dumps({"status": "OBSERVED_ONLY", "sha256": digest,
                       "relation_count": len(observed["relations"]),
+                      "exact_count_relation_count": len(observed["exact_rows"]),
                       "dependency_count": len(observed["dependencies"])}, sort_keys=True))
     return 0
 

@@ -21,7 +21,10 @@ def catalog_fixture():
         "database_oid": "1", "relations": [], "columns": [], "constraints": [],
         "policies": [], "triggers": [], "functions": [], "indexes": [],
         "dependencies": [], "active_pointer_count": 0,
+        "pointer_set_sha256": "a" * 64, "open_reader_count": 0,
+        "building_run_count": 0, "generations": [], "packs": [],
         "activation_receipt_relation_oid": None,
+        "exact_rows": {},
     }
 
 
@@ -39,6 +42,16 @@ class CleanupPlanCaptureTests(unittest.TestCase):
         self.assertEqual(command[:4], ["sudo", "-n", "-u", "postgres"])
         self.assertIn("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", kwargs["input"])
         self.assertIn("default_transaction_read_only=on", kwargs["env"]["PGOPTIONS"])
+        self.assertIn("'exact_rows', ('{}'::jsonb)", kwargs["input"])
+        self.assertNotIn("%TARGET_LOCK_SQL%", kwargs["input"])
+
+        with self.assertRaisesRegex(RuntimeError, "invalid"):
+            cleanup.exact_rows_sql(("files; DROP TABLE files",))
+        with self.assertRaisesRegex(RuntimeError, "invalid"):
+            cleanup.exact_rows_sql(("files", "files"))
+        self.assertIn("FROM public.\"files\"", cleanup.exact_rows_sql(("files",)))
+        self.assertEqual(cleanup.target_lock_sql(("files",)),
+                         'LOCK TABLE public."files" IN ACCESS SHARE MODE;')
 
         broken = {**catalog_fixture(), "relations": None}
         with patch.object(cleanup.subprocess, "run", return_value=SimpleNamespace(
@@ -46,6 +59,11 @@ class CleanupPlanCaptureTests(unittest.TestCase):
         )):
             with self.assertRaisesRegex(RuntimeError, "incomplete"):
                 cleanup.catalog("fixture", False)
+        with patch.object(cleanup.subprocess, "run", return_value=SimpleNamespace(
+            returncode=0, stdout=json.dumps(catalog_fixture())
+        )):
+            with self.assertRaisesRegex(RuntimeError, "incomplete"):
+                cleanup.catalog("fixture", False, ("files",))
         with patch.object(cleanup.subprocess, "run", return_value=SimpleNamespace(
             returncode=0, stdout='{"database_oid":"1","database_oid":"2"}'
         )):
