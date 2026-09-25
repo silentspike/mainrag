@@ -190,13 +190,18 @@ pub async fn read_snapshot(
             verify_segment(&path, segment, &accounting).await?;
         }
         chain = segment_chain(chain, segment);
-        if prefix.is_some_and(|prefix| index + 1 == prefix.segments && hex::encode(chain) != prefix.chain) {
+        if prefix.is_some_and(|prefix| {
+            index + 1 == prefix.segments && hex::encode(chain) != prefix.chain
+        }) {
             bail!("managed append trusted prefix chain changed");
         }
         let sha256: [u8; 32] = hex::decode(&segment.sha256)?
             .try_into()
             .map_err(|_| anyhow::anyhow!("invalid managed append digest"))?;
-        identities.push(SegmentIdentity { bytes: segment.bytes, sha256 });
+        identities.push(SegmentIdentity {
+            bytes: segment.bytes,
+            sha256,
+        });
         files.push(RawFile {
             // The epoch is part of the stable logical item key. Rotation
             // cannot silently reuse an earlier generation's occurrences.
@@ -305,29 +310,39 @@ mod tests {
         let file = &observed.result.files[0];
         assert!(file.path.contains("/segments/"));
         let source = file.source_path.as_ref().unwrap();
-        let first_manifest: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(root.join("manifest.json")).unwrap(),
-        ).unwrap();
+        let first_manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap()).unwrap();
         let prefix = TrustedPrefix {
             epoch: first_manifest["epoch"].as_str().unwrap().to_string(),
             segments: 1,
             chain: first_manifest["chain"].as_str().unwrap().to_string(),
         };
         std::fs::write(&input, b"{\"event\":\"next\"}\n").unwrap();
-        let appended = Command::new("python3").arg(&script).arg("append")
-            .arg(&root).arg(&input).output().unwrap();
+        let appended = Command::new("python3")
+            .arg(&script)
+            .arg("append")
+            .arg(&root)
+            .arg(&input)
+            .output()
+            .unwrap();
         assert!(appended.status.success());
         let delta = read_snapshot(root.to_str().unwrap(), Some(&prefix), false)
-            .await.unwrap();
+            .await
+            .unwrap();
         assert_eq!(delta.identities.len(), 2);
         let current_manifest_length = std::fs::metadata(root.join("manifest.json")).unwrap().len();
-        assert_eq!(delta.observed.application_read_bytes,
-            Some(current_manifest_length + b"{\"event\":\"next\"}\n".len() as u64));
+        assert_eq!(
+            delta.observed.application_read_bytes,
+            Some(current_manifest_length + b"{\"event\":\"next\"}\n".len() as u64)
+        );
         let restarted = read_snapshot(root.to_str().unwrap(), Some(&prefix), false)
-            .await.unwrap();
+            .await
+            .unwrap();
         assert_eq!(restarted.chain, delta.chain);
-        assert_eq!(restarted.observed.application_read_bytes,
-            delta.observed.application_read_bytes);
+        assert_eq!(
+            restarted.observed.application_read_bytes,
+            delta.observed.application_read_bytes
+        );
         let mut permissions = std::fs::metadata(source).unwrap().permissions();
         permissions.set_readonly(false);
         std::fs::set_permissions(source, permissions).unwrap();
@@ -341,8 +356,14 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("does not match its manifest"));
-        assert!(read_snapshot(root.to_str().unwrap(), Some(&prefix), false).await.is_ok(),
-            "the declared trusted interval skips old content until the next full comparison");
-        assert!(read_snapshot(root.to_str().unwrap(), Some(&prefix), true).await.is_err());
+        assert!(
+            read_snapshot(root.to_str().unwrap(), Some(&prefix), false)
+                .await
+                .is_ok(),
+            "the declared trusted interval skips old content until the next full comparison"
+        );
+        assert!(read_snapshot(root.to_str().unwrap(), Some(&prefix), true)
+            .await
+            .is_err());
     }
 }
