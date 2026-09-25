@@ -347,8 +347,10 @@ results. Installing migration 061 alone does not switch the default.
 
 The API keeps legacy reads as the default unless
 `MAINRAG_STORAGE_V2_DEFAULT_READ_MANIFEST_SHA256` names that exact reviewed
-activation manifest. With that setting, an omitted `read_path` uses the active
-storage-v2 set; `read_path=current` remains an explicit legacy rollback route
+activation manifest. The coupled switch also installs
+`MAINRAG_STORAGE_V2_ACTIVE_INGEST_COMMIT_SHA`, bound to the reviewed runtime
+commit; the API requires both settings together. With that setting, an omitted
+`read_path` uses the active storage-v2 set; `read_path=current` remains an explicit legacy rollback route
 until cleanup. `read_path=storage_v2` still requires a named source and
 generation for verification. `read_path=storage_v2_active` selects the active
 set explicitly and fails if the manifest setting is absent. A stale receipt,
@@ -359,6 +361,19 @@ switch still requires the #67 activation procedure, current package readback,
 aggregate quality, and post-activation health evidence.
 The CLI's `mainrag search` uses `--read-path auto` by default, so it follows
 the API selection; `--read-path current` explicitly retains the legacy route.
+
+Migration 065 permits the first ordinary source sync after activation. The
+normal admin source and file-sync routes observe the registered source, build
+and commit a sealed, verified storage-v2 generation when its watermark changes,
+then reverify stored bodies and generation state. A short second transaction
+checks the source registry and complete active set before advancing exactly one
+active pointer with an immutable receipt. Active search, source
+inspection, and intelligence require the latest chained pointer-set receipt.
+No-change sync leaves the pointer intact. The file-sync route currently uses
+a full-source observation for ordinary adapters and a verified prefix scan for
+managed append; it reports the mode explicitly. Legacy mutable
+index and Qdrant state remain untouched. Installing migration 065 does not
+activate a generation or change the default read path.
 
 Apply the storage-v2 migrations as the database runtime/table owner. The
 controlled-write triggers deliberately require the table owner and the

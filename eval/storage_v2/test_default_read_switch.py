@@ -98,13 +98,14 @@ class DefaultReadSwitchTests(unittest.TestCase):
                               return_value=hashlib.sha256(b"reviewed-binary").hexdigest()), \
                  patch.object(SWITCH, "systemctl") as systemctl, \
                  patch.object(SWITCH, "read_service_state",
-                              side_effect=[(10, ""), (11, digest)]), \
+                              side_effect=[(10, "", ""), (11, digest, "d" * 40)]), \
                  patch.object(SWITCH, "api_read_path",
                               side_effect=["current", "storage_v2_active"]):
                 result = SWITCH.switch(args)
             self.assertEqual(result["status"], "DEFAULT_SWITCHED_POST_INGEST_PENDING")
             self.assertEqual((directory / "selector.env").read_text(),
-                             SWITCH.ENV_NAME + "=" + digest + "\n")
+                             SWITCH.ENV_NAME + "=" + digest + "\n"
+                             + SWITCH.ACTIVE_COMMIT_ENV_NAME + "=" + "d" * 40 + "\n")
             self.assertIn("EnvironmentFile=", (directory / "unit.conf").read_text())
             self.assertEqual(verified.call_count, 2)
             systemctl.assert_any_call("restart", SWITCH.UNIT)
@@ -117,7 +118,8 @@ class DefaultReadSwitchTests(unittest.TestCase):
                  patch.object(SWITCH, "service_binary_sha256",
                               return_value=hashlib.sha256(b"reviewed-binary").hexdigest()), \
                  patch.object(SWITCH, "systemctl") as retry_systemctl, \
-                 patch.object(SWITCH, "read_service_state", return_value=(11, digest)), \
+                 patch.object(SWITCH, "read_service_state",
+                              return_value=(11, digest, "d" * 40)), \
                  patch.object(SWITCH, "api_read_path", return_value="storage_v2_active"):
                 retried = SWITCH.switch(args)
             self.assertEqual(retried["status"], "DEFAULT_SWITCHED_POST_INGEST_PENDING")
@@ -132,7 +134,7 @@ class DefaultReadSwitchTests(unittest.TestCase):
                  patch.object(SWITCH, "API_BINARY", directory / "mainrag-api"), \
                  patch.object(SWITCH.OPERATOR, "committed_readback", return_value={}), \
                  patch.object(SWITCH.OPERATOR, "verify_committed"), \
-                 patch.object(SWITCH, "read_service_state", return_value=(10, "")), \
+                 patch.object(SWITCH, "read_service_state", return_value=(10, "", "")), \
                  patch.object(SWITCH, "service_binary_sha256", return_value="0" * 64), \
                  patch.object(SWITCH, "systemctl") as systemctl:
                 with self.assertRaisesRegex(RuntimeError, "running API binary differs"):
