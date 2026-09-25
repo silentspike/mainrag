@@ -48,6 +48,30 @@ def source(source_id: int = 1) -> dict:
 
 
 class CandidateInventoryTests(unittest.TestCase):
+    def test_mixed_commit_map_binds_each_live_generation(self) -> None:
+        second = source(2)
+        second["generations"][0].update(generation_id=6, commit_sha="c" * 40)
+        commit_map = {
+            "schema_version": "mainrag.storage-v2.final-candidate-commit-map.v1",
+            "sources": [
+                {"source_id": 1, "candidate_generation_id": 5,
+                 "candidate_commit_sha": "b" * 40},
+                {"source_id": 2, "candidate_generation_id": 6,
+                 "candidate_commit_sha": "c" * 40},
+            ],
+        }
+        protected, public = INVENTORY.capture(
+            [source(), second], "d" * 40, None, commit_map, "e" * 64)
+        self.assertEqual(protected["schema_version"],
+                         "mainrag.storage-v2.candidate-inventory.v2")
+        self.assertEqual(public["release_candidate_source_count"], 2)
+        with self.assertRaisesRegex(RuntimeError, "differs from live inventory"):
+            INVENTORY.capture([source(), second], "d" * 40, None,
+                              {**commit_map, "sources": [
+                                  commit_map["sources"][0],
+                                  {**commit_map["sources"][1],
+                                   "candidate_commit_sha": "f" * 40}]}, "e" * 64)
+
     def test_public_summary_contains_only_opaque_references_and_counts(self) -> None:
         second = source(2)
         second.update(name="another-private-name", path="/another/private-path",

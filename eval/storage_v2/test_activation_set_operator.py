@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import stat
 import tempfile
@@ -29,13 +30,15 @@ def fixture(binary: Path, now: int) -> tuple[dict, str, dict, str, dict, str, li
         "source_watermark_sha256": "2" * 64,
     }
     stored = {**candidate, "adapter_profile_id": "fixture-adapter",
+              "candidate_commit_sha": "e" * 40,
+              "item_count": 1,
               "analysis_profile_id": "fixture-analysis",
               "search_profile_id": "fixture-search",
               "verification_manifest_sha256": "3" * 64,
               "gold_suite_sha256": "4" * 64}
     candidate_set = [stored]
     audit = {
-        "schema_version": "mainrag.storage-v2.candidate-aggregate-audit.v1",
+        "schema_version": "mainrag.storage-v2.candidate-aggregate-audit.v2",
         "persisted_candidate_set_complete": True,
         "candidate_set_sha256": OPERATOR.sha256(OPERATOR.canonical(candidate_set)),
         "candidate_set": candidate_set,
@@ -68,7 +71,7 @@ def fixture(binary: Path, now: int) -> tuple[dict, str, dict, str, dict, str, li
                              "evidence_id": candidate["evidence_id"],
                              "evidence_manifest_sha256": "1" * 64,
                              "source_watermark_sha256": "2" * 64,
-                             "commit_sha": "c" * 40}]}]
+                             "commit_sha": "e" * 40}]}]
     return audit, audit_sha, acceptance, "6" * 64, preflight, "7" * 64, live
 
 
@@ -87,7 +90,7 @@ class ActivationOperatorTests(unittest.TestCase):
             self.assertEqual(plan["manifest"]["code_commit_sha"], "c" * 40)
             self.assertEqual(plan["manifest"]["aggregate_evidence_sha256"], accepted_sha)
             self.assertEqual(plan["manifest"]["sources"][0]["expected_active_generation_id"], None)
-            self.assertEqual(len(plan["manifest"]["sources"][0]), 6)
+            self.assertEqual(len(plan["manifest"]["sources"][0]), 7)
             self.assertEqual(plan["manifest_sha256"], "8" * 64)
             self.assertEqual(plan["default_switch"]["unit"], "mainrag-api.service")
 
@@ -171,6 +174,24 @@ class ActivationOperatorTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 OPERATOR.private_write(path, {"status": "second"})
             self.assertEqual(OPERATOR.read_private(path, digest)["status"], "first")
+
+    def test_live_watermark_gate_rejects_stale_source(self) -> None:
+        expected = [{"source_id": 1, "source_watermark_sha256": "a" * 64,
+                     "adapter_profile_id": "fixture", "item_count": 2}]
+        observed = {"source_id": 1, "source_watermark_sha256": "a" * 64,
+                    "adapter_profile_id": "fixture", "item_count": 2}
+        class Opener:
+            def open(self, request, timeout):
+                self.request = request
+                return io.BytesIO(json.dumps(observed).encode())
+        opener = Opener()
+        with patch.object(OPERATOR.urllib.request, "build_opener", return_value=opener):
+            OPERATOR.verify_current_api_watermarks("http://127.0.0.1:3001", "private", expected)
+            self.assertIn("Bearer private", opener.request.get_header("Authorization"))
+            observed["source_watermark_sha256"] = "b" * 64
+            with self.assertRaisesRegex(RuntimeError, "watermark drifted"):
+                OPERATOR.verify_current_api_watermarks(
+                    "http://127.0.0.1:3001", "private", expected)
 
 
 if __name__ == "__main__":

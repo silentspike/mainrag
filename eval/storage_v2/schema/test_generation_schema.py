@@ -293,6 +293,7 @@ $$;
             return f"SET app.user_id = '{user_id}'; {sql}"
         candidates = []
         evidence_ids = []
+        candidate_commits = {1: "b" * 40, 2: "c" * 40}
         for source_id in (1, 2):
             candidate_id = int(self.run_sql(database, as_actor(
                 ADMIN_ID,
@@ -309,7 +310,7 @@ INSERT INTO storage_v2_release_candidate_evidence(
     id, source_id, generation_id, commit_sha, source_watermark_sha256,
     adapter_profile_id, analysis_profile_id, search_profile_id,
     manifest, manifest_sha256
-) VALUES ('{evidence_id}', {source_id}, {candidate_id}, '{'c' * 40}',
+) VALUES ('{evidence_id}', {source_id}, {candidate_id}, '{candidate_commits[source_id]}',
           '{'b' * 64}', 'fixture-adapter', 'fixture-analysis', 'fixture-search',
           '{{"status":"PASS"}}', digest('{{"status":"PASS"}}', 'sha256'))
 """)
@@ -321,7 +322,7 @@ INSERT INTO storage_v2_release_candidate_evidence(
                             schema_version: str | None = "mainrag.storage-v2.activation-set.v1") -> str:
             manifest = {
                 "activation_id": activation_id or str(uuid.uuid4()),
-                "code_commit_sha": "c" * 40,
+                "code_commit_sha": "d" * 40,
                 "schema_sha256": "d" * 64,
                 "backend_package_sha256": "e" * 64,
                 "aggregate_evidence_sha256": "f" * 64,
@@ -337,6 +338,7 @@ INSERT INTO storage_v2_release_candidate_evidence(
 
         entries = [{"source_id": source_id,
                     "candidate_generation_id": candidate_id,
+                    "candidate_commit_sha": candidate_commits[source_id],
                     "expected_active_generation_id": None,
                     "evidence_id": evidence_id,
                     "evidence_manifest_sha256": self.run_sql(database,
@@ -365,6 +367,9 @@ INSERT INTO storage_v2_release_candidate_evidence(
             "candidate, pointer or qualification evidence drift")
         self.assert_sql_fails(database, as_actor(ADMIN_ID,
             activation_call([{**entries[0], "candidate_generation_id": candidates[1]}, entries[1]])),
+            "candidate, pointer or qualification evidence drift")
+        self.assert_sql_fails(database, as_actor(ADMIN_ID,
+            activation_call([{**entries[0], "candidate_commit_sha": "d" * 40}, entries[1]])),
             "candidate, pointer or qualification evidence drift")
         self.assertEqual(self.run_sql(database, pointers), "1:NULL,2:NULL")
 

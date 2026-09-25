@@ -133,6 +133,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     #[cfg(feature = "storage-v2-retrieval")]
     let long_running_routes = long_running_routes
         .route(
+            "/api/v1/admin/sources/:id/storage-v2-release-watermark",
+            get(handlers::admin_observe_release_watermark),
+        )
+        .route(
             "/api/v1/admin/sources/:id/storage-v2-release-candidate-build",
             post(handlers::admin_build_release_candidate),
         )
