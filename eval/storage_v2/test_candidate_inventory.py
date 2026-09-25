@@ -52,7 +52,9 @@ class CandidateInventoryTests(unittest.TestCase):
         second = source(2)
         second.update(name="another-private-name", path="/another/private-path",
                       source_type="private-custom-type", is_test=True, generations=[])
-        protected, public = INVENTORY.capture([source(), second], "d" * 40)
+        protected, public = INVENTORY.capture([source(), second], "d" * 40, "b" * 40)
+        self.assertEqual(protected["operator_commit_sha"], "d" * 40)
+        self.assertEqual(protected["candidate_commit_sha"], "b" * 40)
         self.assertEqual(public["source_count"], 2)
         self.assertEqual(public["test_source_count"], 1)
         self.assertEqual(public["release_candidate_source_count"], 1)
@@ -83,9 +85,11 @@ class CandidateInventoryTests(unittest.TestCase):
         ]
         for rows in cases:
             with self.subTest(rows=rows), self.assertRaises(RuntimeError):
-                INVENTORY.capture(rows, "d" * 40)
+                INVENTORY.capture(rows, "d" * 40, "b" * 40)
         with self.assertRaises(RuntimeError):
-            INVENTORY.capture([], "d" * 40)
+            INVENTORY.capture([], "d" * 40, "b" * 40)
+        with self.assertRaisesRegex(RuntimeError, "candidate package commit"):
+            INVENTORY.capture([source()], "d" * 40, "invalid")
 
     def test_private_snapshot_is_create_only_and_mode_600(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

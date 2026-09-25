@@ -178,7 +178,7 @@ def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
     candidate_count = 0
     candidate_set = []
     quality_by_class: dict[str, dict[str, int]] = {}
-    expected_commit = inventory.get("operator_commit_sha")
+    expected_commit = inventory.get("candidate_commit_sha")
     for source in sources:
         if not isinstance(source, dict) or type(source.get("source_id")) is not int \
                 or source["source_id"] <= 0 or source["source_id"] in seen \
