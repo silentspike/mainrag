@@ -424,7 +424,8 @@ then run `verify` under telemetry as well:
 python3 ops/storage-v2/release-candidate.py build \
   --source-id SOURCE_ID --commit-sha FULL_DEPLOYED_SHA \
   --checkpoint PROTECTED_CHECKPOINT \
-  --maximum-build-bytes REVIEWED_PER_SOURCE_PEAK_ESTIMATE
+  --maximum-build-bytes REVIEWED_PER_SOURCE_PACK_PEAK_ESTIMATE \
+  --maximum-pool-growth-bytes REVIEWED_TOTAL_THIN_POOL_GROWTH_ESTIMATE
 
 python3 ops/storage-v2/release-candidate.py verify \
   --source-id SOURCE_ID --commit-sha FULL_DEPLOYED_SHA \
@@ -438,10 +439,16 @@ reviewed positive `--maximum-build-bytes` estimate must fit alongside the
 `--minimum-free-bytes` reserve (40 GiB by default). Missing estimates, a
 missing pack root, or insufficient free bytes stop the build before any API
 request. The private checkpoint records the observed free bytes and estimate.
-This is a local pack-volume guard, not evidence that database, WAL, index,
-memory, writer, watermark, package, or cumulative budgets passed. Refresh
-those issue #66 gates separately before each source. The estimate does not
-authorize a build when the live reserve is already below its minimum.
+For an LVM thin-volume pack root, the operator also requires a positive
+`--maximum-pool-growth-bytes` estimate covering packs, database, WAL, indexes,
+and expected growth of other volumes during this source. It checks the physical
+pool before build and after verification, requires active monitoring, and caps
+projected data and observed metadata use below the configured autoextend
+threshold. A missing estimate or failing physical gate blocks the build POST.
+This is a local resource guard, not evidence that writer, watermark, package,
+backup, or cumulative budgets passed. Refresh those issue #66 gates before each
+source. The estimates do not authorize a build when any live reserve is below
+its minimum.
 
 The server-side verification phase recomputes the generation root, decodes and
 hashes every referenced body/pack entry, reconciles membership/search/analysis
