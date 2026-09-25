@@ -95,6 +95,44 @@ pub async fn admin_run_shadow_slice(
 }
 
 #[cfg(feature = "storage-v2-retrieval")]
+pub async fn admin_observe_release_watermark(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
+    Path(source_id): Path<i64>,
+) -> Result<Json<crate::services::shadow_slice::ReleaseWatermarkObservation>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
+    state
+        .rls_client
+        .with_rls(user_id, true, move |transaction| {
+            Box::pin(async move {
+                let source = transaction
+                    .query_opt(
+                        "SELECT type, path FROM sources WHERE id = $1",
+                        &[&source_id],
+                    )
+                    .await?
+                    .ok_or_else(|| AppError::NotFound(format!("Source {source_id} not found")))?;
+                let source_type: String = source.get("type");
+                let source_path: String = source.get("path");
+                let observation = crate::services::shadow_slice::observe_release_watermark(
+                    source_id,
+                    &source_type,
+                    std::path::Path::new(&source_path),
+                )
+                .await
+                .map_err(|error| {
+                    tracing::error!(error = %format!("{error:#}"),
+                        "storage-v2 release watermark observation failed");
+                    AppError::Internal("release watermark observation failed".to_string())
+                })?;
+                Ok(Json(observation))
+            })
+        })
+        .await
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
 pub async fn admin_build_release_candidate(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Arc<crate::auth::Claims>>,
