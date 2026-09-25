@@ -38,6 +38,9 @@ def source(source_id: int = 1) -> dict:
                          "verification_manifest_sha256": "a" * 64,
                          "evidence_id": "fixture-evidence", "commit_sha": "b" * 40,
                          "source_watermark_sha256": "c" * 64,
+                         "adapter_profile_id": "fixture-adapter",
+                         "analysis_profile_id": "fixture-analysis",
+                         "search_profile_id": "fixture-search",
                          "qualification_manifest": {"status": "PASS", "checks": {}},
                          "qualification_manifest_sha256": "d" * 64,
                          "qualification_manifest_digest_matches": True}],
@@ -71,6 +74,8 @@ class CandidateInventoryTests(unittest.TestCase):
             [{**source(), "is_test": None}],
             [{**source(), "active_generation_id": 6}],
             [{**source(), "generations": [{**source()["generations"][0], "evidence_id": None}]}],
+            [{**source(), "generations": [{**source()["generations"][0],
+                                          "adapter_profile_id": None}]}],
             [{**source(), "generations": [*source()["generations"], *source()["generations"]]}],
             [{**source(), "generations": [
                 source()["generations"][0],
