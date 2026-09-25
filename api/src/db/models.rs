@@ -81,6 +81,9 @@ pub struct SearchResult {
     /// Stable external identity for storage-v2 hits. Legacy results omit it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_hit_id: Option<String>,
+    /// Generation that supplied this storage-v2 hit. Legacy results omit it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_seq: Option<i64>,
     /// Ordered exact/split/merged compatibility mappings, when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub successor_metadata: Option<serde_json::Value>,

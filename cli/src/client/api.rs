@@ -40,6 +40,8 @@ pub struct SearchResult {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub external_hit_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub generation_seq: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub successor_metadata: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub score_explanation: Option<serde_json::Value>,

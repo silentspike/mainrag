@@ -136,6 +136,30 @@ quality, resource headroom, or the application default selector. Those gates and
 fresh owner approval must be proven before any live call. There is no production
 activation command here while the final candidate set is incomplete.
 
+Migration 058 adds `storage_v2_search_active` for one set-based exact query over
+all authorized active generations. It requires the exact activation-manifest
+SHA-256 from the latest committed activation receipt, a complete registered
+source set with active pointers, unchanged benchmark classification, and the
+existing source RLS policy. Ordinary
+search excludes benchmark sources; an explicit benchmark scope requires an
+administrator. Source filters remain available without naming a generation.
+Installing the migration does not select this read path.
+
+The API keeps legacy reads as the default unless
+`MAINRAG_STORAGE_V2_DEFAULT_READ_MANIFEST_SHA256` names that exact reviewed
+activation manifest. With that setting, an omitted `read_path` uses the active
+storage-v2 set; `read_path=current` remains an explicit legacy rollback route
+until cleanup. `read_path=storage_v2` still requires a named source and
+generation for verification. `read_path=storage_v2_active` selects the active
+set explicitly and fails if the manifest setting is absent. A stale receipt,
+missing active pointer, new unactivated source, changed benchmark classification,
+or unauthorized source fails
+closed. This selector is a prepared application boundary; the actual default
+switch still requires the #67 activation procedure, current package readback,
+aggregate quality, and post-activation health evidence.
+The CLI's `mainrag search` uses `--read-path auto` by default, so it follows
+the API selection; `--read-path current` explicitly retains the legacy route.
+
 Apply the storage-v2 migrations as the database runtime/table owner. The
 controlled-write triggers deliberately require the table owner and the
 `SECURITY DEFINER` functions to have the same identity. Applying migrations as

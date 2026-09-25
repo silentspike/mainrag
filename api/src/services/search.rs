@@ -847,6 +847,7 @@ impl SearchService {
                     level,
                     parent_context: None, // Populated below
                     external_hit_id: None,
+                    generation_seq: None,
                     successor_metadata: None,
                     score_explanation: None,
                     degradation: None,
@@ -1376,6 +1377,7 @@ impl SearchService {
                     level: None,
                     parent_context: None,
                     external_hit_id: None,
+                    generation_seq: None,
                     successor_metadata: None,
                     score_explanation: None,
                     degradation: None,
@@ -1494,6 +1496,7 @@ impl SearchService {
                     level: None,
                     parent_context: None,
                     external_hit_id: None,
+                    generation_seq: None,
                     successor_metadata: None,
                     score_explanation: None,
                     degradation: None,
