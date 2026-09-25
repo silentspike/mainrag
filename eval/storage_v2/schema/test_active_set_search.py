@@ -201,6 +201,12 @@ INSERT INTO storage_v2_release_candidate_evidence(
         self.assertEqual(self.search(ADMIN, digest, source=1)["total"], 1)
         self.assertEqual(benchmark["total"], 3)
         self.assertEqual({hit["source_id"] for hit in benchmark["results"]}, {1, 2, 3})
+        self.assertEqual(self.sql("SELECT has_function_privilege('mainrag', "
+                                  "'storage_v2_search_active_unchecked(text,jsonb,jsonb,bigint,bigint,boolean)', "
+                                  "'EXECUTE')"), "f")
+        self.assertEqual(self.sql("SELECT has_function_privilege('mainrag', "
+                                  "'storage_v2_search_active(text,jsonb,jsonb,bigint,bigint,boolean)', "
+                                  "'EXECUTE')"), "t")
         source_state = self.source_state(ADMIN, digest, 1)
         self.assertEqual(source_state["source_id"], 1)
         self.assertEqual(source_state["generation_seq"], 1)
@@ -230,6 +236,13 @@ INSERT INTO storage_v2_release_candidate_evidence(
                        + "',1)"),
             "complete activated source set and exact receipt are required",
         )
+        self.assert_sql_fails(
+            "SET ROLE storage_v2_active_fixture_worker; "
+            f"SET app.user_id='{ADMIN}'; "
+            "SELECT storage_v2_search_active_unchecked('" + digest + "', "
+            "'{\"type\":\"term\",\"value\":\"alpha\"}'::jsonb)",
+            "permission denied for function storage_v2_search_active_unchecked",
+        )
         pointer_digest = self.sql(
             "SELECT pointer_set_sha256 FROM storage_v2_activation_set_evidence "
             f"WHERE manifest_sha256='{digest}'"
@@ -245,6 +258,11 @@ ALTER TABLE storage_v2_activation_set_evidence
             self.actor(ADMIN, f"SELECT storage_v2_active_source_state('{digest}',1)"),
             "complete activated source set and exact receipt are required",
         )
+        self.assert_sql_fails(
+            self.actor(ADMIN, f"SELECT storage_v2_search_active('{digest}',"
+                       "'{\"type\":\"term\",\"value\":\"alpha\"}'::jsonb)"),
+            "complete activated source set and exact receipt are required",
+        )
         self.sql("""
 ALTER TABLE storage_v2_activation_set_evidence
     DISABLE TRIGGER storage_v2_activation_receipt_controlled_write;
@@ -254,6 +272,7 @@ ALTER TABLE storage_v2_activation_set_evidence
 """)
         self.command(self.database, file=ROOT / "migrations/058_storage_v2_active_set_search.sql")
         self.command(self.database, file=ROOT / "migrations/059_storage_v2_active_source_state.sql")
+        self.command(self.database, file=ROOT / "migrations/060_storage_v2_active_search_pointer_receipt.sql")
         self.assertEqual(self.search(ADMIN, digest), ordinary)
         self.assertEqual(self.source_state(ADMIN, digest, 1), source_state)
         self.sql("UPDATE sources SET is_test=FALSE WHERE id=3")
