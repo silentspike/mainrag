@@ -93,7 +93,7 @@ INSERT INTO sources(id, name, type, path) VALUES
     (12, 'synthetic-long-search-term', 'fixture', 'synthetic-long-search-term'),
     (13, 'synthetic-sparse-and-bundle', 'fixture', 'synthetic-sparse-and-bundle'),
     (14, 'synthetic-oversized-search', 'fixture', 'synthetic-oversized-search'),
-    (15, 'synthetic-append-baseline', 'fixture', 'synthetic-append-baseline');
+    (27, 'synthetic-append-baseline', 'fixture', 'synthetic-append-baseline');
 UPDATE sources SET is_test = TRUE WHERE id = 8;
 INSERT INTO fixture_source_access VALUES
     ('{WRITER_ID}', 1, TRUE, TRUE), ('{WRITER_ID}', 3, TRUE, TRUE),
@@ -451,7 +451,7 @@ SELECT (storage_v2_finish_analysis_attempt(
 
     def test_verified_full_append_frontier_tracks_staged_content_and_generation(self) -> None:
         node_a, view_a, digest_a = self.make_projection("alpha")
-        first = self.begin(15, "b1" * 32, "b2" * 32)
+        first = self.begin(27, "b1" * 32, "b2" * 32)
         self.stage(first, "stream.jsonl", "alpha", node_a, view_a, digest_a)
         self.complete_analysis(digest_a)
         self.commit(first, 1)
@@ -485,27 +485,27 @@ SELECT (storage_v2_finish_analysis_attempt(
             "SET ROLE mainrag; "
             f"SET app.user_id = '{ADMIN_ID}'; "
             "SELECT storage_v2_update_append_frontier("
-            "15, 1, 'fixture-adapter-v1', 0, NULL, 1, "
+            "27, 1, 'fixture-adapter-v1', 0, NULL, 1, "
             "decode('00', 'hex'), NULL);",
             "permission denied for function storage_v2_update_append_frontier",
         )
         self.assert_sql_fails(
             "SET ROLE mainrag; "
             "UPDATE storage_v2_append_frontier SET appends_since_full=99 "
-            "WHERE source_id=15;",
+            "WHERE source_id=27;",
             "permission denied for table storage_v2_append_frontier",
         )
         self.assertEqual(
             self.sql(
                 "SELECT prefix_bytes || ':' || encode(prefix_sha256, 'hex') || ':' || "
                 "appends_since_full || ':' || last_generation_seq "
-                "FROM storage_v2_append_frontier WHERE source_id=15"
+                "FROM storage_v2_append_frontier WHERE source_id=27"
             ),
             f"5:{digest_a}:0:1",
         )
 
         node_b, view_b, digest_b = self.make_projection("x")
-        second = self.begin(15, "b4" * 32, "b5" * 32)
+        second = self.begin(27, "b4" * 32, "b5" * 32)
         self.stage(second, "stream.jsonl", "x", node_b, view_b, digest_b)
         self.complete_analysis(digest_b)
         self.commit(second, 1)
@@ -530,7 +530,7 @@ SELECT (storage_v2_finish_analysis_attempt(
             self.sql(
                 "SELECT prefix_bytes || ':' || encode(prefix_sha256, 'hex') || ':' || "
                 "appends_since_full || ':' || last_generation_seq "
-                "FROM storage_v2_append_frontier WHERE source_id=15"
+                "FROM storage_v2_append_frontier WHERE source_id=27"
             ),
             f"1:{digest_b}:0:2",
             "a full read after shrink establishes a new baseline",
