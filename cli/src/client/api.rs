@@ -1024,17 +1024,24 @@ impl ApiClient {
     pub async fn shadow_source_state(
         &self,
         source: &str,
-        generation: &str,
+        generation: Option<&str>,
         include_test: bool,
     ) -> Result<serde_json::Value> {
         let source_id = self.get_source_id_by_name(source).await?;
-        let url = format!(
-            "{}/api/v1/sources/{}/shadow-state?generation={}&include_test={}",
-            self.base_url,
-            source_id,
-            urlencoding::encode(generation),
-            include_test
-        );
+        let url = if let Some(generation) = generation {
+            format!(
+                "{}/api/v1/sources/{}/shadow-state?generation={}&include_test={}",
+                self.base_url,
+                source_id,
+                urlencoding::encode(generation),
+                include_test
+            )
+        } else {
+            format!(
+                "{}/api/v1/sources/{}/shadow-state?read_path=storage_v2_active&include_test={}",
+                self.base_url, source_id, include_test
+            )
+        };
         let response = self
             .client
             .get(&url)

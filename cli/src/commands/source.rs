@@ -17,7 +17,16 @@ pub async fn run(
             name,
             generation,
             include_test,
-        } => source_state(client, &name, &generation, include_test, json_output).await,
+        } => {
+            source_state(
+                client,
+                &name,
+                generation.as_deref(),
+                include_test,
+                json_output,
+            )
+            .await
+        }
         SourceAction::ShadowSlice { name, commit_sha } => {
             shadow_slice(client, &name, &commit_sha, json_output).await
         }
@@ -106,15 +115,17 @@ fn validate_commit_sha(commit_sha: &str) -> anyhow::Result<()> {
 async fn source_state(
     client: &ApiClient,
     name: &str,
-    generation: &str,
+    generation: Option<&str>,
     include_test: bool,
     _json_output: bool,
 ) -> anyhow::Result<()> {
-    if generation.is_empty()
-        || generation.starts_with('0')
-        || !generation.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        anyhow::bail!("--generation must be a positive storage-v2 generation sequence");
+    if let Some(generation) = generation {
+        if generation.is_empty()
+            || generation.starts_with('0')
+            || !generation.parse::<i64>().is_ok_and(|sequence| sequence > 0)
+        {
+            anyhow::bail!("--generation must be a positive storage-v2 generation sequence");
+        }
     }
     let state = client
         .shadow_source_state(name, generation, include_test)

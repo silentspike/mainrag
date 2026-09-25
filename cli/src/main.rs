@@ -319,14 +319,14 @@ enum SourceAction {
     /// List all sources
     List,
 
-    /// Inspect an explicitly named storage-v2 generation
+    /// Inspect the active storage-v2 source or an explicitly named generation
     State {
         /// Source name
         name: String,
 
-        /// Positive storage-v2 generation sequence
+        /// Positive storage-v2 generation sequence (omit for the active set)
         #[arg(long)]
-        generation: String,
+        generation: Option<String>,
 
         /// Include an explicit admin-only synthetic/benchmark source
         #[arg(long)]
