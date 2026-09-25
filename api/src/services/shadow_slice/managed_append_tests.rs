@@ -114,9 +114,21 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             "initial managed generation is incomplete");
         ensure!(initial.telemetry["ablauf"]["append_full_comparisons"] == 1,
             "initial full comparison was not counted");
+        let manifest_path = root.join("manifest.json");
+        let initial_manifest = std::fs::read(&manifest_path)?;
+        ensure!(initial.telemetry["ablauf"]["adapter_source_read_bytes"].as_u64()
+            == Some(2 * (initial_manifest.len() + first_bytes.len()) as u64),
+            "initial full-scan adapter reads were not reconciled");
+        drop(client);
+        let mut client = connect(&config).await?;
         let repeated = run(&mut client, &root, &packs).await?;
         ensure!(repeated.reused_generation && repeated.generation_id == initial.generation_id,
             "unchanged managed generation was duplicated");
+        ensure!(repeated.telemetry["ablauf"]["adapter_source_read_bytes"].as_u64()
+            == Some(initial_manifest.len() as u64)
+            && repeated.telemetry["ablauf"]["deferred_source_read_bytes"] == 0
+            && repeated.telemetry["ablauf"]["parser_passes"] == 0,
+            "unchanged managed run did unnecessary source or parser work");
 
         let second_bytes = b"{\"event\":\"second\"}\n";
         std::fs::write(&input, second_bytes)?;
@@ -147,7 +159,28 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         ).await?.get(0);
         ensure!(old_interval == 1, "unchanged interval was copied or closed");
 
-        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("manifest.json"))?)?;
+        let stable_manifest = std::fs::read(&manifest_path)?;
+        std::fs::write(&manifest_path, &initial_manifest)?;
+        let shrink = run(&mut client, &root, &packs).await.unwrap_err();
+        ensure!(shrink.to_string().contains("prefix shrank"),
+            "a shortened managed manifest did not fail at the trusted prefix");
+        std::fs::write(&manifest_path, &stable_manifest)?;
+        let mut rotated: serde_json::Value = serde_json::from_slice(&stable_manifest)?;
+        rotated["epoch"] = serde_json::json!(Uuid::new_v4().to_string());
+        std::fs::write(&manifest_path, serde_json::to_vec(&rotated)?)?;
+        let rotation = run(&mut client, &root, &packs).await.unwrap_err();
+        ensure!(rotation.to_string().contains("epoch changed"),
+            "an unapproved managed epoch did not fail at the trusted prefix");
+        std::fs::write(&manifest_path, &stable_manifest)?;
+        let mut drifted: serde_json::Value = serde_json::from_slice(&stable_manifest)?;
+        drifted["segments"][0]["sha256"] = serde_json::json!("00".repeat(32));
+        std::fs::write(&manifest_path, serde_json::to_vec(&drifted)?)?;
+        let prefix_drift = run(&mut client, &root, &packs).await.unwrap_err();
+        ensure!(prefix_drift.to_string().contains("trusted prefix chain changed"),
+            "managed prefix-chain drift was not classified");
+        std::fs::write(&manifest_path, &stable_manifest)?;
+
+        let manifest: serde_json::Value = serde_json::from_slice(&stable_manifest)?;
         let old_name = manifest["segments"][0]["name"].as_str()
             .context("managed fixture lost the old segment")?;
         let old_path = root.join("segments").join(old_name);
@@ -159,8 +192,9 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         ).await?;
         std::fs::write(&input, b"{\"event\":\"third\"}\n")?;
         producer(&script, "append", &root, Some(&input))?;
-        ensure!(run(&mut client, &root, &packs).await.is_err(),
-            "scheduled full comparison accepted a replaced prefix segment");
+        let replacement = run(&mut client, &root, &packs).await.unwrap_err();
+        ensure!(replacement.to_string().contains("does not match its manifest"),
+            "scheduled full comparison did not detect the replaced segment");
         let pointer: Option<i64> = client.query_one(
             "SELECT active_generation_id FROM logical_source WHERE id=63", &[],
         ).await?.get(0);
