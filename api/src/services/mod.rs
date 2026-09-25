@@ -1,3 +1,5 @@
+#[cfg(feature = "storage-v2-retrieval")]
+pub mod active_ingest;
 pub mod chunker;
 pub mod circuit_breaker;
 pub mod compressor;

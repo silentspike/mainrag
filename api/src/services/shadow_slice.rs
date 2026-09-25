@@ -630,6 +630,18 @@ pub async fn observe_release_watermark(
     source_type: &str,
     source_path: &Path,
 ) -> Result<ReleaseWatermarkObservation> {
+    observe_release_watermark_with_prefix(source_id, source_type, source_path, None, true).await
+}
+
+/// Observe a managed append source against a persisted verified prefix. The
+/// writer remains responsible for the scheduled full comparison.
+pub async fn observe_release_watermark_with_prefix(
+    source_id: i64,
+    source_type: &str,
+    source_path: &Path,
+    trusted_prefix: Option<&plugins::managed_append::TrustedPrefix>,
+    full_comparison: bool,
+) -> Result<ReleaseWatermarkObservation> {
     if source_id <= 0 {
         bail!("release watermark requires a registered positive source id");
     }
@@ -638,7 +650,9 @@ pub async fn observe_release_watermark(
         .context("release source path is not UTF-8")?;
     let adapter_profile = release_adapter_profile(source_type)?;
     let (observed, managed_identities) = if source_type == "managed_append" {
-        let snapshot = plugins::managed_append::read_snapshot(source_path, None, true).await?;
+        let snapshot =
+            plugins::managed_append::read_snapshot(source_path, trusted_prefix, full_comparison)
+                .await?;
         (snapshot.observed, Some(snapshot.identities))
     } else {
         let plugin =
@@ -674,7 +688,11 @@ pub async fn observe_release_watermark(
     } else {
         canonical_fixture_hash(&mut files).await?
     };
-    let deferred_read_bytes = source_read_bytes(&files)?;
+    let deferred_read_bytes = if managed_identities.is_some() {
+        0
+    } else {
+        source_read_bytes(&files)?
+    };
     let application_read_bytes = adapter_bytes
         .map(|bytes| {
             bytes
@@ -778,7 +796,7 @@ where
                JOIN source_generation generation \
                  ON generation.id=frontier.last_generation_id \
               WHERE frontier.source_id=$1 AND frontier.adapter_profile_id=$2 \
-                AND generation.status IN ('verified', 'release_candidate')",
+                AND generation.status IN ('verified', 'release_candidate', 'active')",
                 &[&source_id, &adapter_profile],
             )
             .await?
@@ -3079,6 +3097,69 @@ mod tests {
 
         assert_eq!(actual, hex::encode(expected.finalize()));
         assert_eq!(input_bytes, content.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn managed_release_observation_reuses_trusted_prefix_bytes() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-managed-watermark-{}", Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let root = directory.0.join("source");
+        let input = directory.0.join("input.jsonl");
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tools/managed_append.py");
+        let produce = |operation: &str| {
+            let mut command = std::process::Command::new("python3");
+            command.arg(&script).arg(operation).arg(&root);
+            if operation == "append" {
+                command.arg(&input);
+            }
+            assert!(command.output().unwrap().status.success());
+        };
+        produce("init");
+        let first_bytes = b"{\"event\":\"first\"}\n";
+        std::fs::write(&input, first_bytes).unwrap();
+        produce("append");
+        let full = observe_release_watermark(7, "managed_append", &root)
+            .await
+            .unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap()).unwrap();
+        let prefix = plugins::managed_append::TrustedPrefix {
+            epoch: manifest["epoch"].as_str().unwrap().to_string(),
+            segments: 1,
+            chain: manifest["chain"].as_str().unwrap().to_string(),
+        };
+        let reused =
+            observe_release_watermark_with_prefix(7, "managed_append", &root, Some(&prefix), false)
+                .await
+                .unwrap();
+        assert_eq!(reused.source_watermark_sha256, full.source_watermark_sha256);
+        assert_eq!(
+            reused.application_read_bytes,
+            Some(std::fs::metadata(root.join("manifest.json")).unwrap().len(),)
+        );
+        let second_bytes = b"{\"event\":\"second\"}\n";
+        std::fs::write(&input, second_bytes).unwrap();
+        produce("append");
+        let appended =
+            observe_release_watermark_with_prefix(7, "managed_append", &root, Some(&prefix), false)
+                .await
+                .unwrap();
+        assert_ne!(
+            appended.source_watermark_sha256,
+            full.source_watermark_sha256
+        );
+        assert_eq!(
+            appended.application_read_bytes,
+            Some(
+                std::fs::metadata(root.join("manifest.json")).unwrap().len()
+                    + second_bytes.len() as u64,
+            )
+        );
     }
 
     #[tokio::test]
