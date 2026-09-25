@@ -653,6 +653,7 @@ python3 ops/storage-v2/cleanup-plan.py \
   --database "$DATABASE_NAME" --local-postgres \
   --count-relation indexing_outbox \
   --retain-all-generations \
+  --export-root "$PRIVATE_EXPORT_DIR" \
   --output "$PRIVATE_EVIDENCE_DIR/cleanup-catalog.json"
 ```
 
@@ -665,6 +666,16 @@ and historical run/identity records; bodies outside it are not deletion
 candidates. The optional Qdrant lists are read twice but cannot share the
 PostgreSQL snapshot. Text matches in tracked runtime files are candidates for
 manual caller review, not proof about an installed binary.
+
+Explicit export roots are hashed file by file with symlinks rejected. Their
+scan is bounded and non-atomic; every required root must be named and reviewed.
+`cleanup-manifest.py` turns a protected catalog into a create-only disposition
+draft. Its object list includes observed identities, sizes or counts where
+available, and `UNREVIEWED` for every object without an exact decision. An
+optional private decisions JSON uses schema
+`mainrag.storage-v2.cleanup-decisions.v1`, the exact catalog file SHA-256, and
+an `objects` array of `{key, disposition, reason, authority}` entries. A draft
+always has `apply_allowed: false`; decisions are review input, not approval.
 
 This capture has status `OBSERVED_ONLY`. It does not produce an approved cleanup
 manifest, verify body/pack integrity, authorize GC, remove runtime callers, or
