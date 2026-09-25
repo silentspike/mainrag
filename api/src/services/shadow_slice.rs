@@ -2620,14 +2620,21 @@ mod tests {
         .unwrap();
         let source_io = &measurements.to_telemetry_json()["source_io"];
         assert_eq!(source_io["adapter_read_bytes"], 2 * content.len() as u64);
-        assert_eq!(source_io["application_read_bytes"], 3 * content.len() as u64);
-        assert_eq!(source_io["total_content_read_bytes"], 5 * content.len() as u64);
+        assert_eq!(
+            source_io["application_read_bytes"],
+            3 * content.len() as u64
+        );
+        assert_eq!(
+            source_io["total_content_read_bytes"],
+            5 * content.len() as u64
+        );
         assert_eq!(source_io["content_read_coverage"], "COMPLETE");
 
         measurements.adapter_source_read_bytes = initial.application_read_bytes;
         record_final_source_reads(&mut measurements, None, &files, &final_files).unwrap();
-        assert!(measurements.to_telemetry_json()["source_io"]["total_content_read_bytes"]
-            .is_null());
+        assert!(
+            measurements.to_telemetry_json()["source_io"]["total_content_read_bytes"].is_null()
+        );
     }
 
     #[test]
