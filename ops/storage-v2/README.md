@@ -133,8 +133,95 @@ COMMIT, read back every pointer/status and the receipt, and complete the coupled
 default-read switch and post-activation ingest gate. The function cannot observe
 live adapter watermarks, writers, actual package installation, representative
 quality, resource headroom, or the application default selector. Those gates and
-fresh owner approval must be proven before any live call. There is no production
-activation command here while the final candidate set is incomplete.
+fresh owner approval must be proven before any live call.
+
+The protected `activation-set.py` operator implements that database transaction
+boundary once #66's complete persisted candidate set and separately accepted
+external gates exist. `plan` requires exact SHA-256 values for a private
+candidate-set audit, an aggregate-acceptance artifact, and a fresh PASS
+preflight. The acceptance artifact has schema
+`mainrag.storage-v2.aggregate-acceptance.v1` and binds the audit digest,
+candidate-set digest, runtime code commit, preflight operator commit, live
+schema digest, backend and installed-binary digests, a complete source count,
+fresh per-source adapter watermarks, and all eight named external gates. A
+`PASS` label in this artifact is an operator-reviewed assertion; the planner
+does not create or infer missing gold, quality, recovery, writer, benchmark,
+or legacy-state evidence. Volatile receipts and per-source watermarks must be
+no more than five minutes old. The installed binary is hashed again locally.
+
+```bash
+python3 ops/storage-v2/activation-set.py plan \
+  --database mainrag --local-postgres \
+  --audit PROTECTED_AUDIT --audit-sha256 EXACT_AUDIT_SHA256 \
+  --acceptance PROTECTED_ACCEPTANCE --acceptance-sha256 EXACT_ACCEPTANCE_SHA256 \
+  --preflight PROTECTED_PREFLIGHT --preflight-sha256 EXACT_PREFLIGHT_SHA256 \
+  --installed-binary /opt/mainrag/api/mainrag-api \
+  --output PROTECTED_ACTIVATION_PLAN
+```
+
+Planning re-reads all registered sources, release candidates, evidence and
+expected active pointers without writing. It asks PostgreSQL for the exact
+`jsonb::text` activation-manifest digest. The protected plan is create-only,
+mode 0600, and reports `READY_FOR_EXPLICIT_APPROVAL`; it is not an activation.
+The plan also binds the exact service, installed binary path, drop-in,
+environment file, and five-minute switch window for the coupled default gate.
+An owner approval must bind the plan, activation manifest, runtime code,
+schema, backend package, candidate set and old pointer-set hashes after all
+final gates are reviewed. The separate protected approval document has schema
+`mainrag.storage-v2.activation-approval.v1`, status `APPROVED`, those seven
+exact digests and `approved_at_unix`. A protected admin-context document has
+schema `mainrag.storage-v2.admin-context.v1` and `admin_user_id`. Neither
+document is generated from a passing test or plan by the operator.
+
+`apply` requires those exact files and their SHA-256 values, a fresh PASS
+preflight, and the installed binary. It rechecks the live candidate and pointer
+set and the PostgreSQL manifest digest before writing an attempt artifact. It
+calls only `storage_v2_activate_candidate_set` inside one explicit transaction;
+a database error leaves the connection to roll back. A separate connection
+immediately checks the committed receipt, complete pointer set, sole active
+generation for each source, and superseded previous active generations. A
+lost response is `COMMIT_OUTCOME_UNKNOWN` and must be reconciled before retry.
+Successful output is `DB_COMMITTED_DEFAULT_SWITCH_PENDING`, not #67 acceptance.
+The same approved procedure must immediately run `default-read-switch.py`.
+It requires the exact protected plan, approval, and committed attempt digests,
+rechecks the committed database receipt, installed API binary, and executable
+of the running API process, and rejects
+an attempt more than five minutes old. It refuses an existing selector or
+drop-in. As root, it creates a final `EnvironmentFile` drop-in, restarts the
+API, reads the new process environment, checks the API's default-read-path
+endpoint, and rechecks the database receipt. It reports
+`DEFAULT_SWITCHED_POST_INGEST_PENDING` only after both paths agree. If the
+service outcome cannot be verified, its private result says
+`SWITCH_OUTCOME_UNKNOWN`; reconcile the live service and database before any
+retry. An exact existing selector can be read back again, or the same approved
+restart can be retried within the five-minute window; a differing or partial
+selector requires manual reconciliation. The switch has no automatic rollback. The first
+ordinary ingest and full search/intelligence/benchmark gate still follow
+before #67 can be accepted. Do not invoke `apply` without this complete
+approved procedure and a fresh explicit owner instruction for the exact plan.
+
+```bash
+python3 ops/storage-v2/activation-set.py apply \
+  --database mainrag --local-postgres \
+  --plan PROTECTED_PLAN --plan-sha256 EXACT_PLAN_SHA256 \
+  --approval PROTECTED_OWNER_APPROVAL --approval-sha256 EXACT_APPROVAL_SHA256 \
+  --admin-context PROTECTED_ADMIN_CONTEXT \
+  --admin-context-sha256 EXACT_ADMIN_CONTEXT_SHA256 \
+  --audit PROTECTED_AUDIT --acceptance PROTECTED_ACCEPTANCE \
+  --preflight FRESH_PROTECTED_PREFLIGHT \
+  --preflight-sha256 FRESH_PREFLIGHT_SHA256 \
+  --installed-binary /opt/mainrag/api/mainrag-api \
+  --output PROTECTED_ACTIVATION_ATTEMPT
+
+sudo -n python3 ops/storage-v2/default-read-switch.py \
+  --database mainrag --local-postgres \
+  --plan PROTECTED_PLAN --plan-sha256 EXACT_PLAN_SHA256 \
+  --approval PROTECTED_OWNER_APPROVAL --approval-sha256 EXACT_APPROVAL_SHA256 \
+  --attempt PROTECTED_ACTIVATION_ATTEMPT \
+  --attempt-sha256 EXACT_COMMITTED_ATTEMPT_SHA256 \
+  --api-token-file PROTECTED_API_TOKEN_FILE \
+  --output PROTECTED_DEFAULT_SWITCH_RESULT
+```
 
 Migration 058 adds `storage_v2_search_active` for one set-based exact query over
 all authorized active generations. It requires the exact activation-manifest

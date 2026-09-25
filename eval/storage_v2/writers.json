@@ -22,6 +22,8 @@
     {"path":"cli/src/commands/source.rs","class":"operator-entrypoint","reason":"Triggers source synchronization and deletion."},
     {"path":"cli/src/commands/watch.rs","class":"operator-entrypoint","reason":"Starts and controls incremental watch ingestion."},
     {"path":"ops/migration/import-mainrag.py","class":"migration-writer","reason":"Imports legacy PostgreSQL and Qdrant state."},
+    {"path":"ops/storage-v2/activation-set.py","class":"operator-entrypoint","reason":"After exact approval, calls the controlled atomic candidate-set activation function and verifies committed pointers."},
+    {"path":"ops/storage-v2/default-read-switch.py","class":"operator-entrypoint","reason":"Immediately after committed activation, configures and verifies the API default active-set read path."},
     {"path":"scripts/backfill-visibility.py","class":"maintenance-writer","reason":"Backfills visibility state."},
     {"path":"scripts/load_synonyms_to_qdrant.py","class":"maintenance-writer","reason":"Writes synonym-derived Qdrant state."},
     {"path":"scripts/migrate-embeddings-gte.py","class":"maintenance-writer","reason":"Writes embedding rows and Qdrant points."},
