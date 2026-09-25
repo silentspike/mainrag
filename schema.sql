@@ -595,3 +595,4 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag;
 \ir migrations/060_storage_v2_active_search_pointer_receipt.sql
 \ir migrations/061_storage_v2_active_intelligence.sql
 \ir migrations/062_storage_v2_verified_full_append_frontier.sql
+\ir migrations/063_storage_v2_managed_append_delta.sql
