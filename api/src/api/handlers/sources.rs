@@ -45,9 +45,7 @@ pub async fn shadow_source_state(
     if !active
         && !request.generation.as_deref().is_some_and(|generation| {
             !generation.starts_with('0')
-                && generation
-                    .parse::<i64>()
-                    .is_ok_and(|sequence| sequence > 0)
+                && generation.parse::<i64>().is_ok_and(|sequence| sequence > 0)
         })
     {
         return Err(AppError::BadRequest(
