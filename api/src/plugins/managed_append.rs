@@ -96,7 +96,10 @@ async fn verify_segment(path: &Path, segment: &Segment, accounting: &ReadAccount
 
 async fn discover(source_path: &str) -> Result<ObservedSyncResult> {
     let root = Path::new(source_path);
-    if !tokio::fs::symlink_metadata(root).await?.file_type().is_dir()
+    if !tokio::fs::symlink_metadata(root)
+        .await?
+        .file_type()
+        .is_dir()
         || !tokio::fs::symlink_metadata(root.join("segments"))
             .await?
             .file_type()
@@ -122,7 +125,8 @@ async fn discover(source_path: &str) -> Result<ObservedSyncResult> {
     if bytes.len() as u64 > MAX_MANIFEST_BYTES {
         bail!("managed append manifest exceeds its size limit");
     }
-    let manifest: Manifest = serde_json::from_slice(&bytes).context("invalid managed append manifest")?;
+    let manifest: Manifest =
+        serde_json::from_slice(&bytes).context("invalid managed append manifest")?;
     if manifest.format != FORMAT
         || Uuid::parse_str(&manifest.epoch)
             .map(|id| id.to_string() != manifest.epoch)
@@ -241,9 +245,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(observed.result.files.len(), 1);
-        let manifest_length = std::fs::metadata(root.join("manifest.json"))
-            .unwrap()
-            .len();
+        let manifest_length = std::fs::metadata(root.join("manifest.json")).unwrap().len();
         assert_eq!(
             observed.application_read_bytes,
             Some(manifest_length + original.len() as u64)
@@ -255,7 +257,10 @@ mod tests {
         permissions.set_readonly(false);
         std::fs::set_permissions(source, permissions).unwrap();
         std::fs::write(source, b"{\"event\":\"two\"}\n").unwrap();
-        assert_eq!(std::fs::metadata(source).unwrap().len(), original.len() as u64);
+        assert_eq!(
+            std::fs::metadata(source).unwrap().len(),
+            original.len() as u64
+        );
         let error = plugin
             .sync_for_storage_v2_observed(root.to_str().unwrap())
             .await
