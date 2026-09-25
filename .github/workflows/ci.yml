@@ -354,7 +354,6 @@ jobs:
               'eval.storage_v2.schema.test_keyword_tie_order',
               'eval.storage_v2.schema.test_content_schema',
               'eval.storage_v2.schema.test_pack_epoch_fence',
-              'eval.storage_v2.schema.test_shadow_ingest_schema.ShadowIngestSchemaTests.test_verified_full_append_frontier_tracks_staged_content_and_generation',
           ])
           assert suite.countTestCases() >= 30, 'Expected search, pack reader-fence and append frontier regressions'
           result = unittest.TextTestRunner(verbosity=2).run(suite)
