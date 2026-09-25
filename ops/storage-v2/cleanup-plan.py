@@ -711,6 +711,77 @@ def runtime_inventory(root: Path, relation_names: tuple[str, ...]) -> dict:
             "files": files, "matches": matches}
 
 
+def export_inventory(roots: tuple[Path, ...]) -> dict:
+    if not roots or len(roots) > 16:
+        raise RuntimeError("protected export root list is invalid")
+    listed = []
+    files = []
+    total_bytes = 0
+
+    def walk_error(error: OSError) -> None:
+        raise RuntimeError("protected export tree is unavailable") from error
+
+    for specified in roots:
+        if specified.is_symlink():
+            raise RuntimeError("protected export root is a symlink")
+        try:
+            root = specified.resolve(strict=True)
+        except OSError as error:
+            raise RuntimeError("protected export root is unavailable") from error
+        if not root.is_dir() or any(root == prior or root in prior.parents
+                                    or prior in root.parents for prior in listed):
+            raise RuntimeError("protected export root is not a unique directory")
+        listed.append(root)
+        for current, directories, names in os.walk(root, followlinks=False,
+                                                   onerror=walk_error):
+            for name in directories:
+                if (Path(current) / name).is_symlink():
+                    raise RuntimeError("protected export tree contains a symlink")
+            for name in names:
+                path = Path(current) / name
+                metadata = path.lstat()
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise RuntimeError("protected export tree contains a nonregular file")
+                if len(files) >= 20000 or metadata.st_size > 64 * 1024 ** 3 \
+                        or total_bytes + metadata.st_size > 256 * 1024 ** 3:
+                    raise RuntimeError("protected export inventory exceeds its bound")
+                digest = hashlib.sha256()
+                bytes_read = 0
+                try:
+                    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                    with os.fdopen(descriptor, "rb") as source:
+                        before = os.fstat(source.fileno())
+                        if not stat.S_ISREG(before.st_mode):
+                            raise RuntimeError("protected export file changed type")
+                        while chunk := source.read(1024 * 1024):
+                            digest.update(chunk)
+                            bytes_read += len(chunk)
+                            if bytes_read > 64 * 1024 ** 3 \
+                                    or total_bytes + bytes_read > 256 * 1024 ** 3:
+                                raise RuntimeError("protected export inventory exceeds its bound")
+                        after = os.fstat(source.fileno())
+                except OSError as error:
+                    raise RuntimeError("protected export file is unavailable") from error
+                current_metadata = path.lstat()
+                if before.st_size != bytes_read or before.st_size != after.st_size \
+                        or before.st_mtime_ns != after.st_mtime_ns \
+                        or before.st_ino != after.st_ino \
+                        or before.st_dev != current_metadata.st_dev \
+                        or before.st_ino != current_metadata.st_ino \
+                        or before.st_size != current_metadata.st_size \
+                        or before.st_mtime_ns != current_metadata.st_mtime_ns:
+                    raise RuntimeError("protected export file changed during inventory")
+                total_bytes += before.st_size
+                files.append({"root": str(root), "relative_path": path.relative_to(root).as_posix(),
+                              "size_bytes": before.st_size, "sha256": digest.hexdigest(),
+                              "mode": stat.S_IMODE(before.st_mode),
+                              "mtime_ns": before.st_mtime_ns})
+    return {"schema_version": "mainrag.storage-v2.cleanup-exports.v1",
+            "status": "NONATOMIC_FILE_SCAN", "roots": [str(root) for root in listed],
+            "files": sorted(files, key=lambda item: (item["root"], item["relative_path"])),
+            "total_bytes": total_bytes}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", required=True)
@@ -722,6 +793,7 @@ def main() -> int:
     parser.add_argument("--qdrant-url")
     parser.add_argument("--qdrant-api-key-file", type=Path)
     parser.add_argument("--runtime-root", type=Path)
+    parser.add_argument("--export-root", action="append", type=Path, default=[])
     parser.add_argument("--output", required=True, type=Path)
     arguments = parser.parse_args()
     if re.fullmatch(r"[A-Za-z0-9_-]+", arguments.database) is None:
@@ -739,17 +811,20 @@ def main() -> int:
                   if arguments.qdrant_url is not None else None)
         runtime = (runtime_inventory(arguments.runtime_root, tuple(arguments.count_relation))
                    if arguments.runtime_root is not None else None)
+        exports = (export_inventory(tuple(arguments.export_root))
+                   if arguments.export_root else None)
         artifact = {"schema_version": "mainrag.storage-v2.cleanup-catalog.v1",
                     "status": "OBSERVED_ONLY", "catalog": observed,
                     "qdrant": qdrant,
                     "runtime_search": runtime,
+                    "exports": exports,
                     "observed_at_unix": int(time.time()),
                     "before_state_sha256": hashlib.sha256(canonical(observed)).hexdigest(),
                     "operator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                     "limitations": ["Only explicitly requested relations have exact row counts; no reviewed dispositions.",
                                     "Qdrant is optional and cannot share a transaction with PostgreSQL.",
                                     "Runtime text matches require human caller classification and installed-binary binding.",
-                                    "No export inventory; pack reachability is optional.",
+                                    "Export inventory is optional and its file scan is not atomic; pack reachability is optional.",
                                     "Selected roots omit unreviewed external retention and historical run/identity records; outside-root counts are not deletion candidates.",
                                     "Reachability does not verify content integrity or authorize GC.",
                                     "No post-activation acceptance or deletion authority."]}
@@ -763,6 +838,7 @@ def main() -> int:
                       "exact_count_relation_count": len(observed["exact_rows"]),
                       "qdrant_observed": qdrant is not None,
                       "runtime_search_observed": runtime is not None,
+                      "export_roots_observed": len(arguments.export_root),
                       "reachability_observed": observed["reachability"] is not None,
                       "dependency_count": len(observed["dependencies"])}, sort_keys=True))
     return 0

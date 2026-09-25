@@ -129,6 +129,19 @@ class CleanupPlanCaptureTests(unittest.TestCase):
                 cleanup.private_create(public / "catalog.json", {})
             self.assertFalse((public / "catalog.json").exists())
 
+    def test_export_inventory_hashes_files_and_rejects_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "exports"
+            root.mkdir()
+            (root / "evidence.json").write_text('{"fixture":true}')
+            observed = cleanup.export_inventory((root,))
+            self.assertEqual(observed["status"], "NONATOMIC_FILE_SCAN")
+            self.assertEqual(observed["total_bytes"], len('{"fixture":true}'))
+            self.assertEqual(observed["files"][0]["relative_path"], "evidence.json")
+            (root / "alias.json").symlink_to(root / "evidence.json")
+            with self.assertRaisesRegex(RuntimeError, "nonregular"):
+                cleanup.export_inventory((root,))
+
     def test_qdrant_inventory_binds_exact_counts_and_rejects_alias_drift(self):
         for url in ("http://example.org:6333", "http://127.0.0.1:6333/path",
                     "http://user:password@127.0.0.1:6333"):
