@@ -23,7 +23,7 @@ def catalog_fixture():
         "policies": [], "triggers": [], "functions": [], "indexes": [],
         "dependencies": [], "active_pointer_count": 0,
         "pointer_set_sha256": "a" * 64, "open_reader_count": 0,
-        "building_run_count": 0, "generations": [], "packs": [],
+        "building_run_count": 0, "outbox_classes": [], "generations": [], "packs": [],
         "activation_receipt_relation_oid": None,
         "exact_rows": {},
         "reachability": None,
