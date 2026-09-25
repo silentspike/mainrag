@@ -26,6 +26,7 @@ def catalog_fixture():
         "building_run_count": 0, "generations": [], "packs": [],
         "activation_receipt_relation_oid": None,
         "exact_rows": {},
+        "reachability": None,
     }
 
 
@@ -53,6 +54,11 @@ class CleanupPlanCaptureTests(unittest.TestCase):
         self.assertIn("FROM public.\"files\"", cleanup.exact_rows_sql(("files",)))
         self.assertEqual(cleanup.target_lock_sql(("files",)),
                          'LOCK TABLE public."files" IN ACCESS SHARE MODE;')
+        self.assertEqual(cleanup.reachability_sql((), False), "NULL::jsonb")
+        self.assertIn("ARRAY[7,9]::bigint[]",
+                      cleanup.reachability_sql((7, 9), False))
+        with self.assertRaisesRegex(RuntimeError, "invalid"):
+            cleanup.reachability_sql((7, 7), False)
 
         broken = {**catalog_fixture(), "relations": None}
         with patch.object(cleanup.subprocess, "run", return_value=SimpleNamespace(
@@ -65,6 +71,39 @@ class CleanupPlanCaptureTests(unittest.TestCase):
         )):
             with self.assertRaisesRegex(RuntimeError, "incomplete"):
                 cleanup.catalog("fixture", False, ("files",))
+        missing_active = catalog_fixture()
+        missing_active["reachability"] = {
+            "status": "REACHABILITY_ONLY_NOT_GC_AUTHORITY",
+            "root_scope": "SELECTED_GENERATIONS_MAPPINGS_INTELLIGENCE_BUILDING_RUNS",
+            "root_coverage": "PARTIAL_EXTERNAL_RETENTION_UNVERIFIED",
+            "retained_generation_ids": [7],
+            **{key: 0 for key in (
+                "requested_generation_count", "found_generation_count",
+                "active_generation_count", "active_generation_included_count",
+                "active_pointer_count", "active_pointer_included_count",
+                "mapped_hit_count", "intelligence_occurrence_count",
+                "building_run_item_count", "artifact_count", "occurrence_count",
+                "view_count", "node_count", "body_count",
+                "outside_selected_roots_body_count"
+            )},
+            "body_set_sha256": "a" * 64, "view_set_sha256": "b" * 64,
+            "packs": [],
+        }
+        missing_active["reachability"]["requested_generation_count"] = 1
+        missing_active["reachability"]["found_generation_count"] = 1
+        missing_active["reachability"]["active_generation_count"] = 1
+        with patch.object(cleanup.subprocess, "run", return_value=SimpleNamespace(
+            returncode=0, stdout=json.dumps(missing_active)
+        )):
+            with self.assertRaisesRegex(RuntimeError, "incomplete"):
+                cleanup.catalog("fixture", False, generation_ids=(7,))
+        missing_active["reachability"]["active_generation_included_count"] = 1
+        missing_active["reachability"]["active_pointer_count"] = 1
+        with patch.object(cleanup.subprocess, "run", return_value=SimpleNamespace(
+            returncode=0, stdout=json.dumps(missing_active)
+        )):
+            with self.assertRaisesRegex(RuntimeError, "incomplete"):
+                cleanup.catalog("fixture", False, generation_ids=(7,))
         with patch.object(cleanup.subprocess, "run", return_value=SimpleNamespace(
             returncode=0, stdout='{"database_oid":"1","database_oid":"2"}'
         )):
