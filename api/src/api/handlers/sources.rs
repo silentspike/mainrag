@@ -20,7 +20,8 @@ pub struct SourcesResponse {
 #[cfg(feature = "storage-v2-retrieval")]
 #[derive(Debug, serde::Deserialize)]
 pub struct ShadowSourceStateQuery {
-    pub generation: String,
+    pub generation: Option<String>,
+    pub read_path: Option<String>,
     #[serde(default)]
     pub include_test: bool,
 }
@@ -32,6 +33,39 @@ pub async fn shadow_source_state(
     Path(source_id): Path<i64>,
     axum::extract::Query(request): axum::extract::Query<ShadowSourceStateQuery>,
 ) -> Result<Json<serde_json::Value>> {
+    let active = match (request.read_path.as_deref(), request.generation.as_deref()) {
+        (None, Some(_)) | (Some("storage_v2"), Some(_)) => false,
+        (None, None) | (Some("storage_v2_active"), None) => true,
+        _ => {
+            return Err(AppError::BadRequest(
+                "source state requires a named generation or the active read path".to_string(),
+            ))
+        }
+    };
+    if !active
+        && !request.generation.as_deref().is_some_and(|generation| {
+            !generation.starts_with('0')
+                && generation.parse::<i64>().is_ok_and(|sequence| sequence > 0)
+        })
+    {
+        return Err(AppError::BadRequest(
+            "source state requires a positive generation sequence".to_string(),
+        ));
+    }
+    let manifest_sha256 = if active {
+        Some(
+            state
+                .config
+                .server
+                .storage_v2_default_read_manifest_sha256
+                .clone()
+                .ok_or_else(|| {
+                    AppError::BadRequest("active storage_v2 read is not configured".to_string())
+                })?,
+        )
+    } else {
+        None
+    };
     let user_id = Uuid::from_str(&claims.sub)
         .map_err(|_| AppError::Auth("Invalid user ID in claims".into()))?;
     let instance_id = state.instance_id.to_string();
@@ -39,21 +73,30 @@ pub async fn shadow_source_state(
         .rls_client
         .with_rls(user_id, claims.is_admin, move |transaction| {
             Box::pin(async move {
-                let row = transaction
-                    .query_one(
-                        "SELECT storage_v2_shadow_source_state($1,$2,$3)",
-                        &[&source_id, &request.generation, &request.include_test],
-                    )
-                    .await
-                    .map_err(|error| {
-                        if error.code()
-                            == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
-                        {
-                            AppError::Forbidden("shadow source state is not authorized".to_string())
-                        } else {
-                            AppError::Database(error)
-                        }
-                    })?;
+                let row = if let Some(manifest_sha256) = manifest_sha256.as_ref() {
+                    transaction
+                        .query_one(
+                            "SELECT storage_v2_active_source_state($1,$2,$3)",
+                            &[manifest_sha256, &source_id, &request.include_test],
+                        )
+                        .await
+                } else {
+                    transaction
+                        .query_one(
+                            "SELECT storage_v2_shadow_source_state($1,$2,$3)",
+                            &[&source_id, &request.generation, &request.include_test],
+                        )
+                        .await
+                }
+                .map_err(|error| {
+                    if error.code()
+                        == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+                    {
+                        AppError::Forbidden("shadow source state is not authorized".to_string())
+                    } else {
+                        AppError::Database(error)
+                    }
+                })?;
                 let mut value: serde_json::Value = row.get(0);
                 value["server_instance_id"] = serde_json::Value::String(instance_id);
                 Ok(Json(value))
