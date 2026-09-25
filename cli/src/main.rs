@@ -74,8 +74,8 @@ enum Commands {
         #[arg(short = 'S', long)]
         source: Option<String>,
 
-        /// Select current (default) or storage_v2 retrieval
-        #[arg(long, default_value = "current")]
+        /// Select the API default (auto), legacy current, named storage_v2, or storage_v2_active
+        #[arg(long, default_value = "auto")]
         read_path: String,
 
         /// Explicit storage-v2 generation; requires --read-path storage_v2 and --source
