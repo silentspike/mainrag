@@ -66,7 +66,7 @@ jobs:
       TOKENIZER_VERSION: hf_bge_wordpiece
     services:
       postgres:
-        image: postgres:18
+        image: pgvector/pgvector@sha256:1d50c689b0a6511b9ea0a15615281c81a59fd04a08eb35057ec8646fb3a2118a
         env:
           POSTGRES_DB: mainrag_index_fixture
           POSTGRES_USER: fixture
@@ -111,6 +111,13 @@ jobs:
           PYTHONPATH=eval python3 -m unittest storage_v2.test_managed_append -v
           cargo test -p mainrag-api --features storage-v2-retrieval --lib plugins::managed_append::tests::first_party_producer_and_adapter_reject_same_length_replacement -- --exact --nocapture | tee managed-append-tests.log
           python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("managed-append-tests.log").read_text(), "Expected the managed append adapter regression to execute"'
+      - name: Verify managed append producer through persisted delta and full comparison
+        shell: bash
+        env:
+          MAINRAG_INDEX_TEST_DATABASE_URL: postgres://fixture:fixture_only@localhost:5432/mainrag_index_fixture
+        run: |
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib services::shadow_slice::managed_append_tests::managed_append_producer_to_verified_delta_and_periodic_full -- --ignored --exact --nocapture | tee managed-append-ingest-tests.log
+          python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("managed-append-ingest-tests.log").read_text(), "Expected the producer-to-persistence regression to execute"'
       - name: Verify CPU backfill route isolation
         shell: bash
         run: |

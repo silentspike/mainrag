@@ -93,7 +93,8 @@ INSERT INTO sources(id, name, type, path) VALUES
     (12, 'synthetic-long-search-term', 'fixture', 'synthetic-long-search-term'),
     (13, 'synthetic-sparse-and-bundle', 'fixture', 'synthetic-sparse-and-bundle'),
     (14, 'synthetic-oversized-search', 'fixture', 'synthetic-oversized-search'),
-    (27, 'synthetic-append-baseline', 'fixture', 'synthetic-append-baseline');
+    (27, 'synthetic-append-baseline', 'fixture', 'synthetic-append-baseline'),
+    (28, 'synthetic-managed-append', 'managed_append', 'synthetic-managed-append');
 UPDATE sources SET is_test = TRUE WHERE id = 8;
 INSERT INTO fixture_source_access VALUES
     ('{WRITER_ID}', 1, TRUE, TRUE), ('{WRITER_ID}', 3, TRUE, TRUE),
@@ -204,6 +205,7 @@ SELECT node_id || ':' || id || ':' || encode(digest, 'hex') FROM view_row;
         force: bool = False,
         user_id: str = ADMIN_ID,
         commit_sha: str | None = None,
+        adapter_profile: str = "fixture-adapter-v1",
     ) -> int:
         witness = {"fixture": True}
         if commit_sha is not None:
@@ -215,7 +217,7 @@ SELECT node_id || ':' || id || ':' || encode(digest, 'hex') FROM view_row;
                     user_id,
                     f"""
 SELECT (storage_v2_begin_shadow_ingest(
-    {source_id}, '{key}', '{manifest}', 'fixture-adapter-v1',
+    {source_id}, '{key}', '{manifest}', '{adapter_profile}',
     'synthetic-snapshot', '{witness_json}'::JSONB, {str(force).lower()}
 )).id;
 """
@@ -258,6 +260,7 @@ SELECT (storage_v2_begin_shadow_ingest(
         view_id: int,
         digest_hex: str,
         user_id: str = ADMIN_ID,
+        adapter_profile: str = "fixture-adapter-v1",
     ) -> None:
         content_quoted = content.replace("'", "''")
         self.sql(
@@ -266,7 +269,7 @@ SELECT (storage_v2_begin_shadow_ingest(
                 f"""
 SELECT (storage_v2_stage_shadow_item(
     {run_id}, '{item_key}', 'document', 'synthetic-item',
-    '{{"item":"{item_key}"}}'::JSONB, 'fixture-adapter-v1', {node_id}, NULL,
+    '{{"item":"{item_key}"}}'::JSONB, '{adapter_profile}', {node_id}, NULL,
     '{digest_hex}', octet_length(convert_to('{content_quoted}', 'UTF8')),
     decode('{digest_hex}', 'hex'), 'fixture-analysis-v1', {view_id},
     '/synthetic/{item_key}', '{{"byte_start":0}}'::JSONB
@@ -535,6 +538,86 @@ SELECT (storage_v2_finish_analysis_attempt(
             f"1:{digest_b}:0:2",
             "a full read after shrink establishes a new baseline",
         )
+
+    def test_managed_append_prefix_copy_and_verified_frontier(self) -> None:
+        self.file(ROOT / "migrations/063_storage_v2_managed_append_delta.sql")
+        self.sql(
+            "GRANT EXECUTE ON FUNCTION storage_v2_copy_managed_append_prefix("
+            "BIGINT, BIGINT, TEXT[], BYTEA[], BIGINT[]) TO storage_v2_shadow_worker; "
+            "GRANT EXECUTE ON FUNCTION storage_v2_publish_managed_append_frontier("
+            "BIGINT, BIGINT, UUID, BIGINT, BYTEA, BOOLEAN) TO storage_v2_shadow_worker;"
+        )
+        epoch = "00000000-0000-4000-8000-000000000063"
+        profile = "mainrag.managed-append-fixture.v2.manifest"
+        chain_one = "a1" * 32
+        chain_two = "a2" * 32
+        node_a, view_a, digest_a = self.make_projection("alpha")
+        node_b, view_b, digest_b = self.make_projection("beta")
+        first = self.begin(28, "c1" * 32, "c2" * 32, adapter_profile=profile)
+        self.stage(first, "epoch/segments/00000001-a.jsonl", "alpha",
+                   node_a, view_a, digest_a, adapter_profile=profile)
+        self.complete_analysis(digest_a)
+        self.commit(first, 1)
+        initial = (
+            f"SELECT storage_v2_publish_managed_append_frontier({first}, NULL, "
+            f"'{epoch}', 1, decode('{chain_one}', 'hex'), TRUE);"
+        )
+        self.assert_sql_fails(self.admin(initial), "publication is incomplete")
+        self.sql(self.admin(
+            "SELECT storage_v2_verify_generation("
+            f"(SELECT generation_id FROM storage_v2_ingest_run WHERE id={first}), "
+            f"'{'c3' * 32}');"
+        ))
+        self.assert_sql_fails(self.actor(OTHER_ID, initial),
+                              "verified managed append run is required")
+        self.assertEqual(self.sql(self.admin(initial)), "1")
+        self.assertEqual(self.sql(self.admin(initial)), "1")
+        first_generation = self.sql(
+            f"SELECT generation_id FROM storage_v2_ingest_run WHERE id={first}"
+        )
+        second = self.begin(28, "c4" * 32, "c5" * 32, adapter_profile=profile)
+        copy = (
+            f"SELECT storage_v2_copy_managed_append_prefix({second}, {first}, "
+            "ARRAY['epoch/segments/00000001-a.jsonl']::TEXT[], "
+            f"ARRAY[decode('{digest_a}', 'hex')]::BYTEA[], ARRAY[5]::BIGINT[]);"
+        )
+        self.assert_sql_fails(
+            self.admin(copy.replace(digest_a, "ff" * 32)),
+            "prior staged content is incomplete or changed",
+        )
+        self.assert_sql_fails(self.actor(OTHER_ID, copy),
+                              "managed append runs are not reusable")
+        self.assertEqual(self.sql(self.admin(copy)), "1")
+        self.assertEqual(self.sql(self.admin(copy)), "1")
+        self.assertEqual(self.sql(
+            f"SELECT parser_pass_count FROM storage_v2_ingest_run_item WHERE run_id={second}"
+        ), "0")
+        self.stage(second, "epoch/segments/00000002-b.jsonl", "beta",
+                   node_b, view_b, digest_b, adapter_profile=profile)
+        self.complete_analysis(digest_b)
+        self.commit(second, 2)
+        self.sql(self.admin(
+            "SELECT storage_v2_verify_generation("
+            f"(SELECT generation_id FROM storage_v2_ingest_run WHERE id={second}), "
+            f"'{'c6' * 32}');"
+        ))
+        self.assert_sql_fails(self.admin(initial), "managed append run is superseded")
+        publish_delta = (
+            f"SELECT storage_v2_publish_managed_append_frontier({second}, {first_generation}, "
+            f"'{epoch}', 2, decode('{chain_two}', 'hex'), FALSE);"
+        )
+        self.assertEqual(self.sql(self.admin(publish_delta)), "2")
+        self.assertEqual(self.sql(
+            "SELECT segment_count || ':' || appends_since_full "
+            "FROM storage_v2_managed_append_frontier WHERE source_id=28"
+        ), "2:1")
+        self.assertEqual(self.sql(
+            "SELECT COUNT(*) FROM generation_item_version "
+            "WHERE source_id=28 AND valid_from_seq=1 AND valid_to_seq IS NULL"
+        ), "1", "the unchanged first item keeps its original membership interval")
+        self.assertEqual(self.sql(
+            "SELECT active_generation_id IS NULL FROM logical_source WHERE id=28"
+        ), "t")
 
     def test_analysis_retry_append_frontier_cancellation_and_isolation(self) -> None:
         node, view_id, digest_hex = self.make_projection("alpha")

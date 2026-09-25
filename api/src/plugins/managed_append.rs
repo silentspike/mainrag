@@ -1,8 +1,8 @@
 //! Explicitly managed JSONL segments for storage-v2 shadow ingestion.
 //!
 //! The producer publishes immutable segments before atomically replacing the
-//! manifest. The current adapter still returns every segment for full reads;
-//! incremental reuse requires a verified persisted frontier in the writer.
+//! manifest. The writer may skip previously verified content under the trusted
+//! producer contract while checking the manifest chain and file metadata.
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -38,6 +38,27 @@ struct Segment {
 }
 
 pub struct ManagedAppendPlugin;
+
+#[derive(Debug, Clone)]
+pub struct TrustedPrefix {
+    pub epoch: String,
+    pub segments: usize,
+    pub chain: String,
+}
+
+#[derive(Debug)]
+pub struct SegmentIdentity {
+    pub bytes: u64,
+    pub sha256: [u8; 32],
+}
+
+#[derive(Debug)]
+pub struct ManagedSnapshot {
+    pub observed: ObservedSyncResult,
+    pub epoch: String,
+    pub chain: String,
+    pub identities: Vec<SegmentIdentity>,
+}
 
 fn lowercase_sha256(value: &str) -> bool {
     value.len() == 64
@@ -94,7 +115,11 @@ async fn verify_segment(path: &Path, segment: &Segment, accounting: &ReadAccount
     Ok(())
 }
 
-async fn discover(source_path: &str) -> Result<ObservedSyncResult> {
+pub async fn read_snapshot(
+    source_path: &str,
+    prefix: Option<&TrustedPrefix>,
+    full_comparison: bool,
+) -> Result<ManagedSnapshot> {
     let root = Path::new(source_path);
     if !tokio::fs::symlink_metadata(root)
         .await?
@@ -135,8 +160,17 @@ async fn discover(source_path: &str) -> Result<ObservedSyncResult> {
     {
         bail!("managed append format, epoch or chain is invalid");
     }
+    if let Some(prefix) = prefix {
+        if prefix.epoch != manifest.epoch || prefix.segments > manifest.segments.len() {
+            bail!("managed append epoch changed or prefix shrank");
+        }
+    }
     let mut chain: [u8; 32] = Sha256::digest(format!("{FORMAT}:{}", manifest.epoch)).into();
+    if prefix.is_some_and(|prefix| prefix.segments == 0 && hex::encode(chain) != prefix.chain) {
+        bail!("managed append trusted prefix chain changed");
+    }
     let mut files = Vec::with_capacity(manifest.segments.len());
+    let mut identities = Vec::with_capacity(manifest.segments.len());
     for (index, segment) in manifest.segments.iter().enumerate() {
         let sequence = u64::try_from(index)? + 1;
         if segment.sequence != sequence
@@ -152,8 +186,17 @@ async fn discover(source_path: &str) -> Result<ObservedSyncResult> {
         if !metadata.file_type().is_file() || metadata.len() != segment.bytes {
             bail!("managed append segment is missing or changed");
         }
-        verify_segment(&path, segment, &accounting).await?;
+        if full_comparison || prefix.is_none_or(|prefix| index >= prefix.segments) {
+            verify_segment(&path, segment, &accounting).await?;
+        }
         chain = segment_chain(chain, segment);
+        if prefix.is_some_and(|prefix| index + 1 == prefix.segments && hex::encode(chain) != prefix.chain) {
+            bail!("managed append trusted prefix chain changed");
+        }
+        let sha256: [u8; 32] = hex::decode(&segment.sha256)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid managed append digest"))?;
+        identities.push(SegmentIdentity { bytes: segment.bytes, sha256 });
         files.push(RawFile {
             // The epoch is part of the stable logical item key. Rotation
             // cannot silently reuse an earlier generation's occurrences.
@@ -169,13 +212,22 @@ async fn discover(source_path: &str) -> Result<ObservedSyncResult> {
     if hex::encode(chain) != manifest.chain {
         bail!("managed append manifest chain does not match its segments");
     }
-    Ok(ObservedSyncResult {
-        result: SyncResult {
-            files,
-            errors: Vec::new(),
+    Ok(ManagedSnapshot {
+        observed: ObservedSyncResult {
+            result: SyncResult {
+                files,
+                errors: Vec::new(),
+            },
+            application_read_bytes: Some(accounting.bytes()),
         },
-        application_read_bytes: Some(accounting.bytes()),
+        epoch: manifest.epoch,
+        chain: manifest.chain,
+        identities,
     })
+}
+
+async fn discover(source_path: &str) -> Result<ObservedSyncResult> {
+    Ok(read_snapshot(source_path, None, true).await?.observed)
 }
 
 #[async_trait]
@@ -253,6 +305,29 @@ mod tests {
         let file = &observed.result.files[0];
         assert!(file.path.contains("/segments/"));
         let source = file.source_path.as_ref().unwrap();
+        let first_manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join("manifest.json")).unwrap(),
+        ).unwrap();
+        let prefix = TrustedPrefix {
+            epoch: first_manifest["epoch"].as_str().unwrap().to_string(),
+            segments: 1,
+            chain: first_manifest["chain"].as_str().unwrap().to_string(),
+        };
+        std::fs::write(&input, b"{\"event\":\"next\"}\n").unwrap();
+        let appended = Command::new("python3").arg(&script).arg("append")
+            .arg(&root).arg(&input).output().unwrap();
+        assert!(appended.status.success());
+        let delta = read_snapshot(root.to_str().unwrap(), Some(&prefix), false)
+            .await.unwrap();
+        assert_eq!(delta.identities.len(), 2);
+        let current_manifest_length = std::fs::metadata(root.join("manifest.json")).unwrap().len();
+        assert_eq!(delta.observed.application_read_bytes,
+            Some(current_manifest_length + b"{\"event\":\"next\"}\n".len() as u64));
+        let restarted = read_snapshot(root.to_str().unwrap(), Some(&prefix), false)
+            .await.unwrap();
+        assert_eq!(restarted.chain, delta.chain);
+        assert_eq!(restarted.observed.application_read_bytes,
+            delta.observed.application_read_bytes);
         let mut permissions = std::fs::metadata(source).unwrap().permissions();
         permissions.set_readonly(false);
         std::fs::set_permissions(source, permissions).unwrap();
@@ -266,5 +341,8 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("does not match its manifest"));
+        assert!(read_snapshot(root.to_str().unwrap(), Some(&prefix), false).await.is_ok(),
+            "the declared trusted interval skips old content until the next full comparison");
+        assert!(read_snapshot(root.to_str().unwrap(), Some(&prefix), true).await.is_err());
     }
 }
