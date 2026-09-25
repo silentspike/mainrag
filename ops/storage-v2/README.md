@@ -28,21 +28,38 @@ current database encoding, active or unknown
 writer, active maintenance operation, insufficient free space, wrong extension,
 or invalid selected index keeps the result `BLOCKED`.
 
-The backup evidence input is a private operator artifact with this minimum
-shape:
+Create a fresh protected read-only backup metadata observation before the
+preflight:
+
+```bash
+python3 ops/storage-v2/backup-observe.py \
+  --stanza mainrag \
+  --info-output "$OPERATOR_EVIDENCE_DIR/pgbackrest-info.json" \
+  --evidence-output "$OPERATOR_EVIDENCE_DIR/backup-evidence.json"
+```
+
+The evidence and raw pgBackRest information are create-only private sibling
+files. The preflight checks their digest, latest completed nonerror backup,
+stanza identity, observation age, and backup age. Evidence uses this shape:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "PASS",
+  "stanza": "mainrag",
   "completed_at_unix": 0,
+  "observed_at_unix": 0,
+  "artifact_file": "pgbackrest-info.json",
   "artifact_sha256": "64 lowercase hexadecimal characters",
+  "backup_type": "full",
+  "backup_label_sha256": "64 lowercase hexadecimal characters",
   "restore_tested": false
 }
 ```
 
-`restore_tested: false` is reported as `backup-command-only`; it is never
-relabeled as restore, PITR, HA, or disaster-recovery evidence.
+This readback is reported as `backup-metadata-only`. It does not prove that the
+backup can be restored and is never relabeled as restore, PITR, HA, or disaster
+recovery evidence. A separate exercised restore is required for that claim.
 
 The check exits 0 only for `PASS` and exits 3 for an honestly blocked state.
 It performs no service, timer, database, package, index, or filesystem change.
