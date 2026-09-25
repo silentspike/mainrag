@@ -32,26 +32,28 @@ pub async fn run(
                 "--read-path storage_v2 requires --source and a positive --generation sequence"
             );
         }
-    } else if read_path != "current" {
-        anyhow::bail!("--read-path must be current or storage_v2");
-    } else if generation.is_some()
-        || path_prefix.is_some()
-        || occurred_from.is_some()
-        || occurred_to.is_some()
-        || role.is_some()
-        || graph_profile.is_some()
-        || semantic_profile.is_some()
-        || rerank_profile.is_some()
-        || include_test
+    } else if read_path != "current" && read_path != "auto" && read_path != "storage_v2_active" {
+        anyhow::bail!("--read-path must be auto, current, storage_v2, or storage_v2_active");
+    } else if generation.is_some() {
+        anyhow::bail!("--generation requires --read-path storage_v2");
+    } else if matches!(read_path, "current" | "auto")
+        && (path_prefix.is_some()
+            || occurred_from.is_some()
+            || occurred_to.is_some()
+            || role.is_some()
+            || graph_profile.is_some()
+            || semantic_profile.is_some()
+            || rerank_profile.is_some()
+            || include_test)
     {
-        anyhow::bail!("storage-v2 generation and filters require --read-path storage_v2");
+        anyhow::bail!("storage-v2 filters require --read-path storage_v2 or storage_v2_active");
     }
     // Fetch extra results to handle offset client-side (API doesn't support offset yet)
     let fetch_limit = limit
         .checked_add(offset)
         .ok_or_else(|| anyhow::anyhow!("--limit plus --offset exceeds the supported range"))?;
     let options = crate::client::api::SearchOptions {
-        read_path: Some(read_path),
+        read_path: (read_path != "auto").then_some(read_path),
         generation,
         path_prefix,
         occurred_from,
@@ -96,6 +98,7 @@ pub async fn run(
                     "content": r.content,
                     "context": r.context_prefix,
                     "external_hit_id": r.external_hit_id,
+                    "generation_seq": r.generation_seq,
                     "successors": r.successor_metadata,
                     "score_explanation": r.score_explanation,
                     "degradation": r.degradation,

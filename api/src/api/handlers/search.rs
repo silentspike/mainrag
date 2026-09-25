@@ -22,9 +22,9 @@ pub struct SearchRequest {
     /// Enable contextual compression to reduce tokens (default: false)
     #[serde(default)]
     pub compress: bool,
-    /// Explicit read selector. Omitted/current preserves the legacy path.
+    /// Explicit read selector. Omitted follows the configured application default.
     pub read_path: Option<String>,
-    /// Required when read_path=storage_v2; never inferred from the active pointer.
+    /// Required for a named storage-v2 read; active reads select committed pointers.
     pub generation: Option<String>,
     pub path_prefix: Option<String>,
     pub occurred_from: Option<String>,
@@ -113,7 +113,16 @@ pub async fn hybrid_search(
     let max_limit = state.config.server.search_max_limit.unwrap_or(100);
     let limit = req.limit.unwrap_or(default_limit).min(max_limit);
 
-    if req.read_path.as_deref() == Some("storage_v2") {
+    if storage_v2_selector(
+        req.read_path.as_deref(),
+        state
+            .config
+            .server
+            .storage_v2_default_read_manifest_sha256
+            .is_some(),
+    )
+    .is_some()
+    {
         return storage_v2_search(state, claims, &req, query, limit, start).await;
     }
     validate_current_selector(&req)?;
@@ -205,7 +214,16 @@ pub async fn keyword_search(
     let max_limit = state.config.server.search_max_limit.unwrap_or(100);
     let limit = req.limit.unwrap_or(default_limit).min(max_limit);
 
-    if req.read_path.as_deref() == Some("storage_v2") {
+    if storage_v2_selector(
+        req.read_path.as_deref(),
+        state
+            .config
+            .server
+            .storage_v2_default_read_manifest_sha256
+            .is_some(),
+    )
+    .is_some()
+    {
         return storage_v2_search(state, claims, &req, query, limit, start).await;
     }
     validate_current_selector(&req)?;
@@ -260,6 +278,17 @@ pub async fn keyword_search(
     ))
 }
 
+/// None means the legacy path. Some(false) is a named generation, Some(true)
+/// is the complete active set bound to the configured activation receipt.
+fn storage_v2_selector(read_path: Option<&str>, active_default_configured: bool) -> Option<bool> {
+    match read_path {
+        Some("storage_v2") => Some(false),
+        Some("storage_v2_active") => Some(true),
+        None if active_default_configured => Some(true),
+        _ => None,
+    }
+}
+
 fn validate_current_selector(req: &SearchRequest) -> Result<()> {
     match req.read_path.as_deref().unwrap_or("current") {
         "current" => {}
@@ -304,25 +333,64 @@ async fn storage_v2_search(
     start: Instant,
 ) -> Result<(HeaderMap, Json<SearchResponse>)> {
     use crate::services::retrieval_v2::{
-        parse_query, ExactRetrievalBackend, ExactSearchRequest, PostgresExactRetrievalBackend,
+        parse_query, ActiveSearchEnvelope, ExactRetrievalBackend, ExactSearchRequest,
+        PostgresExactRetrievalBackend,
     };
 
-    let source_id = req
-        .source_id
-        .ok_or_else(|| AppError::BadRequest("storage_v2 search requires source_id".to_string()))?;
-    let generation = req
-        .generation
-        .as_deref()
-        .filter(|value| {
-            !value.is_empty()
-                && !value.starts_with('0')
-                && value.bytes().all(|byte| byte.is_ascii_digit())
-        })
-        .ok_or_else(|| {
-            AppError::BadRequest(
-                "storage_v2 search requires a positive named generation sequence".to_string(),
-            )
-        })?;
+    let active = storage_v2_selector(
+        req.read_path.as_deref(),
+        state
+            .config
+            .server
+            .storage_v2_default_read_manifest_sha256
+            .is_some(),
+    )
+    .ok_or_else(|| AppError::BadRequest("unsupported search read path".to_string()))?;
+    let manifest_sha256 = if active {
+        Some(
+            state
+                .config
+                .server
+                .storage_v2_default_read_manifest_sha256
+                .as_deref()
+                .ok_or_else(|| {
+                    AppError::BadRequest("active storage_v2 read is not configured".to_string())
+                })?,
+        )
+    } else {
+        None
+    };
+    if active && req.generation.is_some() {
+        return Err(AppError::BadRequest(
+            "active storage_v2 read cannot name a generation".to_string(),
+        ));
+    }
+    let source_id = if active {
+        req.source_id
+    } else {
+        Some(req.source_id.ok_or_else(|| {
+            AppError::BadRequest("storage_v2 search requires source_id".to_string())
+        })?)
+    };
+    let generation = if active {
+        None
+    } else {
+        Some(
+            req.generation
+                .as_deref()
+                .filter(|value| {
+                    !value.is_empty()
+                        && !value.starts_with('0')
+                        && value.bytes().all(|byte| byte.is_ascii_digit())
+                })
+                .ok_or_else(|| {
+                    AppError::BadRequest(
+                        "storage_v2 search requires a positive named generation sequence"
+                            .to_string(),
+                    )
+                })?,
+        )
+    };
     if limit == 0 {
         return Err(AppError::BadRequest(
             "storage_v2 search limit must be positive".to_string(),
@@ -359,51 +427,83 @@ async fn storage_v2_search(
     }
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
-    let request = ExactSearchRequest {
-        source_id,
-        generation: generation.to_string(),
-        ast,
-        filters: serde_json::Value::Object(filters),
-        limit: i64::from(limit),
-    };
+    let filters = serde_json::Value::Object(filters);
     let include_test = req.include_test;
+    let manifest_sha256 = manifest_sha256.map(str::to_string);
+    let generation = generation.map(str::to_string);
     let envelope = state
         .rls_client
         .with_rls(user_id, claims.is_admin, move |transaction| {
             Box::pin(async move {
-                transaction
-                    .execute(
-                        "SELECT storage_v2_require_test_scope($1, $2)",
-                        &[&source_id, &include_test],
-                    )
-                    .await
-                    .map_err(|error| {
-                        if error.code()
-                            == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
-                        {
-                            AppError::Forbidden(
-                                "storage_v2 test source requires explicit admin test scope"
-                                    .to_string(),
-                            )
-                        } else {
-                            AppError::Database(error)
-                        }
+                let backend = PostgresExactRetrievalBackend::new(transaction);
+                let result = if let Some(manifest) = manifest_sha256 {
+                    backend
+                        .search_active(
+                            &manifest,
+                            &ast,
+                            &filters,
+                            i64::from(limit),
+                            source_id,
+                            include_test,
+                        )
+                        .await
+                } else {
+                    let source_id = source_id.ok_or_else(|| {
+                        AppError::BadRequest("storage_v2 search requires source_id".to_string())
                     })?;
-                PostgresExactRetrievalBackend::new(transaction)
-                    .search(&request)
-                    .await
-                    .map_err(|error| {
-                        if let Some(database) = error.downcast_ref::<tokio_postgres::Error>() {
-                            if database.code()
+                    transaction
+                        .execute(
+                            "SELECT storage_v2_require_test_scope($1, $2)",
+                            &[&source_id, &include_test],
+                        )
+                        .await
+                        .map_err(|error| {
+                            if error.code()
                                 == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
                             {
-                                return AppError::Forbidden(
-                                    "storage_v2 generation is not authorized".to_string(),
-                                );
+                                AppError::Forbidden(
+                                    "storage_v2 test source requires explicit admin test scope"
+                                        .to_string(),
+                                )
+                            } else {
+                                AppError::Database(error)
                             }
+                        })?;
+                    let request = ExactSearchRequest {
+                        source_id,
+                        generation: generation.ok_or_else(|| {
+                            AppError::BadRequest(
+                                "storage_v2 search requires a positive named generation sequence"
+                                    .to_string(),
+                            )
+                        })?,
+                        ast,
+                        filters,
+                        limit: i64::from(limit),
+                    };
+                    backend
+                        .search(&request)
+                        .await
+                        .map(|named| ActiveSearchEnvelope {
+                            generation_seq: Some(named.generation_seq),
+                            execution: named.execution,
+                            fully_scored_views: named.fully_scored_views,
+                            total: named.total,
+                            results: named.results,
+                        })
+                };
+                result.map_err(|error| {
+                    if let Some(database) = error.downcast_ref::<tokio_postgres::Error>() {
+                        if database.code()
+                            == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+                        {
+                            return AppError::Forbidden(
+                                "storage_v2 generation is not authorized".to_string(),
+                            );
                         }
-                        AppError::Internal(format!("storage_v2 exact retrieval failed: {error}"))
-                    })
+                    }
+                    AppError::Internal(format!("storage_v2 exact retrieval failed: {error}"))
+                })
             })
         })
         .await?;
@@ -446,6 +546,7 @@ async fn storage_v2_search(
             level,
             parent_context: None,
             external_hit_id: Some(hit.external_hit_id),
+            generation_seq: hit.generation_seq.or(envelope.generation_seq),
             successor_metadata: if hit.legacy_successors.is_empty() {
                 None
             } else {
@@ -475,17 +576,30 @@ async fn storage_v2_search(
         "X-Search-Mode",
         HeaderValue::from_static("storage-v2-exact"),
     );
-    headers.insert("X-Search-Read-Path", HeaderValue::from_static("storage-v2"));
+    headers.insert(
+        "X-Search-Read-Path",
+        HeaderValue::from_static(if active {
+            "storage-v2-active"
+        } else {
+            "storage-v2"
+        }),
+    );
     Ok((
         headers,
         Json(SearchResponse {
-            llm_context: format!(
-                "Found {} exact storage-v2 results (showing {}) in named generation {}. \
-                 Scores use complete occurrence-scoped evaluation; unavailable optional stages are explicit.",
-                envelope.total,
-                results.len(),
-                envelope.generation_seq
-            ),
+            llm_context: if active {
+                format!(
+                    "Found {} exact storage-v2 results (showing {}) across authorized active generations. \
+                     Scores use complete occurrence-scoped evaluation; unavailable optional stages are explicit.",
+                    envelope.total, results.len()
+                )
+            } else {
+                format!(
+                    "Found {} exact storage-v2 results (showing {}) in named generation {}. \
+                     Scores use complete occurrence-scoped evaluation; unavailable optional stages are explicit.",
+                    envelope.total, results.len(), envelope.generation_seq.unwrap_or_default()
+                )
+            },
             results,
             total: usize::try_from(envelope.total).unwrap_or(usize::MAX),
             took_ms: start.elapsed().as_millis() as u64,
@@ -494,8 +608,15 @@ async fn storage_v2_search(
             compression_ratio,
             expanded_query: None,
             expansion_terms: vec![],
-            read_path: Some("storage_v2".to_string()),
-            generation: Some(envelope.generation_seq),
+            read_path: Some(
+                if active {
+                    "storage_v2_active"
+                } else {
+                    "storage_v2"
+                }
+                .to_string(),
+            ),
+            generation: envelope.generation_seq,
             fully_scored_views: Some(envelope.fully_scored_views),
         }),
     ))
@@ -513,4 +634,22 @@ async fn storage_v2_search(
     Err(AppError::BadRequest(
         "storage_v2 retrieval is not enabled".to_string(),
     ))
+}
+
+#[cfg(test)]
+mod active_read_selector_tests {
+    use super::storage_v2_selector;
+
+    #[test]
+    fn default_switch_requires_configuration_and_explicit_current_stays_legacy() {
+        assert_eq!(storage_v2_selector(None, false), None);
+        assert_eq!(storage_v2_selector(None, true), Some(true));
+        assert_eq!(storage_v2_selector(Some("current"), true), None);
+        assert_eq!(storage_v2_selector(Some("storage_v2"), true), Some(false));
+        assert_eq!(
+            storage_v2_selector(Some("storage_v2_active"), false),
+            Some(true)
+        );
+        assert_eq!(storage_v2_selector(Some("unknown"), true), None);
+    }
 }
