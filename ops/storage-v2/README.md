@@ -640,3 +640,44 @@ a second execution to check complete result identity; the clocks are not
 interchangeable. This synthetic projection is neither full authorized API
 qualification nor an isolated production resource measurement. Materialized
 results can still use memory or spill; no constant-memory claim is made.
+
+## Protected legacy cleanup inventory
+
+`cleanup-plan.py` captures a read-only PostgreSQL catalog and optional Qdrant,
+tracked runtime-source, and retained-generation reachability inventories for
+issue #68. Write its output to a private directory outside Git. The output is
+created once with mode 0600; an existing artifact is never replaced.
+
+```bash
+python3 ops/storage-v2/cleanup-plan.py \
+  --database "$DATABASE_NAME" --local-postgres \
+  --count-relation indexing_outbox \
+  --retain-all-generations \
+  --export-root "$PRIVATE_EXPORT_DIR" \
+  --output "$PRIVATE_EVIDENCE_DIR/cleanup-catalog.json"
+```
+
+The retained-generation selector can instead name specific generation IDs.
+It must include every active generation and active pointer. The inventory also
+protects legacy-hit mappings, stored intelligence occurrences, and items in
+building ingest runs. It reports outbox action/status classes and per-pack
+body and entry counts. The root set is incomplete for external export retention
+and historical run/identity records; bodies outside it are not deletion
+candidates. The optional Qdrant lists are read twice but cannot share the
+PostgreSQL snapshot. Text matches in tracked runtime files are candidates for
+manual caller review, not proof about an installed binary.
+
+Explicit export roots are hashed file by file with symlinks rejected. Their
+scan is bounded and non-atomic; every required root must be named and reviewed.
+`cleanup-manifest.py` turns a protected catalog into a create-only disposition
+draft. Its object list includes observed identities, sizes or counts where
+available, and `UNREVIEWED` for every object without an exact decision. An
+optional private decisions JSON uses schema
+`mainrag.storage-v2.cleanup-decisions.v1`, the exact catalog file SHA-256, and
+an `objects` array of `{key, disposition, reason, authority}` entries. A draft
+always has `apply_allowed: false`; decisions are review input, not approval.
+
+This capture has status `OBSERVED_ONLY`. It does not produce an approved cleanup
+manifest, verify body/pack integrity, authorize GC, remove runtime callers, or
+provide an apply path. Accepted activation, fresh owner approval for an exact
+manifest, and post-cleanup verification remain separate gates.
