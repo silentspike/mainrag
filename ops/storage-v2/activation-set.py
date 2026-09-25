@@ -18,6 +18,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
@@ -174,7 +177,7 @@ def validate_acceptance(audit: dict, audit_sha: str, acceptance: dict,
                         acceptance_sha: str, binary: Path,
                         preflight: dict, now: int) -> list[dict]:
     candidate_set = audit.get("candidate_set")
-    if audit.get("schema_version") != "mainrag.storage-v2.candidate-aggregate-audit.v1" \
+    if audit.get("schema_version") != "mainrag.storage-v2.candidate-aggregate-audit.v2" \
             or audit.get("persisted_candidate_set_complete") is not True \
             or not isinstance(candidate_set, list) or not candidate_set \
             or audit.get("candidate_set_sha256") != sha256(canonical(candidate_set)):
@@ -186,6 +189,15 @@ def validate_acceptance(audit: dict, audit_sha: str, acceptance: dict,
             or not isinstance(acceptance.get("external_gates"), dict) \
             or set(acceptance["external_gates"]) != EXTERNAL_GATES:
         raise RuntimeError("exact accepted aggregate evidence is missing")
+    if any(not isinstance(item, dict)
+           or type(item.get("source_id")) is not int or item["source_id"] <= 0
+           or type(item.get("item_count")) is not int or item["item_count"] < 0
+           or not isinstance(item.get("adapter_profile_id"), str)
+           or not item["adapter_profile_id"]
+           or not isinstance(item.get("candidate_commit_sha"), str)
+           or HEX40.fullmatch(item["candidate_commit_sha"]) is None
+           for item in candidate_set):
+        raise RuntimeError("per-source candidate package identities are incomplete")
     for name in EXTERNAL_GATES:
         gate = acceptance["external_gates"][name]
         if not isinstance(gate, dict) or gate.get("status") != "PASS" \
@@ -227,7 +239,7 @@ def validate_acceptance(audit: dict, audit_sha: str, acceptance: dict,
     return candidate_set
 
 
-def bind_live(candidate_set: list[dict], rows: list[dict], code_commit: str) -> list[dict]:
+def bind_live(candidate_set: list[dict], rows: list[dict]) -> list[dict]:
     by_id = {row.get("source_id"): row for row in rows if isinstance(row, dict)}
     if len(by_id) != len(rows) or len(rows) != len(candidate_set) \
             or sum(row.get("is_test") is True for row in rows) != 1:
@@ -245,7 +257,7 @@ def bind_live(candidate_set: list[dict], rows: list[dict], code_commit: str) -> 
             "evidence_id": item["evidence_id"],
             "evidence_manifest_sha256": item["evidence_manifest_sha256"],
             "source_watermark_sha256": item["source_watermark_sha256"],
-            "commit_sha": code_commit,
+            "commit_sha": item["candidate_commit_sha"],
         }
         if candidate.get("status") != "release_candidate" \
                 or any(candidate.get(key) != value for key, value in fields.items()):
@@ -256,12 +268,43 @@ def bind_live(candidate_set: list[dict], rows: list[dict], code_commit: str) -> 
         entries.append({
             "source_id": item["source_id"],
             "candidate_generation_id": item["candidate_generation_id"],
+            "candidate_commit_sha": item["candidate_commit_sha"],
             "expected_active_generation_id": active,
             "evidence_id": item["evidence_id"],
             "evidence_manifest_sha256": item["evidence_manifest_sha256"],
             "source_watermark_sha256": item["source_watermark_sha256"],
         })
     return sorted(entries, key=lambda item: item["source_id"])
+
+
+def verify_current_api_watermarks(api_url: str, token: str,
+                                  candidate_set: list[dict]) -> None:
+    parsed = urllib.parse.urlparse(api_url)
+    if parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "::1") \
+            or parsed.username or parsed.password or parsed.path not in ("", "/") \
+            or parsed.query or parsed.fragment or not token:
+        raise RuntimeError("activation watermark gate requires a local authenticated API")
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, request, fp, code, msg, headers, newurl):
+            return None
+    opener = urllib.request.build_opener(NoRedirect)
+    for item in candidate_set:
+        source_id = item["source_id"]
+        request = urllib.request.Request(
+            api_url.rstrip("/")
+            + f"/api/v1/admin/sources/{source_id}/storage-v2-release-watermark",
+            headers={"Authorization": "Bearer " + token},
+        )
+        try:
+            with opener.open(request, timeout=120) as response:
+                observed = json.load(response)
+        except (OSError, ValueError) as error:
+            raise RuntimeError("current release source watermark readback failed") from error
+        if not isinstance(observed, dict) or observed.get("source_id") != source_id \
+                or observed.get("source_watermark_sha256") != item["source_watermark_sha256"] \
+                or observed.get("adapter_profile_id") != item["adapter_profile_id"] \
+                or observed.get("item_count") != item["item_count"]:
+            raise RuntimeError("final source watermark drifted before activation")
 
 
 def sql_literal(value: str) -> str:
@@ -284,7 +327,7 @@ def make_plan(audit: dict, audit_sha: str, acceptance: dict,
               local_postgres: bool, now: int) -> dict:
     candidate_set = validate_acceptance(
         audit, audit_sha, acceptance, acceptance_sha, binary, preflight, now)
-    entries = bind_live(candidate_set, rows, acceptance["code_commit_sha"])
+    entries = bind_live(candidate_set, rows)
     manifest = {
         "schema_version": "mainrag.storage-v2.activation-set.v1",
         "activation_id": str(uuid.uuid4()),
@@ -332,6 +375,8 @@ def plan_command(args: argparse.Namespace) -> None:
                      preflight, args.preflight_sha256, args.installed_binary,
                      live_rows(args.database, args.local_postgres), args.database,
                      args.local_postgres, now)
+    verify_current_api_watermarks(args.api_url, os.environ.get(args.token_env, ""),
+                                  audit["candidate_set"])
     private_write(args.output, plan)
     print(json.dumps({"status": plan["status"],
                       "plan_sha256": sha256(args.output.read_bytes()),
@@ -476,10 +521,11 @@ def apply_command(args: argparse.Namespace) -> None:
         audit, plan["persisted_audit_sha256"], acceptance,
         plan["aggregate_acceptance_sha256"], args.installed_binary,
         fresh_preflight, now)
+    verify_current_api_watermarks(args.api_url, os.environ.get(args.token_env, ""),
+                                  candidate_set)
     validate_preflight(fresh_preflight, acceptance["preflight_operator_commit_sha"],
                        acceptance["schema_sha256"], now, maximum_age=300)
-    entries = bind_live(candidate_set, live_rows(args.database, args.local_postgres),
-                        acceptance["code_commit_sha"])
+    entries = bind_live(candidate_set, live_rows(args.database, args.local_postgres))
     if entries != plan["manifest"].get("sources") \
             or sha256(canonical([{
                 "source_id": item["source_id"],
@@ -534,6 +580,8 @@ def main() -> int:
     parser.add_argument("phase", choices=("plan", "apply"))
     parser.add_argument("--database", required=True)
     parser.add_argument("--local-postgres", action="store_true")
+    parser.add_argument("--api-url", default="http://127.0.0.1:3001")
+    parser.add_argument("--token-env", default="MAINRAG_TOKEN")
     parser.add_argument("--audit", type=Path, required=True)
     parser.add_argument("--audit-sha256")
     parser.add_argument("--acceptance", type=Path, required=True)

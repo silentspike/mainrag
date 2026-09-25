@@ -613,6 +613,90 @@ where
     .await
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReleaseWatermarkObservation {
+    pub source_id: i64,
+    pub adapter_profile_id: String,
+    pub source_watermark_sha256: String,
+    pub item_count: usize,
+    pub input_bytes: u64,
+    pub application_read_bytes: Option<u64>,
+}
+
+/// Observe the same release-adapter watermark used by candidate construction
+/// without allocating a generation or changing any persisted state.
+pub async fn observe_release_watermark(
+    source_id: i64,
+    source_type: &str,
+    source_path: &Path,
+) -> Result<ReleaseWatermarkObservation> {
+    if source_id <= 0 {
+        bail!("release watermark requires a registered positive source id");
+    }
+    let source_path = source_path
+        .to_str()
+        .context("release source path is not UTF-8")?;
+    let adapter_profile = release_adapter_profile(source_type)?;
+    let (observed, managed_identities) = if source_type == "managed_append" {
+        let snapshot = plugins::managed_append::read_snapshot(source_path, None, true).await?;
+        (snapshot.observed, Some(snapshot.identities))
+    } else {
+        let plugin =
+            plugins::get_plugin(source_type).context("release source adapter is unavailable")?;
+        (
+            plugin.sync_for_storage_v2_observed(source_path).await?,
+            None,
+        )
+    };
+    let adapter_bytes = observed.application_read_bytes;
+    if !observed.result.errors.is_empty() {
+        bail!("release source adapter returned errors");
+    }
+    let mut files = observed
+        .result
+        .files
+        .into_iter()
+        .map(SliceFile::from)
+        .collect::<Vec<_>>();
+    if let Some(identities) = &managed_identities {
+        if files.len() != identities.len() {
+            bail!("managed release identity count differs");
+        }
+        for (file, identity) in files.iter_mut().zip(identities) {
+            file.content_sha256 = Some(identity.sha256);
+            file.logical_length = identity.bytes;
+        }
+    }
+    files.sort_by(|left, right| left.item_key.cmp(&right.item_key));
+    validate_slice_layout(&files)?;
+    let (manifest_sha256, input_bytes) = if managed_identities.is_some() {
+        managed_fixture_hash(&files)?
+    } else {
+        canonical_fixture_hash(&mut files).await?
+    };
+    let deferred_read_bytes = source_read_bytes(&files)?;
+    let application_read_bytes = adapter_bytes
+        .map(|bytes| {
+            bytes
+                .checked_add(deferred_read_bytes)
+                .context("release watermark read counter overflow")
+        })
+        .transpose()?;
+    Ok(ReleaseWatermarkObservation {
+        source_id,
+        source_watermark_sha256: release_source_watermark(
+            source_type,
+            source_path,
+            &adapter_profile,
+            &manifest_sha256,
+        ),
+        adapter_profile_id: adapter_profile,
+        item_count: files.len(),
+        input_bytes,
+        application_read_bytes,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_storage_v2_slice<C>(
     client: &C,
@@ -2995,6 +3079,59 @@ mod tests {
 
         assert_eq!(actual, hex::encode(expected.finalize()));
         assert_eq!(input_bytes, content.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn release_watermark_observation_detects_add_change_and_delete_without_writes() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-watermark-{}", Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let first_path = directory.0.join("first.rs");
+        std::fs::write(&first_path, "fn first() {}\n").unwrap();
+        let first = observe_release_watermark(7, "fs", &directory.0)
+            .await
+            .unwrap();
+        let unchanged = observe_release_watermark(7, "fs", &directory.0)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.source_watermark_sha256,
+            unchanged.source_watermark_sha256
+        );
+        assert_eq!(
+            first.adapter_profile_id,
+            release_adapter_profile("fs").unwrap()
+        );
+        assert_eq!(first.item_count, 1);
+        assert!(first.application_read_bytes.unwrap() >= first.input_bytes);
+
+        std::fs::write(&first_path, "fn changed() {}\n").unwrap();
+        let changed = observe_release_watermark(7, "fs", &directory.0)
+            .await
+            .unwrap();
+        assert_ne!(
+            first.source_watermark_sha256,
+            changed.source_watermark_sha256
+        );
+        let added_path = directory.0.join("second.rs");
+        std::fs::write(&added_path, "fn second() {}\n").unwrap();
+        let added = observe_release_watermark(7, "fs", &directory.0)
+            .await
+            .unwrap();
+        assert_eq!(added.item_count, 2);
+        assert_ne!(
+            changed.source_watermark_sha256,
+            added.source_watermark_sha256
+        );
+        std::fs::remove_file(added_path).unwrap();
+        let deleted = observe_release_watermark(7, "fs", &directory.0)
+            .await
+            .unwrap();
+        assert_eq!(
+            deleted.source_watermark_sha256,
+            changed.source_watermark_sha256
+        );
     }
 
     #[tokio::test]

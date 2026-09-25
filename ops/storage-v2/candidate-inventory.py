@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tempfile
 import uuid
+import re
+import stat
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -111,17 +113,36 @@ def read_sources(database: str, local_postgres: bool = False) -> list[dict]:
 
 
 def capture(rows: list[dict], operator_commit_sha: str,
-            candidate_commit_sha: str) -> tuple[dict, dict]:
+            candidate_commit_sha: str | None,
+            candidate_commit_map: dict | None = None,
+            candidate_commit_map_sha256: str | None = None) -> tuple[dict, dict]:
     if not rows:
         raise RuntimeError("source inventory is empty")
     if len(operator_commit_sha) != 40 or any(
         character not in "0123456789abcdef" for character in operator_commit_sha
     ):
         raise RuntimeError("exact lowercase operator commit SHA is required")
-    if len(candidate_commit_sha) != 40 or any(
-        character not in "0123456789abcdef" for character in candidate_commit_sha
-    ):
+    if (candidate_commit_sha is None) == (candidate_commit_map is None):
+        raise RuntimeError("exactly one candidate package identity mode is required")
+    if candidate_commit_sha is not None and not re.fullmatch(r"[0-9a-f]{40}", candidate_commit_sha):
         raise RuntimeError("exact lowercase candidate package commit SHA is required")
+    expected_by_source: dict[int, tuple[int, str]] = {}
+    if candidate_commit_map is not None:
+        if not isinstance(candidate_commit_map, dict) \
+                or candidate_commit_map.get("schema_version") != "mainrag.storage-v2.final-candidate-commit-map.v1" \
+                or not re.fullmatch(r"[0-9a-f]{64}", candidate_commit_map_sha256 or "") \
+                or not isinstance(candidate_commit_map.get("sources"), list):
+            raise RuntimeError("protected final candidate commit map differs")
+        for item in candidate_commit_map["sources"]:
+            if not isinstance(item, dict) or type(item.get("source_id")) is not int \
+                    or item["source_id"] <= 0 or item["source_id"] in expected_by_source \
+                    or type(item.get("candidate_generation_id")) is not int \
+                    or item["candidate_generation_id"] <= 0 \
+                    or not isinstance(item.get("candidate_commit_sha"), str) \
+                    or not re.fullmatch(r"[0-9a-f]{40}", item["candidate_commit_sha"]):
+                raise RuntimeError("final candidate commit map has invalid source identity")
+            expected_by_source[item["source_id"]] = (
+                item["candidate_generation_id"], item["candidate_commit_sha"])
     seen: set[int] = set()
     protected = []
     type_counts: Counter[str] = Counter()
@@ -154,6 +175,14 @@ def capture(rows: list[dict], operator_commit_sha: str,
         candidate_count = sum(generation.get("status") == "release_candidate" for generation in generations)
         if candidate_count > 1:
             raise RuntimeError("source has multiple release candidates")
+        if candidate_commit_map is not None:
+            expected = expected_by_source.get(source_id)
+            candidates = [generation for generation in generations
+                          if generation.get("status") == "release_candidate"]
+            if expected is None or len(candidates) != 1 or (
+                candidates[0].get("generation_id"), candidates[0].get("commit_sha")
+            ) != expected:
+                raise RuntimeError("final candidate commit map differs from live inventory")
         generation_ids: set[int] = set()
         generation_sequences: set[int] = set()
         for generation in generations:
@@ -187,17 +216,25 @@ def capture(rows: list[dict], operator_commit_sha: str,
         type_counts[public_type] += 1
         test_count += row["is_test"]
         candidate_source_count += bool(candidate_count)
+    if candidate_commit_map is not None and set(expected_by_source) != seen:
+        raise RuntimeError("final candidate commit map does not cover every source")
     inventory = {
-        "schema_version": "mainrag.storage-v2.candidate-inventory.v1",
+        "schema_version": ("mainrag.storage-v2.candidate-inventory.v2"
+                           if candidate_commit_map is not None else
+                           "mainrag.storage-v2.candidate-inventory.v1"),
         "capture_status": "OBSERVED_ONLY",
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "operator_commit_sha": operator_commit_sha,
         "candidate_commit_sha": candidate_commit_sha,
+        "candidate_commit_map_sha256": candidate_commit_map_sha256,
+        "candidate_commit_map": candidate_commit_map,
         "inventory_id": str(uuid.uuid4()),
         "sources": protected,
     }
     public = {
-        "schema_version": "mainrag.storage-v2.candidate-inventory-summary.v1",
+        "schema_version": ("mainrag.storage-v2.candidate-inventory-summary.v2"
+                           if candidate_commit_map is not None else
+                           "mainrag.storage-v2.candidate-inventory-summary.v1"),
         "capture_status": "OBSERVED_ONLY",
         "inventory_id": inventory["inventory_id"],
         "protected_sha256": hashlib.sha256(canonical(inventory) + b"\n").hexdigest(),
@@ -216,14 +253,51 @@ def capture(rows: list[dict], operator_commit_sha: str,
     return inventory, public
 
 
+def read_commit_map(path: Path, expected_sha256: str) -> dict:
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise RuntimeError("exact protected commit-map digest is required")
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise RuntimeError("protected final candidate commit map is unavailable") from error
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077 \
+            or metadata.st_size > 2 * 1024 * 1024:
+        raise RuntimeError("final candidate commit map must be a bounded private file")
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise RuntimeError("protected final candidate commit map is unavailable") from error
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise RuntimeError("final candidate commit map digest differs")
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate JSON key")
+            value[key] = item
+        return value
+    try:
+        value = json.loads(raw, object_pairs_hook=unique)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise RuntimeError("final candidate commit map is invalid JSON") from error
+    if not isinstance(value, dict):
+        raise RuntimeError("final candidate commit map must be an object")
+    return value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", required=True)
     parser.add_argument("--operator-commit-sha", required=True)
-    parser.add_argument("--candidate-commit-sha", required=True)
+    identity = parser.add_mutually_exclusive_group(required=True)
+    identity.add_argument("--candidate-commit-sha")
+    identity.add_argument("--candidate-commit-map", type=Path)
+    parser.add_argument("--candidate-commit-map-sha256")
     parser.add_argument("--protected-output", type=Path, required=True)
     parser.add_argument("--local-postgres", action="store_true")
     arguments = parser.parse_args()
+    if (arguments.candidate_commit_map is None) != (arguments.candidate_commit_map_sha256 is None):
+        parser.error("commit map requires its exact protected SHA-256")
     try:
         actual_commit = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=ROOT,
@@ -250,7 +324,11 @@ def main() -> int:
     try:
         inventory, public = capture(
             read_sources(arguments.database, arguments.local_postgres),
-            arguments.operator_commit_sha, arguments.candidate_commit_sha
+            arguments.operator_commit_sha, arguments.candidate_commit_sha,
+            read_commit_map(arguments.candidate_commit_map,
+                            arguments.candidate_commit_map_sha256)
+            if arguments.candidate_commit_map is not None else None,
+            arguments.candidate_commit_map_sha256,
         )
         private_create(arguments.protected_output, inventory)
     except FileExistsError:

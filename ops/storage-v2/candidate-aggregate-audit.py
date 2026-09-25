@@ -141,7 +141,10 @@ def read_protected_inventory(path: Path, expected_sha256: str) -> tuple[dict, st
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RuntimeError("protected inventory is invalid JSON") from error
-    if not isinstance(value, dict) or value.get("schema_version") != "mainrag.storage-v2.candidate-inventory.v1":
+    if not isinstance(value, dict) or value.get("schema_version") not in (
+        "mainrag.storage-v2.candidate-inventory.v1",
+        "mainrag.storage-v2.candidate-inventory.v2",
+    ):
         raise RuntimeError("protected inventory schema differs")
     if value.get("capture_status") != "OBSERVED_ONLY":
         raise RuntimeError("protected inventory status differs")
@@ -179,6 +182,24 @@ def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
     candidate_set = []
     quality_by_class: dict[str, dict[str, int]] = {}
     expected_commit = inventory.get("candidate_commit_sha")
+    expected_by_source: dict[int, tuple[int, str]] = {}
+    if inventory.get("schema_version") == "mainrag.storage-v2.candidate-inventory.v2":
+        commit_map = inventory.get("candidate_commit_map")
+        if expected_commit is not None or not isinstance(commit_map, dict) \
+                or commit_map.get("schema_version") != "mainrag.storage-v2.final-candidate-commit-map.v1" \
+                or not digest_identity(inventory.get("candidate_commit_map_sha256")) \
+                or not isinstance(commit_map.get("sources"), list):
+            raise RuntimeError("protected final candidate commit map is invalid")
+        for item in commit_map["sources"]:
+            if not isinstance(item, dict) or type(item.get("source_id")) is not int \
+                    or item["source_id"] <= 0 or item["source_id"] in expected_by_source \
+                    or type(item.get("candidate_generation_id")) is not int \
+                    or item["candidate_generation_id"] <= 0 \
+                    or not isinstance(item.get("candidate_commit_sha"), str) \
+                    or not COMMIT.fullmatch(item["candidate_commit_sha"]):
+                raise RuntimeError("protected final candidate commit map has invalid entries")
+            expected_by_source[item["source_id"]] = (
+                item["candidate_generation_id"], item["candidate_commit_sha"])
     for source in sources:
         if not isinstance(source, dict) or type(source.get("source_id")) is not int \
                 or source["source_id"] <= 0 or source["source_id"] in seen \
@@ -212,8 +233,15 @@ def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
             proof_failures, proof_summary = candidate_proof(
                 candidate.get("qualification_manifest"))
             failures.extend(proof_failures)
-            if not isinstance(expected_commit, str) or not COMMIT.fullmatch(expected_commit) \
-                    or candidate.get("commit_sha") != expected_commit:
+            source_expected = expected_by_source.get(source["source_id"])
+            if expected_by_source:
+                commit_matches = source_expected == (
+                    candidate.get("generation_id"), candidate.get("commit_sha"))
+            else:
+                commit_matches = (isinstance(expected_commit, str)
+                                  and COMMIT.fullmatch(expected_commit)
+                                  and candidate.get("commit_sha") == expected_commit)
+            if not commit_matches:
                 failures.append("candidate_package_identity_mismatch")
             if not all(candidate.get(key) for key in (
                 "evidence_id", "adapter_profile_id", "analysis_profile_id",
@@ -235,10 +263,13 @@ def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
                 candidate_set.append({
                     "source_id": source["source_id"],
                     "candidate_generation_id": candidate["generation_id"],
+                    "candidate_generation_seq": candidate["generation_seq"],
+                    "candidate_commit_sha": candidate["commit_sha"],
                     "expected_active_generation_id": None,
                     "evidence_id": candidate["evidence_id"],
                     "evidence_manifest_sha256": candidate["qualification_manifest_sha256"],
                     "source_watermark_sha256": candidate["source_watermark_sha256"],
+                    "item_count": candidate["item_count"],
                     "verification_manifest_sha256": candidate["verification_manifest_sha256"],
                     "adapter_profile_id": candidate["adapter_profile_id"],
                     "analysis_profile_id": candidate["analysis_profile_id"],
@@ -256,12 +287,14 @@ def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
         })
     if benchmark_count != 1:
         blockers["benchmark_classification_invalid"] = 1
+    if expected_by_source and set(expected_by_source) != seen:
+        blockers["candidate_commit_map_scope_mismatch"] = 1
     candidate_set_complete = not blockers and len(candidate_set) == len(sources)
     candidate_set.sort(key=lambda item: item["source_id"])
     candidate_set_sha256 = (hashlib.sha256(canonical(candidate_set)).hexdigest()
                             if candidate_set_complete else None)
     protected = {
-        "schema_version": "mainrag.storage-v2.candidate-aggregate-audit.v1",
+        "schema_version": "mainrag.storage-v2.candidate-aggregate-audit.v2",
         "status": "BLOCKED",
         "inventory_id": inventory.get("inventory_id"),
         "inventory_sha256": inventory_sha256,
@@ -278,7 +311,7 @@ def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
         "sources": protected_sources,
     }
     public = {
-        "schema_version": "mainrag.storage-v2.candidate-aggregate-audit-summary.v1",
+        "schema_version": "mainrag.storage-v2.candidate-aggregate-audit-summary.v2",
         "status": "BLOCKED",
         "audit_id": str(uuid.uuid4()),
         "inventory_sha256": inventory_sha256,
