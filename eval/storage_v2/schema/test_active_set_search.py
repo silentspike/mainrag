@@ -97,6 +97,15 @@ SELECT storage_v2_active_source_state('{manifest_digest}', {source},
 """))
         return json.loads(value)
 
+    def intelligence(self, actor: str, manifest_digest: str, command: str,
+                     *, source: int | None = None, include_test: bool = False) -> dict:
+        source_value = "NULL" if source is None else str(source)
+        value = self.sql(self.actor(actor, f"""
+SELECT storage_v2_active_intelligence_command('{manifest_digest}', '{command}',
+    '{{}}'::JSONB, {source_value}, {str(include_test).lower()})::TEXT;
+"""))
+        return json.loads(value)
+
     def test_active_set_requires_receipt_and_reads_authorized_sources(self) -> None:
         self.sql(f"""
 CREATE TABLE users(id UUID PRIMARY KEY, is_admin BOOLEAN NOT NULL);
@@ -201,6 +210,45 @@ INSERT INTO storage_v2_release_candidate_evidence(
         self.assertEqual(self.search(ADMIN, digest, source=1)["total"], 1)
         self.assertEqual(benchmark["total"], 3)
         self.assertEqual({hit["source_id"] for hit in benchmark["results"]}, {1, 2, 3})
+        for command in ("card", "explain", "layers", "ownership"):
+            active_intelligence = self.intelligence(ADMIN, digest, command)
+            self.assertEqual(active_intelligence["read_path"], "storage_v2_active")
+            self.assertEqual(active_intelligence["activation_manifest_sha256"], digest)
+            self.assertEqual(active_intelligence["source_count"], 2)
+            self.assertEqual({row["source_id"] for row in active_intelligence["results"]}, {1, 2})
+            reader_intelligence = self.intelligence(READER, digest, command)
+            self.assertEqual(reader_intelligence["source_count"], 1)
+            self.assertEqual([row["source_id"] for row in reader_intelligence["results"]], [1])
+            self.assertEqual(self.intelligence(ADMIN, digest, command, source=1)["source_count"], 1)
+            test_intelligence = self.intelligence(ADMIN, digest, command, include_test=True)
+            self.assertEqual(test_intelligence["source_count"], 3)
+            self.assertEqual([row["source_id"] for row in test_intelligence["results"]], [1, 2, 3])
+            for row in active_intelligence["results"]:
+                named = json.loads(self.sql(self.admin(
+                    f"SELECT storage_v2_intelligence_command({row['source_id']},'1',"
+                    f"'{command}','{{}}'::JSONB)::TEXT"
+                )))
+                self.assertEqual(row["value"], named)
+        self.assert_sql_fails(
+            self.actor(READER, f"SELECT storage_v2_active_intelligence_command('{digest}',"
+                       "'card','{}'::JSONB,2)"),
+            "source access denied",
+        )
+        self.assert_sql_fails(
+            self.actor(READER, f"SELECT storage_v2_active_intelligence_command('{digest}',"
+                       "'card','{}'::JSONB,NULL,TRUE)"),
+            "test scope requires administrator authority",
+        )
+        self.assert_sql_fails(
+            self.actor(ADMIN, f"SELECT storage_v2_active_intelligence_command('{digest}',"
+                       "'card','{}'::JSONB,3,FALSE)"),
+            "test source requires explicit test scope",
+        )
+        self.assert_sql_fails(
+            self.actor(ADMIN, f"SELECT storage_v2_active_intelligence_command('{digest}',"
+                       "'unsupported')"),
+            "valid active intelligence request required",
+        )
         self.assertEqual(self.sql("SELECT has_function_privilege('mainrag', "
                                   "'storage_v2_search_active_unchecked(text,jsonb,jsonb,bigint,bigint,boolean)', "
                                   "'EXECUTE')"), "f")
@@ -263,6 +311,11 @@ ALTER TABLE storage_v2_activation_set_evidence
                        "'{\"type\":\"term\",\"value\":\"alpha\"}'::jsonb)"),
             "complete activated source set and exact receipt are required",
         )
+        self.assert_sql_fails(
+            self.actor(ADMIN, f"SELECT storage_v2_active_intelligence_command('{digest}',"
+                       "'card')"),
+            "complete activated source set and exact receipt are required",
+        )
         self.sql("""
 ALTER TABLE storage_v2_activation_set_evidence
     DISABLE TRIGGER storage_v2_activation_receipt_controlled_write;
@@ -273,8 +326,10 @@ ALTER TABLE storage_v2_activation_set_evidence
         self.command(self.database, file=ROOT / "migrations/058_storage_v2_active_set_search.sql")
         self.command(self.database, file=ROOT / "migrations/059_storage_v2_active_source_state.sql")
         self.command(self.database, file=ROOT / "migrations/060_storage_v2_active_search_pointer_receipt.sql")
+        self.command(self.database, file=ROOT / "migrations/061_storage_v2_active_intelligence.sql")
         self.assertEqual(self.search(ADMIN, digest), ordinary)
         self.assertEqual(self.source_state(ADMIN, digest, 1), source_state)
+        self.assertEqual(self.intelligence(ADMIN, digest, "card")["source_count"], 2)
         self.sql("UPDATE sources SET is_test=FALSE WHERE id=3")
         self.assert_sql_fails(
             self.actor(ADMIN, f"SELECT storage_v2_search_active('{digest}',"

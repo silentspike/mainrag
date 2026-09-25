@@ -9,6 +9,7 @@ pub async fn run(
     symbol: &str,
     source: Option<&str>,
     generation: Option<&str>,
+    read_path: &str,
     include_test: bool,
     depth: Option<u32>,
     json_output: bool,
@@ -17,6 +18,7 @@ pub async fn run(
         eprint!("{}", "Tracing delegation chain...".cyan());
     }
 
+    let active = super::intelligence_active(client, read_path, generation).await?;
     if let Some(generation) = generation {
         let source = source.ok_or_else(|| anyhow::anyhow!("--generation requires --source"))?;
         let result = client
@@ -31,8 +33,15 @@ pub async fn run(
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
     }
+    if active {
+        let result = client
+            .active_intelligence("explain", source, include_test, &[("name", Some(symbol))])
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
     if include_test {
-        anyhow::bail!("--include-test requires --generation and --source");
+        anyhow::bail!("--include-test requires a storage-v2 read path");
     }
     let chains = client.explain_path(symbol, source, depth).await?;
 
