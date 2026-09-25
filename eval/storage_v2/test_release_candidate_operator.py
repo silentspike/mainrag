@@ -116,6 +116,83 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
             request.assert_not_called()
             self.assertFalse(checkpoint.exists())
 
+    def test_thin_pool_requires_reviewed_total_growth_before_build_post(self) -> None:
+        def report(row):
+            return SimpleNamespace(returncode=0, stdout=json.dumps({
+                "report": [{"lv": [row]}]
+            }))
+
+        def probes():
+            return [
+                SimpleNamespace(returncode=0, stdout="/dev/mapper/fixture-data\n"),
+                report({"vg_name": "fixture", "lv_name": "data",
+                        "pool_lv": "pool", "lv_size": "2000"}),
+                report({"vg_name": "fixture", "lv_name": "pool",
+                        "pool_lv": "", "lv_size": "1000", "data_percent": "63",
+                        "metadata_percent": "20", "seg_monitor": "monitored"}),
+                SimpleNamespace(returncode=0,
+                                stdout="thin_pool_autoextend_threshold=80\n"),
+            ]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            arguments = Namespace(api_url="http://fixture.invalid", source_id=1,
+                                  commit_sha="a" * 40, checkpoint=root / "checkpoint.json",
+                                  pack_root=root, minimum_free_bytes=100,
+                                  maximum_build_bytes=50,
+                                  maximum_pool_growth_bytes=None)
+            with patch.object(MODULE.subprocess, "run", side_effect=probes()), \
+                 patch.object(MODULE.shutil, "disk_usage",
+                              return_value=SimpleNamespace(free=1000)), \
+                 patch.object(MODULE, "request") as request:
+                with self.assertRaisesRegex(RuntimeError, "reviewed maximum thin-pool growth"):
+                    MODULE.build(arguments, "private-token")
+                request.assert_not_called()
+            arguments.maximum_pool_growth_bytes = 130
+            with patch.object(MODULE.subprocess, "run", side_effect=probes()), \
+                 patch.object(MODULE.shutil, "disk_usage",
+                              return_value=SimpleNamespace(free=1000)), \
+                 patch.object(MODULE, "request") as request:
+                with self.assertRaisesRegex(RuntimeError, "physical thin-pool headroom"):
+                    MODULE.build(arguments, "private-token")
+                request.assert_not_called()
+            arguments.maximum_pool_growth_bytes = 100
+            with patch.object(MODULE.subprocess, "run", side_effect=probes()), \
+                 patch.object(MODULE.shutil, "disk_usage",
+                              return_value=SimpleNamespace(free=1000)):
+                capacity = MODULE.prebuild_pack_capacity(arguments)
+            self.assertEqual(capacity["thin_pool"]["projected_data_percent"], 73.0)
+            self.assertEqual(capacity["thin_pool"]["maximum_data_percent"], 75.0)
+            with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                MODULE.require_same_pool(capacity["thin_pool"], None)
+
+    def test_postbuild_resource_failure_preserves_checkpoint_without_success(self) -> None:
+        result = {"active_generation_before": None, "active_generation_after": None,
+                  "item_count": 1, "generation_id": 2, "generation_seq": 1,
+                  "source_watermark_sha256": "c" * 64, "reused_generation": False,
+                  "telemetry": {}}
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(MODULE, "request", return_value=result), \
+             patch.object(MODULE, "source_state", return_value={
+                 "server_instance_id": "fixture", "active_generation_id": None}), \
+             patch.object(MODULE, "validate_telemetry"), \
+             patch.object(MODULE, "thin_pool_capacity",
+                          side_effect=[None, RuntimeError("physical pool exhausted")]), \
+             patch.object(MODULE.shutil, "disk_usage",
+                          side_effect=[SimpleNamespace(free=100), SimpleNamespace(free=100)]), \
+             patch("builtins.print") as output:
+            checkpoint = Path(temporary) / "checkpoint.json"
+            arguments = Namespace(api_url="http://fixture.invalid", source_id=1,
+                                  commit_sha="a" * 40, checkpoint=checkpoint,
+                                  pack_root=Path(temporary), minimum_free_bytes=50,
+                                  maximum_build_bytes=30)
+            with self.assertRaisesRegex(RuntimeError, "checkpoint was preserved"):
+                MODULE.build(arguments, "private-token")
+            self.assertTrue(checkpoint.exists())
+            self.assertEqual(json.loads(checkpoint.read_text())["resource_gate_after_build"],
+                             "BLOCKED")
+            output.assert_not_called()
+
     def test_build_rejects_missing_estimate_and_pack_root_before_post(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, patch.object(MODULE, "request") as request:
             arguments = Namespace(api_url="http://fixture.invalid", source_id=1,

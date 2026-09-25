@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import math
@@ -12,6 +13,7 @@ import re
 import shutil
 import stat
 import struct
+import subprocess
 import tempfile
 import time
 import urllib.error
@@ -66,6 +68,8 @@ TELEMETRY_COUNTERS = {
     "fragments_created",
     "largest_item_bytes",
 }
+THIN_POOL_MAX_DATA_PERCENT = Decimal(75)
+THIN_POOL_MAX_METADATA_PERCENT = Decimal(70)
 
 
 def request(api_url: str, token: str, method: str, path: str, body: object | None = None) -> Any:
@@ -149,7 +153,116 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def prebuild_pack_capacity(arguments: argparse.Namespace) -> dict[str, int]:
+def thin_pool_capacity(pack_root: Path, maximum_growth_bytes: int | None,
+                       *, require_estimate: bool) -> dict[str, object] | None:
+    """Bound physical pool use for a pack root backed by an LVM thin volume."""
+    try:
+        mount = subprocess.run(
+            ["findmnt", "--target", str(pack_root.resolve(strict=True)),
+             "--noheadings", "--output", "SOURCE"],
+            capture_output=True, text=True, check=False,
+        )
+    except OSError as error:
+        raise RuntimeError("pack mount identity is unavailable") from error
+    if mount.returncode or len(mount.stdout.splitlines()) != 1:
+        raise RuntimeError("pack mount identity is unavailable")
+    device = mount.stdout.strip()
+    if not (device.startswith("/dev/mapper/") or device.startswith("/dev/dm-")
+            or re.fullmatch(r"/dev/[^/]+/[^/]+", device)):
+        return None
+
+    prefix = [] if os.geteuid() == 0 else ["sudo", "-n"]
+
+    def lvs(target: str) -> dict[str, str]:
+        try:
+            response = subprocess.run(
+                [*prefix, "/usr/sbin/lvs", "--reportformat", "json", "--units", "b",
+                 "--nosuffix", "-o",
+                 "vg_name,lv_name,pool_lv,lv_size,data_percent,metadata_percent,seg_monitor",
+                 target], capture_output=True, text=True, check=False,
+            )
+            rows = json.loads(response.stdout)["report"][0]["lv"]
+        except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
+            raise RuntimeError("thin-pool identity is unavailable") from error
+        if response.returncode or not isinstance(rows, list) or len(rows) != 1 \
+                or not isinstance(rows[0], dict):
+            raise RuntimeError("thin-pool identity is unavailable")
+        return rows[0]
+
+    volume = lvs(device)
+    pool_name = volume.get("pool_lv")
+    if not pool_name:
+        return None
+    vg_name = volume.get("vg_name")
+    volume_name = volume.get("lv_name")
+    if not isinstance(vg_name, str) or not re.fullmatch(r"[A-Za-z0-9_+.-]+", vg_name) \
+            or not isinstance(pool_name, str) \
+            or not re.fullmatch(r"[A-Za-z0-9_+.-]+", pool_name) \
+            or not isinstance(volume_name, str) \
+            or not re.fullmatch(r"[A-Za-z0-9_+.-]+", volume_name):
+        raise RuntimeError("thin-pool identity is invalid")
+    pool = lvs(f"{vg_name}/{pool_name}")
+    if pool.get("lv_name") != pool_name or pool.get("vg_name") != vg_name \
+            or pool.get("seg_monitor") != "monitored":
+        raise RuntimeError("thin-pool monitoring or identity is invalid")
+    try:
+        pool_bytes = Decimal(pool["lv_size"])
+        used_percent = Decimal(pool["data_percent"])
+        metadata_percent = Decimal(pool["metadata_percent"])
+    except (KeyError, InvalidOperation, TypeError) as error:
+        raise RuntimeError("thin-pool usage is invalid") from error
+    if not pool_bytes.is_finite() or pool_bytes <= 0 \
+            or not used_percent.is_finite() or not 0 <= used_percent < 100 \
+            or not metadata_percent.is_finite() or not 0 <= metadata_percent < 100:
+        raise RuntimeError("thin-pool usage is invalid")
+    try:
+        policy = subprocess.run(
+            [*prefix, "/usr/sbin/lvmconfig", "--type", "current",
+             "activation/thin_pool_autoextend_threshold"],
+            capture_output=True, text=True, check=False,
+        )
+    except OSError as error:
+        raise RuntimeError("thin-pool autoextend policy is unavailable") from error
+    match = re.fullmatch(r"thin_pool_autoextend_threshold=(\d+)", policy.stdout.strip())
+    if policy.returncode or match is None or not 50 <= int(match.group(1)) <= 100:
+        raise RuntimeError("thin-pool autoextend policy is invalid")
+    threshold = Decimal(match.group(1))
+    ceiling = min(THIN_POOL_MAX_DATA_PERCENT, threshold - 5)
+    if require_estimate and (type(maximum_growth_bytes) is not int
+                             or maximum_growth_bytes <= 0):
+        raise RuntimeError("reviewed maximum thin-pool growth estimate is required")
+    if maximum_growth_bytes is None:
+        maximum_growth_bytes = 0
+    if type(maximum_growth_bytes) is not int or maximum_growth_bytes < 0:
+        raise RuntimeError("maximum thin-pool growth estimate is invalid")
+    projected = used_percent + Decimal(maximum_growth_bytes) * 100 / pool_bytes
+    if metadata_percent >= THIN_POOL_MAX_METADATA_PERCENT or projected > ceiling:
+        raise RuntimeError("insufficient physical thin-pool headroom")
+    return {"mount_source": device, "vg_name": vg_name,
+            "thin_volume_name": volume_name, "pool_name": pool_name,
+            "pool_size_bytes": int(pool_bytes),
+            "data_percent_before_build": float(used_percent),
+            "metadata_percent_before_build": float(metadata_percent),
+            "maximum_pool_growth_bytes": maximum_growth_bytes,
+            "projected_data_percent": float(projected),
+            "maximum_data_percent": float(ceiling),
+            "maximum_metadata_percent": float(THIN_POOL_MAX_METADATA_PERCENT),
+            "autoextend_threshold_percent": int(threshold)}
+
+
+def require_same_pool(previous: object, current: object) -> None:
+    if previous is None and current is None:
+        return
+    identity = ("mount_source", "vg_name", "thin_volume_name", "pool_name")
+    if not isinstance(previous, dict) or not isinstance(current, dict) \
+            or any(not isinstance(previous.get(key), str) or not previous[key]
+                   or not isinstance(current.get(key), str) or not current[key]
+                   for key in identity) \
+            or any(previous.get(key) != current.get(key) for key in identity):
+        raise RuntimeError("pack thin-pool identity changed")
+
+
+def prebuild_pack_capacity(arguments: argparse.Namespace) -> dict[str, object]:
     """Leave the approved pack reserve intact even at estimated peak build use."""
     if arguments.minimum_free_bytes < 0 or arguments.maximum_build_bytes <= 0:
         raise RuntimeError("pack reserve and maximum build estimate must be valid")
@@ -159,11 +272,20 @@ def prebuild_pack_capacity(arguments: argparse.Namespace) -> dict[str, int]:
     required_bytes = arguments.minimum_free_bytes + arguments.maximum_build_bytes
     if free_bytes < required_bytes:
         raise RuntimeError("insufficient pack capacity before candidate build")
-    return {
+    result = {
         "free_bytes_before_build": free_bytes,
         "minimum_free_bytes": arguments.minimum_free_bytes,
         "maximum_build_bytes": arguments.maximum_build_bytes,
     }
+    thin_pool = thin_pool_capacity(
+        arguments.pack_root, getattr(arguments, "maximum_pool_growth_bytes", None),
+        require_estimate=True,
+    )
+    if thin_pool is not None:
+        if thin_pool["maximum_pool_growth_bytes"] < arguments.maximum_build_bytes:
+            raise RuntimeError("thin-pool growth estimate omits pack build estimate")
+        result["thin_pool"] = thin_pool
+    return result
 
 
 def build(arguments: argparse.Namespace, token: str) -> None:
@@ -181,6 +303,15 @@ def build(arguments: argparse.Namespace, token: str) -> None:
         raise RuntimeError("candidate construction changed the active pointer")
     validate_telemetry(result.get("telemetry"), int(result["item_count"]))
     state = source_state(arguments.api_url, token, arguments.source_id, int(result["generation_seq"]))
+    postbuild_free_bytes = shutil.disk_usage(arguments.pack_root).free
+    postbuild_resource_blocked = postbuild_free_bytes < arguments.minimum_free_bytes
+    try:
+        postbuild_thin_pool = thin_pool_capacity(
+            arguments.pack_root, 0, require_estimate=False)
+        require_same_pool(pack_capacity.get("thin_pool"), postbuild_thin_pool)
+    except RuntimeError as error:
+        postbuild_thin_pool = {"status": "BLOCKED", "reason": str(error)}
+        postbuild_resource_blocked = True
     checkpoint = {
         "schema_version": 1,
         # This reference may be published. A hash of a small numeric source ID
@@ -195,6 +326,9 @@ def build(arguments: argparse.Namespace, token: str) -> None:
         "server_instance_id": state["server_instance_id"],
         "active_generation_id": state["active_generation_id"],
         "pack_capacity_before_build": pack_capacity,
+        "pack_free_bytes_after_build": postbuild_free_bytes,
+        "thin_pool_after_build": postbuild_thin_pool,
+        "resource_gate_after_build": "BLOCKED" if postbuild_resource_blocked else "PASS",
         "build": result,
         "captured_at_unix": int(time.time()),
     }
@@ -202,6 +336,8 @@ def build(arguments: argparse.Namespace, token: str) -> None:
         atomic_private_json(arguments.checkpoint, checkpoint, replace=False)
     except FileExistsError as error:
         raise RuntimeError("checkpoint appeared during build; inspect server state") from error
+    if postbuild_resource_blocked:
+        raise RuntimeError("post-build resource gate failed; protected checkpoint was preserved")
     publish_telemetry(result["telemetry"])
     print(json.dumps({
         "status": "VERIFIED",
@@ -629,6 +765,10 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
     progress["free_bytes_before_resume"] = free_before_resume
     if free_before_resume < arguments.minimum_free_bytes:
         raise RuntimeError("resource reserve is below the approved minimum before resume")
+    progress["thin_pool_before_resume"] = thin_pool_capacity(
+        arguments.pack_root, 0, require_estimate=False)
+    require_same_pool(checkpoint.get("pack_capacity_before_build", {}).get("thin_pool"),
+                      progress["thin_pool_before_resume"])
     progress["phase"] = "restart_resume"
     repeated = request(
         arguments.api_url,
@@ -786,6 +926,10 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
     free_bytes = shutil.disk_usage(arguments.pack_root).free
     if free_bytes < arguments.minimum_free_bytes:
         raise RuntimeError("resource reserve is below the approved minimum")
+    progress["thin_pool_after_verification"] = thin_pool_capacity(
+        arguments.pack_root, 0, require_estimate=False)
+    require_same_pool(checkpoint.get("pack_capacity_before_build", {}).get("thin_pool"),
+                      progress["thin_pool_after_verification"])
     progress["phase"] = "server_checks"
     checks = {name: "PASS" for name in CHECKS}
     for name in (
@@ -860,6 +1004,7 @@ def main() -> int:
     parser.add_argument("--pack-root", type=Path, default=Path("/data/mainrag/storage-v2-66/packs"))
     parser.add_argument("--minimum-free-bytes", type=int, default=40 * 1024**3)
     parser.add_argument("--maximum-build-bytes", type=int)
+    parser.add_argument("--maximum-pool-growth-bytes", type=int)
     parser.add_argument("--max-query-ms", type=int, default=2000)
     parser.add_argument("--gold-suite", type=Path)
     parser.add_argument("--expected-gold-suite-sha256")
