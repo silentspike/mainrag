@@ -116,7 +116,12 @@ profile and source bytes used by candidate construction. Managed append sources
 receive a full manifest and segment comparison. It returns a source watermark,
 item count, input byte count, and application read bytes when the adapter measures
 them (`null` otherwise), without allocating a generation or changing a pointer.
-The Git adapter may refresh its local repository cache during observation.
+The Git adapter may advance its local repository cache during observation; it
+rejects a dirty cache, a mismatched origin, or non-fast-forward history rather
+than using stale checked-out content. Git transport and cache I/O are not
+measured, so its application read count remains `null`. The default PDF adapter
+reads a bounded in-memory snapshot and reports the actual PDF bytes read; the
+optional MuPDF backend still reports `null`.
 `final-delta.py plan` compares
 those live values against a complete protected candidate audit. It retains Gs
 only when its source watermark and adapter profile are unchanged; otherwise it

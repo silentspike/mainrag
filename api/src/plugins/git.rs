@@ -3,7 +3,7 @@
 //! Clones/pulls git repositories and extracts files
 
 use async_trait::async_trait;
-use git2::Repository;
+use git2::{build::CheckoutBuilder, Repository, StatusOptions};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tracing::{info, warn};
@@ -70,7 +70,9 @@ fn check_if_binary(path: &Path) -> anyhow::Result<bool> {
     Ok(false)
 }
 
-pub struct GitPlugin;
+pub struct GitPlugin {
+    cache_dir: PathBuf,
+}
 
 impl Default for GitPlugin {
     fn default() -> Self {
@@ -80,32 +82,70 @@ impl Default for GitPlugin {
 
 impl GitPlugin {
     pub fn new() -> Self {
-        Self
+        Self {
+            cache_dir: PathBuf::from(GIT_CACHE_DIR),
+        }
     }
 
     /// Ensure cache directory exists
-    async fn ensure_cache_dir() -> anyhow::Result<()> {
-        fs::create_dir_all(GIT_CACHE_DIR).await?;
+    async fn ensure_cache_dir(&self) -> anyhow::Result<()> {
+        fs::create_dir_all(&self.cache_dir).await?;
         Ok(())
     }
 
     /// Get local cache path for repo
-    fn get_cache_path(source_name: &str) -> PathBuf {
-        PathBuf::from(GIT_CACHE_DIR).join(source_name)
+    fn get_cache_path(&self, source_name: &str) -> PathBuf {
+        self.cache_dir.join(source_name)
     }
 
     /// Clone or update repository
     async fn sync_repo(&self, source_path: &str, source_name: &str) -> anyhow::Result<PathBuf> {
-        Self::ensure_cache_dir().await?;
+        self.ensure_cache_dir().await?;
 
-        let cache_path = Self::get_cache_path(source_name);
+        let cache_path = self.get_cache_path(source_name);
 
         // If repo exists, pull updates
         if cache_path.exists() {
             info!("Updating existing repo: {}", source_name);
             let repo = Repository::open(&cache_path)?;
+            let mut status_options = StatusOptions::new();
+            status_options
+                .include_untracked(true)
+                .recurse_untracked_dirs(true);
+            if !repo.statuses(Some(&mut status_options))?.is_empty() {
+                anyhow::bail!("git source cache contains local changes");
+            }
+            let mut head = repo.head()?;
+            if !head.is_branch() {
+                anyhow::bail!("git source cache has no checked-out branch");
+            }
+            let branch = head
+                .shorthand()
+                .ok_or_else(|| anyhow::anyhow!("git source branch name is invalid"))?
+                .to_string();
+            if !matches!(branch.as_str(), "main" | "master") {
+                anyhow::bail!("git source cache branch is unsupported");
+            }
+            let old_oid = head
+                .target()
+                .ok_or_else(|| anyhow::anyhow!("git source branch has no commit"))?;
             let mut remote = repo.find_remote("origin")?;
-            remote.fetch(&["main", "master"], None, None)?;
+            if remote.url() != Some(source_path) {
+                anyhow::bail!("git source cache origin differs from registered source");
+            }
+            remote.fetch(&[&branch], None, None)?;
+            let remote_oid = repo
+                .find_reference(&format!("refs/remotes/origin/{branch}"))?
+                .target()
+                .ok_or_else(|| anyhow::anyhow!("git source remote branch has no commit"))?;
+            if remote_oid != old_oid {
+                if !repo.graph_descendant_of(remote_oid, old_oid)? {
+                    anyhow::bail!("git source history changed without fast-forward");
+                }
+                let target = repo.find_object(remote_oid, None)?;
+                repo.checkout_tree(&target, Some(CheckoutBuilder::new().safe()))?;
+                head.set_target(remote_oid, "Advance verified git source cache")?;
+            }
             return Ok(cache_path);
         }
 
@@ -245,5 +285,84 @@ impl SourcePlugin for GitPlugin {
 
     fn source_type(&self) -> &'static str {
         "git"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use uuid::Uuid;
+
+    struct TestDirectory(PathBuf);
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn git(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(path)
+            .args(args)
+            .output()
+            .expect("git fixture command");
+        assert!(output.status.success(), "git fixture command failed");
+    }
+
+    #[tokio::test]
+    async fn cached_git_source_advances_and_preserves_dirty_cache() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-git-cache-{}", Uuid::new_v4())),
+        );
+        let source = directory.0.join("source");
+        std::fs::create_dir_all(source.join("src")).unwrap();
+        git(&directory.0, &["init", "-b", "main", "source"]);
+        std::fs::write(source.join("src/a.rs"), "fn first() {}\n").unwrap();
+        git(&source, &["add", "."]);
+        git(
+            &source,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-m",
+                "first",
+            ],
+        );
+
+        let plugin = GitPlugin {
+            cache_dir: directory.0.join("cache"),
+        };
+        let source_path = source.to_str().unwrap();
+        let first = plugin.sync(source_path).await.unwrap();
+        assert_eq!(first.files.len(), 1);
+        assert_eq!(first.files[0].content, "fn first() {}\n");
+
+        std::fs::write(source.join("src/a.rs"), "fn second() {}\n").unwrap();
+        git(&source, &["add", "."]);
+        git(
+            &source,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-m",
+                "second",
+            ],
+        );
+        let second = plugin.sync(source_path).await.unwrap();
+        assert_eq!(second.files.len(), 1);
+        assert_eq!(second.files[0].content, "fn second() {}\n");
+
+        let cached = directory.0.join("cache/source/src/a.rs");
+        std::fs::write(&cached, "local change\n").unwrap();
+        assert!(plugin.sync(source_path).await.is_err());
+        assert_eq!(std::fs::read_to_string(cached).unwrap(), "local change\n");
     }
 }
