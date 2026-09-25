@@ -15,10 +15,12 @@
 
 use async_trait::async_trait;
 use std::path::Path;
+use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 
-use super::super::{RawFile, SourcePlugin, SyncResult};
+use super::super::{ObservedSyncResult, RawFile, SourcePlugin, SyncResult};
 use super::{MAX_PDF_SIZE, MIN_TEXT_LENGTH};
+use crate::services::source_read::ReadAccounting;
 
 pub struct PdfPlugin;
 
@@ -69,6 +71,10 @@ impl Default for PdfPlugin {
 #[async_trait]
 impl SourcePlugin for PdfPlugin {
     async fn sync(&self, source_path: &str) -> anyhow::Result<SyncResult> {
+        Ok(self.sync_observed(source_path).await?.result)
+    }
+
+    async fn sync_observed(&self, source_path: &str) -> anyhow::Result<ObservedSyncResult> {
         info!("PDF plugin syncing (pdf-extract fallback): {}", source_path);
 
         let path = Path::new(source_path);
@@ -97,11 +103,21 @@ impl SourcePlugin for PdfPlugin {
             );
         }
 
-        // Extract text in blocking thread pool (pdf-extract is synchronous)
-        let path_buf = path.to_path_buf();
-        let text_result = tokio::task::spawn_blocking(move || pdf_extract::extract_text(&path_buf))
-            .await
-            .map_err(|e| anyhow::anyhow!("PDF extraction task panicked: {}", e))?;
+        // Read a bounded snapshot once so parser I/O cannot escape accounting.
+        let accounting = ReadAccounting::pdf_adapter();
+        let mut source_bytes = Vec::new();
+        accounting
+            .reader(tokio::fs::File::open(path).await?)
+            .take(MAX_PDF_SIZE + 1)
+            .read_to_end(&mut source_bytes)
+            .await?;
+        if source_bytes.len() as u64 > MAX_PDF_SIZE {
+            anyhow::bail!("PDF too large after source read");
+        }
+        let text_result =
+            tokio::task::spawn_blocking(move || pdf_extract::extract_text_from_mem(&source_bytes))
+                .await
+                .map_err(|e| anyhow::anyhow!("PDF extraction task panicked: {}", e))?;
 
         let raw_text = match text_result {
             Ok(text) => text,
@@ -136,12 +152,15 @@ impl SourcePlugin for PdfPlugin {
             // Return empty result with warning, not error
             // This allows the sync to succeed but logs the issue
             if text.is_empty() {
-                return Ok(SyncResult {
-                    files: vec![],
-                    errors: vec![format!(
-                        "PDF contains no extractable text (may be scanned/image-based): {}",
-                        source_path
-                    )],
+                return Ok(ObservedSyncResult {
+                    result: SyncResult {
+                        files: vec![],
+                        errors: vec![format!(
+                            "PDF contains no extractable text (may be scanned/image-based): {}",
+                            source_path
+                        )],
+                    },
+                    application_read_bytes: Some(accounting.bytes()),
                 });
             }
         }
@@ -164,18 +183,28 @@ impl SourcePlugin for PdfPlugin {
             source_path
         );
 
-        Ok(SyncResult {
-            files: vec![RawFile {
-                path: output_path,
-                size: text.len(),
-                content: text,
-                language: Some("text".to_string()), // Plain text, not markdown
-                last_modified: None,
-                source_path: None,
-                source_range: None,
-            }],
-            errors: vec![],
+        Ok(ObservedSyncResult {
+            result: SyncResult {
+                files: vec![RawFile {
+                    path: output_path,
+                    size: text.len(),
+                    content: text,
+                    language: Some("text".to_string()), // Plain text, not markdown
+                    last_modified: None,
+                    source_path: None,
+                    source_range: None,
+                }],
+                errors: vec![],
+            },
+            application_read_bytes: Some(accounting.bytes()),
         })
+    }
+
+    async fn sync_for_storage_v2_observed(
+        &self,
+        source_path: &str,
+    ) -> anyhow::Result<ObservedSyncResult> {
+        self.sync_observed(source_path).await
     }
 
     fn source_type(&self) -> &'static str {
@@ -245,5 +274,25 @@ mod tests {
     fn test_default_impl() {
         let plugin = PdfPlugin;
         assert_eq!(plugin.source_type(), "pdf");
+    }
+
+    #[tokio::test]
+    async fn pdf_source_read_is_measured_through_the_supported_adapter() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test.pdf");
+        let plugin = PdfPlugin::new();
+        let observed = plugin
+            .sync_for_storage_v2_observed(fixture.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            observed.application_read_bytes,
+            Some(std::fs::metadata(&fixture).unwrap().len())
+        );
+        assert_eq!(observed.result.files.len(), 1);
+        assert!(observed.result.files[0]
+            .content
+            .contains("Chapter 1: Introduction"));
+        let legacy = plugin.sync(fixture.to_str().unwrap()).await.unwrap();
+        assert_eq!(legacy.files[0].content, observed.result.files[0].content);
     }
 }
