@@ -28,6 +28,13 @@ impl ReadAccounting {
         }
     }
 
+    pub fn pdf_adapter() -> Self {
+        Self {
+            bytes: AtomicU64::new(0),
+            scope: "pdf_adapter",
+        }
+    }
+
     fn record(&self, bytes: u64) {
         if bytes != 0 {
             self.bytes.fetch_add(bytes, Ordering::Relaxed);
