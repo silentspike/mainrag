@@ -89,6 +89,14 @@ SELECT storage_v2_search_active('{manifest_digest}',
 """))
         return json.loads(value)
 
+    def source_state(self, actor: str, manifest_digest: str, source: int,
+                     *, include_test: bool = False) -> dict:
+        value = self.sql(self.actor(actor, f"""
+SELECT storage_v2_active_source_state('{manifest_digest}', {source},
+    {str(include_test).lower()})::TEXT;
+"""))
+        return json.loads(value)
+
     def test_active_set_requires_receipt_and_reads_authorized_sources(self) -> None:
         self.sql(f"""
 CREATE TABLE users(id UUID PRIMARY KEY, is_admin BOOLEAN NOT NULL);
@@ -193,16 +201,74 @@ INSERT INTO storage_v2_release_candidate_evidence(
         self.assertEqual(self.search(ADMIN, digest, source=1)["total"], 1)
         self.assertEqual(benchmark["total"], 3)
         self.assertEqual({hit["source_id"] for hit in benchmark["results"]}, {1, 2, 3})
+        source_state = self.source_state(ADMIN, digest, 1)
+        self.assertEqual(source_state["source_id"], 1)
+        self.assertEqual(source_state["generation_seq"], 1)
+        self.assertTrue(source_state["is_active"])
+        self.assertEqual(source_state["read_path"], "storage_v2_active")
+        self.assertEqual(source_state["activation_manifest_sha256"], digest)
+        self.assertEqual(self.source_state(READER, digest, 1), source_state)
+        self.assertEqual(self.source_state(ADMIN, digest, 3, include_test=True)["source_id"], 3)
+        self.assert_sql_fails(
+            self.actor(READER, f"SELECT storage_v2_active_source_state('{digest}',2)"),
+            "source access denied",
+        )
+        self.assert_sql_fails(
+            self.actor(ADMIN, f"SELECT storage_v2_active_source_state('{digest}',3)"),
+            "test source requires explicit test scope",
+        )
+        self.assert_sql_fails(
+            self.actor(READER, f"SELECT storage_v2_active_source_state('{digest}',3,TRUE)"),
+            "source access denied",
+        )
+        self.assert_sql_fails(
+            self.actor(READER, f"SELECT storage_v2_active_source_state('{digest}',1,TRUE)"),
+            "test scope requires administrator authority",
+        )
+        self.assert_sql_fails(
+            self.actor(ADMIN, "SELECT storage_v2_active_source_state('" + "0" * 64
+                       + "',1)"),
+            "complete activated source set and exact receipt are required",
+        )
+        pointer_digest = self.sql(
+            "SELECT pointer_set_sha256 FROM storage_v2_activation_set_evidence "
+            f"WHERE manifest_sha256='{digest}'"
+        )
+        self.sql("""
+ALTER TABLE storage_v2_activation_set_evidence
+    DISABLE TRIGGER storage_v2_activation_receipt_controlled_write;
+UPDATE storage_v2_activation_set_evidence SET pointer_set_sha256='""" + "0" * 64 + """';
+ALTER TABLE storage_v2_activation_set_evidence
+    ENABLE TRIGGER storage_v2_activation_receipt_controlled_write;
+""")
+        self.assert_sql_fails(
+            self.actor(ADMIN, f"SELECT storage_v2_active_source_state('{digest}',1)"),
+            "complete activated source set and exact receipt are required",
+        )
+        self.sql("""
+ALTER TABLE storage_v2_activation_set_evidence
+    DISABLE TRIGGER storage_v2_activation_receipt_controlled_write;
+UPDATE storage_v2_activation_set_evidence SET pointer_set_sha256='""" + pointer_digest + """';
+ALTER TABLE storage_v2_activation_set_evidence
+    ENABLE TRIGGER storage_v2_activation_receipt_controlled_write;
+""")
         self.command(self.database, file=ROOT / "migrations/058_storage_v2_active_set_search.sql")
+        self.command(self.database, file=ROOT / "migrations/059_storage_v2_active_source_state.sql")
         self.assertEqual(self.search(ADMIN, digest), ordinary)
+        self.assertEqual(self.source_state(ADMIN, digest, 1), source_state)
         self.sql("UPDATE sources SET is_test=FALSE WHERE id=3")
         self.assert_sql_fails(
             self.actor(ADMIN, f"SELECT storage_v2_search_active('{digest}',"
                        "'{\"type\":\"term\",\"value\":\"alpha\"}'::jsonb)"),
             "complete activated source set and exact receipt are required",
         )
+        self.assert_sql_fails(
+            self.actor(ADMIN, f"SELECT storage_v2_active_source_state('{digest}',1)"),
+            "complete activated source set and exact receipt are required",
+        )
         self.sql("UPDATE sources SET is_test=TRUE WHERE id=3")
         self.assertEqual(self.search(ADMIN, digest), ordinary)
+        self.assertEqual(self.source_state(ADMIN, digest, 1), source_state)
         self.assert_sql_fails(
             self.actor(READER, f"SELECT storage_v2_search_active('{digest}',"
                        "'{\"type\":\"term\",\"value\":\"alpha\"}'::jsonb,"
@@ -225,6 +291,10 @@ INSERT INTO storage_v2_release_candidate_evidence(
         self.assert_sql_fails(
             self.actor(ADMIN, f"SELECT storage_v2_search_active('{digest}',"
                        "'{\"type\":\"term\",\"value\":\"alpha\"}'::jsonb)"),
+            "complete activated source set and exact receipt are required",
+        )
+        self.assert_sql_fails(
+            self.actor(ADMIN, f"SELECT storage_v2_active_source_state('{digest}',1)"),
             "complete activated source set and exact receipt are required",
         )
 
