@@ -38,6 +38,9 @@ def source(source_id: int = 1) -> dict:
                          "verification_manifest_sha256": "a" * 64,
                          "evidence_id": "fixture-evidence", "commit_sha": "b" * 40,
                          "source_watermark_sha256": "c" * 64,
+                         "adapter_profile_id": "fixture-adapter",
+                         "analysis_profile_id": "fixture-analysis",
+                         "search_profile_id": "fixture-search",
                          "qualification_manifest": {"status": "PASS", "checks": {}},
                          "qualification_manifest_sha256": "d" * 64,
                          "qualification_manifest_digest_matches": True}],
@@ -49,7 +52,9 @@ class CandidateInventoryTests(unittest.TestCase):
         second = source(2)
         second.update(name="another-private-name", path="/another/private-path",
                       source_type="private-custom-type", is_test=True, generations=[])
-        protected, public = INVENTORY.capture([source(), second], "d" * 40)
+        protected, public = INVENTORY.capture([source(), second], "d" * 40, "b" * 40)
+        self.assertEqual(protected["operator_commit_sha"], "d" * 40)
+        self.assertEqual(protected["candidate_commit_sha"], "b" * 40)
         self.assertEqual(public["source_count"], 2)
         self.assertEqual(public["test_source_count"], 1)
         self.assertEqual(public["release_candidate_source_count"], 1)
@@ -71,6 +76,8 @@ class CandidateInventoryTests(unittest.TestCase):
             [{**source(), "is_test": None}],
             [{**source(), "active_generation_id": 6}],
             [{**source(), "generations": [{**source()["generations"][0], "evidence_id": None}]}],
+            [{**source(), "generations": [{**source()["generations"][0],
+                                          "adapter_profile_id": None}]}],
             [{**source(), "generations": [*source()["generations"], *source()["generations"]]}],
             [{**source(), "generations": [
                 source()["generations"][0],
@@ -78,9 +85,11 @@ class CandidateInventoryTests(unittest.TestCase):
         ]
         for rows in cases:
             with self.subTest(rows=rows), self.assertRaises(RuntimeError):
-                INVENTORY.capture(rows, "d" * 40)
+                INVENTORY.capture(rows, "d" * 40, "b" * 40)
         with self.assertRaises(RuntimeError):
-            INVENTORY.capture([], "d" * 40)
+            INVENTORY.capture([], "d" * 40, "b" * 40)
+        with self.assertRaisesRegex(RuntimeError, "candidate package commit"):
+            INVENTORY.capture([source()], "d" * 40, "invalid")
 
     def test_private_snapshot_is_create_only_and_mode_600(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

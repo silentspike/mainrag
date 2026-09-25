@@ -205,13 +205,17 @@ protected output path outside Git:
 python3 ops/storage-v2/candidate-inventory.py \
   --database mainrag --local-postgres \
   --operator-commit-sha FULL_OPERATOR_COMMIT \
+  --candidate-commit-sha FULL_INSTALLED_CANDIDATE_PACKAGE_COMMIT \
   --protected-output PROTECTED_INVENTORY
 ```
 
 The output file is create-only and mode 0600. It contains private source
 registration, configuration, benchmark classification, active pointers and
 generation/evidence identities, including persisted qualification manifests and
-their database-recomputed digest comparisons. Standard output contains only counts, random
+their database-recomputed digest comparisons. The operator commit identifies the
+checked-out inventory tool; the candidate commit separately identifies the
+package against which each release candidate is compared. Package installation
+and health still require an independent current readback. Standard output contains only counts, random
 opaque source references and a digest of the protected snapshot. The command
 does not read source content, certify a current adapter watermark or qualify any
 candidate. Refresh writer, source, resource and installed-package state before
@@ -228,9 +232,15 @@ python3 ops/storage-v2/candidate-aggregate-audit.py \
 
 The audit creates a mode-0600, create-only per-source blocker report. Standard
 output contains only counts, blocker classes and protected artifact hashes. It
-checks current candidate presence, persisted PASS labels, qualification-manifest
-digest consistency, benchmark classification and gold-suite binding. Its status
-remains `BLOCKED` even when those persisted shapes are complete: a database
+checks candidate presence, exact candidate package commit and stored profile IDs,
+qualification-manifest digest consistency, verification identities, query gate
+results, resource and restart receipts, intelligence command evidence,
+benchmark classification and gold-suite binding. When every persisted candidate
+passes, the protected audit includes the source-ordered candidate set and its
+digest. This is an observed snapshot for the later final-delta procedure, not
+an activation manifest or approval. Per-class query counts remain protected;
+the public summary contains aggregate counts only. Its status
+remains `BLOCKED` even when those persisted proofs are complete: a database
 snapshot cannot prove current adapter watermarks, writer state, package identity,
 representative gold review, per-class aggregate quality, resource/recovery
 budget, benchmark results, or unchanged legacy state. Those external gates need
