@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import json
+import importlib.util
 import shutil
 import subprocess
 import tempfile
@@ -12,6 +13,7 @@ import unittest
 import uuid
 from contextlib import ExitStack
 from pathlib import Path
+from unittest.mock import patch
 
 from eval.storage_v2.harness import TemporaryPostgres
 
@@ -19,6 +21,12 @@ from eval.storage_v2.harness import TemporaryPostgres
 ROOT = Path(__file__).resolve().parents[3]
 MIGRATION = ROOT / "migrations" / "029_storage_v2_generations.sql"
 SCHEMA = ROOT / "schema.sql"
+ACTIVATION_OPERATOR_PATH = ROOT / "ops" / "storage-v2" / "activation-set.py"
+ACTIVATION_OPERATOR_SPEC = importlib.util.spec_from_file_location(
+    "activation_set_operator", ACTIVATION_OPERATOR_PATH)
+assert ACTIVATION_OPERATOR_SPEC and ACTIVATION_OPERATOR_SPEC.loader
+ACTIVATION_OPERATOR = importlib.util.module_from_spec(ACTIVATION_OPERATOR_SPEC)
+ACTIVATION_OPERATOR_SPEC.loader.exec_module(ACTIVATION_OPERATOR)
 ADMIN_ID = "00000000-0000-4000-8000-000000000001"
 WRITER_ID = "00000000-0000-4000-8000-000000000002"
 DENIED_ID = "00000000-0000-4000-8000-000000000003"
@@ -335,7 +343,8 @@ INSERT INTO storage_v2_release_candidate_evidence(
                         f"SELECT encode(manifest_sha256, 'hex') FROM storage_v2_release_candidate_evidence WHERE id='{evidence_id}'"),
                     "source_watermark_sha256": "b" * 64}
                    for source_id, candidate_id, evidence_id in zip((1, 2), candidates, evidence_ids)]
-        call = activation_call(entries)
+        activation_id = str(uuid.uuid4())
+        call = activation_call(entries, activation_id=activation_id)
         pointers = "SELECT string_agg(id || ':' || COALESCE(active_generation_id::TEXT, 'NULL'), ',' ORDER BY id) FROM logical_source"
         self.assert_sql_fails(database, as_actor(WRITER_ID, call),
                               "candidate-set activation requires administrator authority")
@@ -383,6 +392,12 @@ CREATE TRIGGER fixture_fail_second_activation
                          f"1:{candidates[0]},2:{candidates[1]}")
         self.assertEqual(self.run_sql(database,
             "SELECT COUNT(*) FROM storage_v2_activation_set_evidence"), "1")
+        with patch.dict(os.environ, {"PGHOST": str(self.socket)}):
+            readback = ACTIVATION_OPERATOR.committed_readback(database, False, activation_id)
+        ACTIVATION_OPERATOR.verify_committed({
+            "manifest": {"activation_id": activation_id, "sources": entries},
+            "manifest_sha256": readback["receipt"]["manifest_sha256"],
+        }, readback)
         self.assert_sql_fails(database, as_actor(ADMIN_ID, call),
                               "activation identity was already used")
 
