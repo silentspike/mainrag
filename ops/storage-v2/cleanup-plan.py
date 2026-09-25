@@ -161,6 +161,20 @@ SELECT jsonb_build_object(
   'building_run_count', (
     SELECT count(*) FROM storage_v2_ingest_run WHERE status = 'building'
   ),
+  'outbox_classes', (
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+      'action', classified.action,
+      'status', classified.status,
+      'row_count', classified.row_count,
+      'min_id', classified.min_id,
+      'max_id', classified.max_id
+    ) ORDER BY classified.action, classified.status), '[]'::jsonb)
+    FROM (
+      SELECT action, status, count(*) AS row_count,
+             min(id) AS min_id, max(id) AS max_id
+      FROM indexing_outbox GROUP BY action, status
+    ) AS classified
+  ),
   'generations', (
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
       'id', generation.id,
@@ -436,7 +450,7 @@ def catalog(database: str, local_postgres: bool,
     required = {"database_oid", "relations", "columns", "constraints", "policies",
                 "triggers", "functions", "indexes", "dependencies",
                 "active_pointer_count", "pointer_set_sha256", "open_reader_count",
-                "building_run_count", "generations", "packs",
+                "building_run_count", "outbox_classes", "generations", "packs",
                 "activation_receipt_relation_oid", "exact_rows", "reachability"}
     if not isinstance(value, dict) or set(value) != required \
             or any(not isinstance(value[key], list) for key in required - {
@@ -459,6 +473,16 @@ def catalog(database: str, local_postgres: bool,
         raise RuntimeError("cleanup catalog response is incomplete")
     if len(value["generations"]) > 100000 or len(value["packs"]) > 100000:
         raise RuntimeError("cleanup catalog generation or pack inventory exceeds its bound")
+    if not isinstance(value["outbox_classes"], list) or len(value["outbox_classes"]) > 256 \
+            or any(not isinstance(item, dict) or set(item) != {
+                "action", "status", "row_count", "min_id", "max_id"
+            } or not isinstance(item["action"], str) or not item["action"]
+                or not isinstance(item["status"], str) or not item["status"]
+                or type(item["row_count"]) is not int or item["row_count"] <= 0
+                or type(item["min_id"]) is not int or item["min_id"] <= 0
+                or type(item["max_id"]) is not int or item["max_id"] < item["min_id"]
+                for item in value["outbox_classes"]):
+        raise RuntimeError("cleanup outbox class inventory is incomplete")
     reachable = value["reachability"]
     if (reachable is not None) != bool(generation_ids or retain_all):
         raise RuntimeError("retained generation reachability is incomplete")
