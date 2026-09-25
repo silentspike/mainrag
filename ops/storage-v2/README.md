@@ -228,9 +228,15 @@ python3 ops/storage-v2/candidate-aggregate-audit.py \
 
 The audit creates a mode-0600, create-only per-source blocker report. Standard
 output contains only counts, blocker classes and protected artifact hashes. It
-checks current candidate presence, persisted PASS labels, qualification-manifest
-digest consistency, benchmark classification and gold-suite binding. Its status
-remains `BLOCKED` even when those persisted shapes are complete: a database
+checks candidate presence, exact operator commit and stored profile IDs,
+qualification-manifest digest consistency, verification identities, query gate
+results, resource and restart receipts, intelligence command evidence,
+benchmark classification and gold-suite binding. When every persisted candidate
+passes, the protected audit includes the source-ordered candidate set and its
+digest. This is an observed snapshot for the later final-delta procedure, not
+an activation manifest or approval. Per-class query counts remain protected;
+the public summary contains aggregate counts only. Its status
+remains `BLOCKED` even when those persisted proofs are complete: a database
 snapshot cannot prove current adapter watermarks, writer state, package identity,
 representative gold review, per-class aggregate quality, resource/recovery
 budget, benchmark results, or unchanged legacy state. Those external gates need

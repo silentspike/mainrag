@@ -27,6 +27,92 @@ EXTERNAL_GATES = (
     "per_class_and_aggregate_quality", "cumulative_resource_and_recovery_budget",
     "benchmark_result", "legacy_state_readback",
 )
+SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+
+
+def digest_identity(value: object) -> bool:
+    return isinstance(value, str) and SHA256.fullmatch(value) is not None
+
+
+def candidate_proof(manifest: object) -> tuple[list[str], dict | None]:
+    """Inspect measured qualification fields, beyond its persisted PASS labels."""
+    failures: list[str] = []
+    if not isinstance(manifest, dict) or manifest.get("status") != "PASS":
+        return ["qualification_manifest_not_pass"], None
+    checks = manifest.get("checks")
+    if not isinstance(checks, dict) or any(checks.get(name) != "PASS" for name in CHECKS):
+        failures.append("qualification_checks_incomplete")
+    gold = manifest.get("gold_suite_summary")
+    if not gold_summary_valid(gold):
+        failures.append("gold_suite_binding_missing")
+    automatic = manifest.get("query_seed_summary")
+    automatic_count = automatic.get("case_count") if isinstance(automatic, dict) else None
+    if type(automatic_count) is not int or automatic_count < 0:
+        failures.append("automatic_query_summary_invalid")
+    queries = manifest.get("query_results")
+    expected_count = (automatic_count + gold["case_count"]
+                      if type(automatic_count) is int and automatic_count >= 0
+                      and gold_summary_valid(gold) else None)
+    if (not isinstance(queries, list) or expected_count is None
+            or len(queries) != expected_count or not queries):
+        failures.append("query_result_set_incomplete")
+    else:
+        seen: set[str] = set()
+        for query in queries:
+            if not isinstance(query, dict) or not isinstance(query.get("id"), str) \
+                    or not query["id"] or query["id"] in seen \
+                    or any(query.get(key) is not True for key in (
+                        "quality_passed", "performance_passed", "degradation_passed"
+                    )) or type(query.get("storage_v2_took_ms")) is not int \
+                    or type(query.get("max_query_ms")) is not int \
+                    or not 0 <= query["storage_v2_took_ms"] <= query["max_query_ms"] \
+                    or (query.get("coverage") is not None
+                        and (not isinstance(query["coverage"], dict)
+                             or query["coverage"].get("passed") is not True)):
+                failures.append("query_result_gate_failed")
+                break
+            seen.add(query["id"])
+    if any(not digest_identity(manifest.get(key)) for key in (
+        "server_verification_sha256", "dual_read_artifact_sha256",
+        "query_coverage_sha256",
+    )) or not isinstance(manifest.get("dual_read_evidence_id"), str):
+        failures.append("verification_identity_incomplete")
+    else:
+        try:
+            uuid.UUID(manifest["dual_read_evidence_id"])
+        except ValueError:
+            failures.append("verification_identity_incomplete")
+    resource = manifest.get("resource")
+    if not isinstance(resource, dict) or any(
+        type(resource.get(key)) is not int for key in ("free_bytes", "minimum_free_bytes")
+    ) or not 0 < resource["minimum_free_bytes"] <= resource["free_bytes"]:
+        failures.append("resource_receipt_invalid")
+    restart = manifest.get("restart")
+    if not isinstance(restart, dict) or restart.get("server_instance_changed") is not True \
+            or restart.get("generation_reused") is not True:
+        failures.append("restart_receipt_invalid")
+    intelligence = manifest.get("intelligence")
+    if not isinstance(intelligence, dict):
+        failures.append("intelligence_receipt_invalid")
+    elif intelligence.get("applicability") == "applicable":
+        expected_commands = {"card", "explain", "layers", "ownership"}
+        hashes = intelligence.get("result_sha256")
+        commands = intelligence.get("commands")
+        if not isinstance(commands, list) or len(commands) != 4 \
+                or any(not isinstance(command, str) for command in commands) \
+                or set(commands) != expected_commands \
+                or not isinstance(hashes, dict) or set(hashes) != expected_commands \
+                or not all(digest_identity(value) for value in hashes.values()):
+            failures.append("intelligence_receipt_invalid")
+    elif intelligence.get("applicability") != "unknown_not_applicable" \
+            or intelligence.get("commands") != []:
+        failures.append("intelligence_receipt_invalid")
+    if failures:
+        return failures, None
+    return [], {"source_class": gold["source_class"],
+                "gold_case_count": gold["case_count"],
+                "query_count": len(queries), "suite_sha256": gold["suite_sha256"]}
 
 
 def canonical(value: object) -> bytes:
@@ -90,6 +176,9 @@ def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
     benchmark_count = 0
     benchmark_candidate_count = 0
     candidate_count = 0
+    candidate_set = []
+    quality_by_class: dict[str, dict[str, int]] = {}
+    expected_commit = inventory.get("operator_commit_sha")
     for source in sources:
         if not isinstance(source, dict) or type(source.get("source_id")) is not int \
                 or source["source_id"] <= 0 or source["source_id"] in seen \
@@ -120,20 +209,42 @@ def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
             candidate = candidates[0]
             if candidate.get("qualification_manifest_digest_matches") is not True:
                 failures.append("qualification_manifest_digest_mismatch")
-            manifest = candidate.get("qualification_manifest")
-            if not isinstance(manifest, dict) or manifest.get("status") != "PASS":
-                failures.append("qualification_manifest_not_pass")
-            else:
-                checks = manifest.get("checks")
-                if not isinstance(checks, dict) or any(checks.get(name) != "PASS" for name in CHECKS):
-                    failures.append("qualification_checks_incomplete")
-                if not gold_summary_valid(manifest.get("gold_suite_summary")):
-                    failures.append("gold_suite_binding_missing")
+            proof_failures, proof_summary = candidate_proof(
+                candidate.get("qualification_manifest"))
+            failures.extend(proof_failures)
+            if not isinstance(expected_commit, str) or not COMMIT.fullmatch(expected_commit) \
+                    or candidate.get("commit_sha") != expected_commit:
+                failures.append("candidate_package_identity_mismatch")
             if not all(candidate.get(key) for key in (
-                "evidence_id", "commit_sha", "source_watermark_sha256",
-                "qualification_manifest_sha256"
-            )):
+                "evidence_id", "adapter_profile_id", "analysis_profile_id",
+                "search_profile_id",
+            )) or not all(digest_identity(candidate.get(key)) for key in (
+                "source_watermark_sha256", "qualification_manifest_sha256",
+            )) or not digest_identity(candidate.get("verification_manifest_sha256")) \
+                    or type(candidate.get("item_count")) is not int \
+                    or candidate["item_count"] < 0:
                 failures.append("candidate_identity_incomplete")
+            if not failures and proof_summary is not None:
+                source_class = proof_summary["source_class"]
+                group = quality_by_class.setdefault(source_class, {
+                    "source_count": 0, "gold_case_count": 0, "query_count": 0,
+                })
+                group["source_count"] += 1
+                group["gold_case_count"] += proof_summary["gold_case_count"]
+                group["query_count"] += proof_summary["query_count"]
+                candidate_set.append({
+                    "source_id": source["source_id"],
+                    "candidate_generation_id": candidate["generation_id"],
+                    "expected_active_generation_id": None,
+                    "evidence_id": candidate["evidence_id"],
+                    "evidence_manifest_sha256": candidate["qualification_manifest_sha256"],
+                    "source_watermark_sha256": candidate["source_watermark_sha256"],
+                    "verification_manifest_sha256": candidate["verification_manifest_sha256"],
+                    "adapter_profile_id": candidate["adapter_profile_id"],
+                    "analysis_profile_id": candidate["analysis_profile_id"],
+                    "search_profile_id": candidate["search_profile_id"],
+                    "gold_suite_sha256": proof_summary["suite_sha256"],
+                })
         for failure in failures:
             blockers[failure] += 1
         protected_sources.append({
@@ -145,6 +256,10 @@ def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
         })
     if benchmark_count != 1:
         blockers["benchmark_classification_invalid"] = 1
+    candidate_set_complete = not blockers and len(candidate_set) == len(sources)
+    candidate_set.sort(key=lambda item: item["source_id"])
+    candidate_set_sha256 = (hashlib.sha256(canonical(candidate_set)).hexdigest()
+                            if candidate_set_complete else None)
     protected = {
         "schema_version": "mainrag.storage-v2.candidate-aggregate-audit.v1",
         "status": "BLOCKED",
@@ -155,6 +270,10 @@ def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
         "benchmark_source_count": benchmark_count,
         "benchmark_candidate_count": benchmark_candidate_count,
         "persisted_gate_blockers": dict(sorted(blockers.items())),
+        "persisted_candidate_set_complete": candidate_set_complete,
+        "candidate_set_sha256": candidate_set_sha256,
+        "candidate_set": candidate_set if candidate_set_complete else [],
+        "quality_by_class": dict(sorted(quality_by_class.items())),
         "external_gates_not_proven_by_inventory": list(EXTERNAL_GATES),
         "sources": protected_sources,
     }
@@ -168,6 +287,10 @@ def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
         "benchmark_source_count": benchmark_count,
         "benchmark_candidate_count": benchmark_candidate_count,
         "persisted_gate_blockers": protected["persisted_gate_blockers"],
+        "persisted_candidate_set_complete": candidate_set_complete,
+        "candidate_set_sha256": candidate_set_sha256,
+        "validated_source_class_count": len(quality_by_class),
+        "validated_query_count": sum(value["query_count"] for value in quality_by_class.values()),
         "external_gate_count": len(EXTERNAL_GATES),
         "limitations": [
             "Protected database snapshot only; current watermarks, writers, resources, package and acceptance are not proven.",

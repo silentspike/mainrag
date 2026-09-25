@@ -49,6 +49,9 @@ LEFT JOIN LATERAL (
         'evidence_id', evidence.id,
         'commit_sha', evidence.commit_sha,
         'source_watermark_sha256', evidence.source_watermark_sha256,
+        'adapter_profile_id', evidence.adapter_profile_id,
+        'analysis_profile_id', evidence.analysis_profile_id,
+        'search_profile_id', evidence.search_profile_id,
         'qualification_manifest', evidence.manifest,
         'qualification_manifest_sha256', encode(evidence.manifest_sha256, 'hex'),
         'qualification_manifest_digest_matches',
@@ -164,6 +167,7 @@ def capture(rows: list[dict], operator_commit_sha: str) -> tuple[dict, dict]:
             if generation["status"] == "release_candidate" and not all(
                 generation.get(key) for key in (
                     "evidence_id", "commit_sha", "source_watermark_sha256",
+                    "adapter_profile_id", "analysis_profile_id", "search_profile_id",
                     "qualification_manifest", "qualification_manifest_sha256",
                 )
             ):
