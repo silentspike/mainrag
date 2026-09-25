@@ -157,6 +157,7 @@ class ShadowSliceHarnessTests(unittest.TestCase):
                 "writer_concurrency": 1,
                 "fragments_created": 0,
                 "largest_item_bytes": 20,
+                "append_full_comparisons": 0,
             },
         }
         with tempfile.TemporaryDirectory() as temporary:
@@ -197,6 +198,7 @@ class ShadowSliceHarnessTests(unittest.TestCase):
                     "writer_concurrency": 1,
                     "fragments_created": 0,
                     "largest_item_bytes": 10,
+                    "append_full_comparisons": 0,
                 }
             },
         }
@@ -260,6 +262,7 @@ class ShadowSliceHarnessTests(unittest.TestCase):
                     "writer_concurrency": 1,
                     "fragments_created": 0,
                     "largest_item_bytes": 10,
+                    "append_full_comparisons": 0,
                 }
             },
         }
