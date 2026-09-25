@@ -129,7 +129,8 @@ pub async fn shadow_intelligence_command(
                                 == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
                             {
                                 crate::error::AppError::Forbidden(
-                                    "shadow test source requires explicit admin test scope".to_string(),
+                                    "shadow test source requires explicit admin test scope"
+                                        .to_string(),
                                 )
                             } else {
                                 crate::error::AppError::Database(error)

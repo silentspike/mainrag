@@ -1022,10 +1022,7 @@ impl ApiClient {
     }
 
     pub async fn default_intelligence_read_path(&self) -> Result<String> {
-        let url = format!(
-            "{}/api/v1/intelligence/default-read-path",
-            self.base_url
-        );
+        let url = format!("{}/api/v1/intelligence/default-read-path", self.base_url);
         let response = self
             .client
             .get(&url)
@@ -1046,7 +1043,9 @@ impl ApiClient {
         match value.get("read_path").and_then(|path| path.as_str()) {
             Some("current") => Ok("current".to_string()),
             Some("storage_v2_active") => Ok("storage_v2_active".to_string()),
-            _ => Err(anyhow!("server returned an unsupported intelligence read path")),
+            _ => Err(anyhow!(
+                "server returned an unsupported intelligence read path"
+            )),
         }
     }
 
