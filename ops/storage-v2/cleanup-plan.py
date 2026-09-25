@@ -35,6 +35,7 @@ CATALOG_SQL = """
 BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SET LOCAL row_security = off;
 SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '120s';
 %TARGET_LOCK_SQL%
 SELECT jsonb_build_object(
   'database_oid', (SELECT oid FROM pg_database WHERE datname = current_database()),
@@ -185,9 +186,169 @@ SELECT jsonb_build_object(
   'activation_receipt_relation_oid', (
     SELECT to_regclass('public.storage_v2_activation_set_evidence')::oid
   ),
-  'exact_rows', (%EXACT_ROWS_SQL%)
+  'exact_rows', (%EXACT_ROWS_SQL%),
+  'reachability', (%REACHABILITY_SQL%)
 )::text;
 COMMIT;
+"""
+
+
+REACHABILITY_SQL = """
+WITH RECURSIVE
+requested(id) AS (%RETAINED_QUERY%),
+retained AS (
+  SELECT generation.id, generation.source_id, generation.generation_seq
+  FROM source_generation AS generation JOIN requested ON requested.id = generation.id
+),
+visible_artifact AS (
+  SELECT DISTINCT membership.artifact_version_id AS id
+  FROM retained AS generation
+  JOIN generation_item_version AS membership
+    ON membership.source_id = generation.source_id
+   AND membership.valid_from_seq <= generation.generation_seq
+   AND (membership.valid_to_seq IS NULL
+        OR membership.valid_to_seq > generation.generation_seq)
+),
+protected_occurrence AS (
+  SELECT occurrence_id AS id FROM legacy_hit_mapping
+  UNION
+  SELECT occurrence_id FROM storage_v2_symbol_occurrence
+  UNION
+  SELECT item.occurrence_id FROM storage_v2_ingest_run_item AS item
+  JOIN storage_v2_ingest_run AS run ON run.id = item.run_id
+  WHERE run.status = 'building'
+),
+root_artifact AS (
+  SELECT id FROM visible_artifact
+  UNION
+  SELECT occurrence.artifact_version_id
+  FROM protected_occurrence AS protected
+  JOIN occurrence ON occurrence.id = protected.id
+),
+root_occurrence AS (
+  SELECT occurrence.id, occurrence.view_id
+  FROM occurrence JOIN root_artifact ON root_artifact.id = occurrence.artifact_version_id
+),
+root_view AS (SELECT DISTINCT view_id AS id FROM root_occurrence),
+view_document AS (
+  SELECT DISTINCT document.id, document.body_id, document.node_id
+  FROM root_view AS root_v
+  JOIN storage_v2_search_view_document AS binding ON binding.view_id = root_v.id
+  JOIN storage_v2_search_document AS document ON document.id = binding.document_id
+),
+seed_node AS (
+  SELECT artifact.content_root_node_id AS id
+  FROM root_artifact AS root
+  JOIN artifact_version AS artifact ON artifact.id = root.id
+  WHERE artifact.content_root_node_id IS NOT NULL
+  UNION
+  SELECT component.node_id
+  FROM root_view AS root_v JOIN view_component AS component ON component.view_id = root_v.id
+  WHERE component.node_id IS NOT NULL
+  UNION
+  SELECT node_id FROM view_document WHERE node_id IS NOT NULL
+),
+walk_node(id) AS (
+  SELECT id FROM seed_node
+  UNION
+  SELECT edge.child_node_id
+  FROM walk_node AS parent
+  JOIN content_node_edge AS edge ON edge.parent_node_id = parent.id
+),
+root_body AS (
+  SELECT artifact.raw_body_id AS id
+  FROM root_artifact AS root
+  JOIN artifact_version AS artifact ON artifact.id = root.id
+  WHERE artifact.raw_body_id IS NOT NULL
+  UNION
+  SELECT node.body_id FROM walk_node AS walk
+  JOIN content_node AS node ON node.id = walk.id WHERE node.body_id IS NOT NULL
+  UNION
+  SELECT component.body_id
+  FROM root_view AS root_v JOIN view_component AS component ON component.view_id = root_v.id
+  WHERE component.body_id IS NOT NULL
+  UNION
+  SELECT body_id FROM view_document WHERE body_id IS NOT NULL
+),
+pack_assignment AS (
+  SELECT pack.id,
+         count(body.id) AS assigned_body_count,
+         count(root.id) AS reachable_assigned_body_count
+  FROM content_pack AS pack
+  LEFT JOIN content_body AS body ON body.pack_id = pack.id
+  LEFT JOIN root_body AS root ON root.id = body.id
+  GROUP BY pack.id
+),
+pack_entries AS (
+  SELECT entry.pack_id AS id,
+         count(*) AS entry_count,
+         COALESCE(sum(entry.stored_length), 0) AS entry_stored_bytes,
+         COALESCE(sum(entry.stored_length) FILTER (WHERE root.id IS NOT NULL), 0)
+           AS reachable_body_entry_bytes
+  FROM content_pack_entry AS entry
+  LEFT JOIN root_body AS root ON root.id = entry.body_id
+  GROUP BY entry.pack_id
+)
+SELECT jsonb_build_object(
+  'status', 'REACHABILITY_ONLY_NOT_GC_AUTHORITY',
+  'root_scope', 'SELECTED_GENERATIONS_MAPPINGS_INTELLIGENCE_BUILDING_RUNS',
+  'root_coverage', 'PARTIAL_EXTERNAL_RETENTION_UNVERIFIED',
+  'requested_generation_count', (SELECT count(*) FROM requested),
+  'found_generation_count', (SELECT count(*) FROM retained),
+  'retained_generation_ids', (
+    SELECT COALESCE(jsonb_agg(id ORDER BY id), '[]'::jsonb) FROM retained
+  ),
+  'active_generation_count', (SELECT count(*) FROM source_generation WHERE status = 'active'),
+  'active_generation_included_count', (
+    SELECT count(*) FROM source_generation AS generation
+    JOIN retained ON retained.id = generation.id WHERE generation.status = 'active'
+  ),
+  'active_pointer_count', (
+    SELECT count(*) FROM logical_source WHERE active_generation_id IS NOT NULL
+  ),
+  'active_pointer_included_count', (
+    SELECT count(*) FROM logical_source AS source
+    JOIN retained ON retained.id = source.active_generation_id
+  ),
+  'mapped_hit_count', (SELECT count(*) FROM legacy_hit_mapping),
+  'intelligence_occurrence_count', (SELECT count(*) FROM storage_v2_symbol_occurrence),
+  'building_run_item_count', (
+    SELECT count(*) FROM storage_v2_ingest_run_item AS item
+    JOIN storage_v2_ingest_run AS run ON run.id = item.run_id
+    WHERE run.status = 'building'
+  ),
+  'artifact_count', (SELECT count(*) FROM root_artifact),
+  'occurrence_count', (SELECT count(*) FROM root_occurrence),
+  'view_count', (SELECT count(*) FROM root_view),
+  'node_count', (SELECT count(*) FROM walk_node),
+  'body_count', (SELECT count(*) FROM root_body),
+  'outside_selected_roots_body_count', (
+    SELECT count(*) FROM content_body AS body
+    LEFT JOIN root_body AS root ON root.id = body.id WHERE root.id IS NULL
+  ),
+  'body_set_sha256', (
+    SELECT encode(digest(convert_to(COALESCE(string_agg(id::text, ',' ORDER BY id), ''),
+                                   'UTF8'), 'sha256'), 'hex') FROM root_body
+  ),
+  'view_set_sha256', (
+    SELECT encode(digest(convert_to(COALESCE(string_agg(id::text, ',' ORDER BY id), ''),
+                                   'UTF8'), 'sha256'), 'hex') FROM root_view
+  ),
+  'packs', (
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+      'id', pack.id, 'status', pack.status::text,
+      'stored_bytes', pack.stored_bytes,
+      'assigned_body_count', assignment.assigned_body_count,
+      'reachable_assigned_body_count', assignment.reachable_assigned_body_count,
+      'entry_count', COALESCE(entries.entry_count, 0),
+      'entry_stored_bytes', COALESCE(entries.entry_stored_bytes, 0),
+      'reachable_body_entry_bytes', COALESCE(entries.reachable_body_entry_bytes, 0)
+    ) ORDER BY pack.id), '[]'::jsonb)
+    FROM content_pack AS pack
+    JOIN pack_assignment AS assignment ON assignment.id = pack.id
+    LEFT JOIN pack_entries AS entries ON entries.id = pack.id
+  )
+)
 """
 
 
@@ -232,11 +393,27 @@ def target_lock_sql(relation_names: tuple[str, ...]) -> str:
     )
 
 
+def reachability_sql(generation_ids: tuple[int, ...], retain_all: bool) -> str:
+    if retain_all and generation_ids:
+        raise RuntimeError("explicit retention and retain-all are mutually exclusive")
+    if len(generation_ids) > 4096 or len(set(generation_ids)) != len(generation_ids) \
+            or any(type(identifier) is not int or identifier <= 0 for identifier in generation_ids):
+        raise RuntimeError("retained generation identity list is invalid")
+    if not retain_all and not generation_ids:
+        return "NULL::jsonb"
+    requested = ("SELECT id FROM source_generation" if retain_all else
+                 "SELECT unnest(ARRAY[" + ",".join(map(str, generation_ids))
+                 + "]::bigint[]) AS id")
+    return REACHABILITY_SQL.replace("%RETAINED_QUERY%", requested)
+
+
 def catalog(database: str, local_postgres: bool,
-            relation_names: tuple[str, ...] = ()) -> dict:
+            relation_names: tuple[str, ...] = (),
+            generation_ids: tuple[int, ...] = (), retain_all: bool = False) -> dict:
     count_sql = exact_rows_sql(relation_names)
     statement = CATALOG_SQL.replace("%EXACT_ROWS_SQL%", count_sql).replace(
-        "%TARGET_LOCK_SQL%", target_lock_sql(relation_names))
+        "%TARGET_LOCK_SQL%", target_lock_sql(relation_names)).replace(
+        "%REACHABILITY_SQL%", reachability_sql(generation_ids, retain_all))
     command = (["sudo", "-n", "-u", "postgres"] if local_postgres else []) + [
         "psql", "-X", "--no-psqlrc", "-qAt", "--set=ON_ERROR_STOP=1",
         "--dbname", database,
@@ -260,11 +437,11 @@ def catalog(database: str, local_postgres: bool,
                 "triggers", "functions", "indexes", "dependencies",
                 "active_pointer_count", "pointer_set_sha256", "open_reader_count",
                 "building_run_count", "generations", "packs",
-                "activation_receipt_relation_oid", "exact_rows"}
+                "activation_receipt_relation_oid", "exact_rows", "reachability"}
     if not isinstance(value, dict) or set(value) != required \
             or any(not isinstance(value[key], list) for key in required - {
                 "database_oid", "active_pointer_count", "activation_receipt_relation_oid",
-                "exact_rows", "pointer_set_sha256", "open_reader_count",
+                "exact_rows", "reachability", "pointer_set_sha256", "open_reader_count",
                 "building_run_count"
             }) or not (isinstance(value["database_oid"], str)
                        and value["database_oid"].isdecimal()) \
@@ -282,6 +459,43 @@ def catalog(database: str, local_postgres: bool,
         raise RuntimeError("cleanup catalog response is incomplete")
     if len(value["generations"]) > 100000 or len(value["packs"]) > 100000:
         raise RuntimeError("cleanup catalog generation or pack inventory exceeds its bound")
+    reachable = value["reachability"]
+    if (reachable is not None) != bool(generation_ids or retain_all):
+        raise RuntimeError("retained generation reachability is incomplete")
+    if reachable is not None:
+        counts = ("requested_generation_count", "found_generation_count",
+                  "active_generation_count", "active_generation_included_count",
+                  "active_pointer_count", "active_pointer_included_count",
+                  "mapped_hit_count", "intelligence_occurrence_count",
+                  "building_run_item_count", "artifact_count", "occurrence_count",
+                  "view_count", "node_count", "body_count",
+                  "outside_selected_roots_body_count")
+        if not isinstance(reachable, dict) \
+                or reachable.get("status") != "REACHABILITY_ONLY_NOT_GC_AUTHORITY" \
+                or reachable.get("root_scope") != \
+                    "SELECTED_GENERATIONS_MAPPINGS_INTELLIGENCE_BUILDING_RUNS" \
+                or reachable.get("root_coverage") != \
+                    "PARTIAL_EXTERNAL_RETENTION_UNVERIFIED" \
+                or any(type(reachable.get(key)) is not int or reachable[key] < 0
+                       for key in counts) \
+                or reachable["requested_generation_count"] != reachable["found_generation_count"] \
+                or reachable["active_generation_count"] != reachable["active_generation_included_count"] \
+                or reachable["active_pointer_count"] != reachable["active_pointer_included_count"] \
+                or reachable["active_pointer_count"] != value["active_pointer_count"] \
+                or not isinstance(reachable.get("retained_generation_ids"), list) \
+                or len(reachable["retained_generation_ids"]) != reachable["found_generation_count"] \
+                or any(type(identifier) is not int or identifier <= 0
+                       for identifier in reachable["retained_generation_ids"]) \
+                or reachable["retained_generation_ids"] != sorted(set(reachable["retained_generation_ids"])) \
+                or (not retain_all and
+                    reachable["retained_generation_ids"] != sorted(generation_ids)) \
+                or (retain_all and reachable["found_generation_count"] != len(value["generations"])) \
+                or any(not isinstance(reachable.get(key), str)
+                       or re.fullmatch(r"[0-9a-f]{64}", reachable[key]) is None
+                       for key in ("body_set_sha256", "view_set_sha256")) \
+                or not isinstance(reachable.get("packs"), list) \
+                or len(reachable["packs"]) != len(value["packs"]):
+            raise RuntimeError("retained generation reachability is incomplete")
     return value
 
 
@@ -478,6 +692,9 @@ def main() -> int:
     parser.add_argument("--database", required=True)
     parser.add_argument("--local-postgres", action="store_true")
     parser.add_argument("--count-relation", action="append", default=[])
+    retention = parser.add_mutually_exclusive_group()
+    retention.add_argument("--retained-generation-id", action="append", type=int, default=[])
+    retention.add_argument("--retain-all-generations", action="store_true")
     parser.add_argument("--qdrant-url")
     parser.add_argument("--qdrant-api-key-file", type=Path)
     parser.add_argument("--runtime-root", type=Path)
@@ -491,7 +708,9 @@ def main() -> int:
         parser.error("Qdrant key requires a Qdrant origin")
     try:
         observed = catalog(arguments.database, arguments.local_postgres,
-                           tuple(arguments.count_relation))
+                           tuple(arguments.count_relation),
+                           tuple(arguments.retained_generation_id),
+                           arguments.retain_all_generations)
         qdrant = (qdrant_inventory(arguments.qdrant_url, arguments.qdrant_api_key_file)
                   if arguments.qdrant_url is not None else None)
         runtime = (runtime_inventory(arguments.runtime_root, tuple(arguments.count_relation))
@@ -506,7 +725,9 @@ def main() -> int:
                     "limitations": ["Only explicitly requested relations have exact row counts; no reviewed dispositions.",
                                     "Qdrant is optional and cannot share a transaction with PostgreSQL.",
                                     "Runtime text matches require human caller classification and installed-binary binding.",
-                                    "No export or pack reachability inventory.",
+                                    "No export inventory; pack reachability is optional.",
+                                    "Selected roots omit unreviewed external retention and historical run/identity records; outside-root counts are not deletion candidates.",
+                                    "Reachability does not verify content integrity or authorize GC.",
                                     "No post-activation acceptance or deletion authority."]}
         digest = private_create(arguments.output, artifact)
     except RuntimeError as error:
@@ -518,6 +739,7 @@ def main() -> int:
                       "exact_count_relation_count": len(observed["exact_rows"]),
                       "qdrant_observed": qdrant is not None,
                       "runtime_search_observed": runtime is not None,
+                      "reachability_observed": observed["reachability"] is not None,
                       "dependency_count": len(observed["dependencies"])}, sort_keys=True))
     return 0
 
