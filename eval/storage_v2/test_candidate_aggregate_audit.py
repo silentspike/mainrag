@@ -48,6 +48,7 @@ def source(source_id: int, *, benchmark: bool = False, candidate: bool = True,
         }
     generation = {
         "generation_id": source_id + 100,
+        "generation_seq": 1,
         "status": "release_candidate",
         "evidence_id": "fixture-evidence",
         "commit_sha": "b" * 40,
@@ -90,12 +91,41 @@ class CandidateAggregateAuditTests(unittest.TestCase):
         self.assertEqual(protected["sources"][0]["blockers"], [])
         self.assertTrue(protected["persisted_candidate_set_complete"])
         self.assertEqual(len(protected["candidate_set"]), 2)
+        self.assertEqual(protected["candidate_set"][0]["candidate_commit_sha"], "b" * 40)
         self.assertEqual(public["validated_query_count"], 4)
         self.assertEqual(public["candidate_set_sha256"],
                          AUDIT.hashlib.sha256(AUDIT.canonical(protected["candidate_set"])).hexdigest())
         serialized = json.dumps(public)
         for private in ("private-source-name", "/private/source-path", '"source_id"'):
             self.assertNotIn(private, serialized)
+
+    def test_final_mixed_commit_map_binds_source_local_candidate_commits(self) -> None:
+        first = source(1)
+        second = source(2, benchmark=True)
+        second["generations"][0]["commit_sha"] = "c" * 40
+        inventory = self.inventory(first, second)
+        inventory.update(
+            schema_version="mainrag.storage-v2.candidate-inventory.v2",
+            candidate_commit_sha=None,
+            candidate_commit_map_sha256="a" * 64,
+            candidate_commit_map={
+                "schema_version": "mainrag.storage-v2.final-candidate-commit-map.v1",
+                "sources": [
+                    {"source_id": 1, "candidate_generation_id": 101,
+                     "candidate_commit_sha": "b" * 40},
+                    {"source_id": 2, "candidate_generation_id": 102,
+                     "candidate_commit_sha": "c" * 40},
+                ],
+            },
+        )
+        protected, _ = AUDIT.audit(inventory, "e" * 64)
+        self.assertTrue(protected["persisted_candidate_set_complete"])
+        self.assertEqual([item["candidate_commit_sha"] for item in protected["candidate_set"]],
+                         ["b" * 40, "c" * 40])
+        inventory["candidate_commit_map"]["sources"][1]["candidate_commit_sha"] = "f" * 40
+        blocked, _ = AUDIT.audit(inventory, "e" * 64)
+        self.assertEqual(blocked["persisted_gate_blockers"],
+                         {"candidate_package_identity_mismatch": 1})
 
     def test_missing_candidate_and_gold_binding_are_counted_without_acceptance(self) -> None:
         inventory = self.inventory(source(1, gold=False), source(2, benchmark=True, candidate=False))

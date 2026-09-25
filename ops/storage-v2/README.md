@@ -109,17 +109,82 @@ final manifest is PASS and its evidence boundary has been accepted. Search/read
 availability during an adapter is determined by that reviewed adapter; the
 preflight does not silently claim it.
 
+## Source-local final deltas
+
+The authenticated pointer-neutral release-watermark endpoint scans the same adapter
+profile and source bytes used by candidate construction. Managed append sources
+receive a full manifest and segment comparison. It returns a source watermark,
+item count, input byte count, and application read bytes when the adapter measures
+them (`null` otherwise), without allocating a generation or changing a pointer.
+The Git adapter may refresh its local repository cache during observation.
+`final-delta.py plan` compares
+those live values against a complete protected candidate audit. It retains Gs
+only when its source watermark and adapter profile are unchanged; otherwise it
+names that source for a Gs+1 rebuild. The plan refuses missing candidates,
+pointer drift, and a changed registered source set.
+Both phases require a fresh passing protected preflight bound to the exact
+operator commit and schema hash. A blocked backup, writer, maintenance or
+capacity check stops the procedure before any candidate build.
+
+```bash
+python3 ops/storage-v2/final-delta.py plan \
+  --database mainrag --local-postgres \
+  --baseline-audit PROTECTED_AUDIT --baseline-audit-sha256 EXACT_AUDIT_SHA256 \
+  --preflight FRESH_PROTECTED_PREFLIGHT --preflight-sha256 EXACT_PREFLIGHT_SHA256 \
+  --operator-commit-sha EXACT_OPERATOR_COMMIT --schema-sha256 EXACT_SCHEMA_SHA256 \
+  --installed-binary-sha256 EXACT_INSTALLED_BINARY_SHA256 \
+  --runtime-commit-sha EXACT_INSTALLED_RUNTIME_COMMIT \
+  --output PROTECTED_FINAL_DELTA_PLAN
+```
+
+For each `REBUILD` entry, use the existing protected `release-candidate.py`
+`build` and `verify` phases, including the pack reserve, API restart/resume,
+reviewed generation-bound gold suite, exact comparison, intelligence, and
+qualification gates. The controlled qualification function replaces the old
+pointer-neutral candidate only after the new candidate passes. Do not reuse a
+gold suite bound to Gs for Gs+1. Retained candidates are not rebuilt. Store
+the changed-source qualification artifacts in a private
+`mainrag.storage-v2.final-delta-receipts.v1` file with a `sources` array of
+`source_id`, `artifact_path`, and `artifact_sha256` entries. Unchanged sources
+have no receipt entry.
+
+```bash
+python3 ops/storage-v2/final-delta.py finalize \
+  --database mainrag --local-postgres \
+  --baseline-audit PROTECTED_AUDIT --baseline-audit-sha256 EXACT_AUDIT_SHA256 \
+  --preflight FRESH_PROTECTED_PREFLIGHT --preflight-sha256 EXACT_PREFLIGHT_SHA256 \
+  --operator-commit-sha EXACT_OPERATOR_COMMIT --schema-sha256 EXACT_SCHEMA_SHA256 \
+  --installed-binary-sha256 EXACT_INSTALLED_BINARY_SHA256 \
+  --plan PROTECTED_FINAL_DELTA_PLAN --plan-sha256 EXACT_PLAN_SHA256 \
+  --receipts PROTECTED_FINAL_DELTA_RECEIPTS \
+  --receipts-sha256 EXACT_RECEIPTS_SHA256 \
+  --output PROTECTED_FINAL_CANDIDATE_COMMIT_MAP
+```
+
+Finalization re-observes every source, requires the planned watermark to remain
+current, checks unchanged Gs identity, checks each rebuilt candidate is exactly
+Gs+1 with matching qualification artifact and current runtime commit, and
+requires one pointer-neutral release candidate per source. It emits a private
+per-source commit map. Capture a fresh candidate inventory with
+`candidate-inventory.py --candidate-commit-map` and its exact SHA-256, then
+run the aggregate audit and external quality, benchmark, resource, writer,
+backup, recovery, and legacy-state gates on the final set. The map and audit
+are observed state, not aggregate acceptance or activation authority.
+
 ## Atomic candidate-set activation boundary
 
 Migration 057 adds `storage_v2_activate_candidate_set` and a compact activation
 receipt table. Installing the migration does not call the function or change a
-pointer. Its protected JSON manifest uses schema
+pointer. Migration 064 requires each source entry to name its own exact
+`candidate_commit_sha`, allowing retained Gs and rebuilt Gs+1 to keep their
+immutable qualification identities. The top-level `code_commit_sha` still
+identifies the reviewed installed runtime. Its protected JSON manifest uses schema
 `mainrag.storage-v2.activation-set.v1`, a unique `activation_id`, exact
 `code_commit_sha`, `schema_sha256`, `backend_package_sha256`,
 `aggregate_evidence_sha256`, and a `sources` array covering **every** registered
 source, including the benchmark source. Each source entry binds `source_id`,
 `candidate_generation_id`, `expected_active_generation_id` (or JSON null),
-`evidence_id`, `evidence_manifest_sha256`, and
+`evidence_id`, `evidence_manifest_sha256`, `candidate_commit_sha`, and
 `source_watermark_sha256`. The expected manifest SHA-256 is calculated over
 PostgreSQL `jsonb::text`, and a fresh approval must name that exact digest.
 
@@ -148,6 +213,8 @@ fresh per-source adapter watermarks, and all eight named external gates. A
 does not create or infer missing gold, quality, recovery, writer, benchmark,
 or legacy-state evidence. Volatile receipts and per-source watermarks must be
 no more than five minutes old. The installed binary is hashed again locally.
+The plan and apply phases also call the authenticated release-watermark API
+for every source and reject stale adapter profiles, watermarks, or item counts.
 
 ```bash
 python3 ops/storage-v2/activation-set.py plan \
