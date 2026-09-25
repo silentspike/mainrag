@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -20,6 +22,12 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 DEFAULT_POLICY = HERE / "preflight-policy.json"
 SCHEMA_VERSION = "mainrag-storage-v2-preflight/v1"
+BACKUP_SPEC = importlib.util.spec_from_file_location(
+    "storage_v2_backup_observe", HERE / "backup-observe.py"
+)
+assert BACKUP_SPEC and BACKUP_SPEC.loader
+BACKUP_OBSERVE = importlib.util.module_from_spec(BACKUP_SPEC)
+BACKUP_SPEC.loader.exec_module(BACKUP_OBSERVE)
 
 
 DATABASE_SNAPSHOT_SQL = r"""
@@ -312,20 +320,68 @@ def load_backup(path: Path | None, max_age_seconds: int, now: int) -> dict[str, 
             "restore_tested": False,
             "reason": "backup evidence was not supplied",
         }
-    value = json.loads(path.read_text(encoding="utf-8"))
-    required = {"schema_version", "status", "completed_at_unix", "artifact_sha256", "restore_tested"}
-    if not required.issubset(value) or value["schema_version"] != 1:
+    def read_private(source: Path, limit: int) -> bytes:
+        try:
+            if stat.S_IMODE(source.parent.stat().st_mode) & 0o077:
+                raise RuntimeError("backup evidence directory is not private")
+            descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(descriptor, "rb") as opened:
+                before = os.fstat(opened.fileno())
+                if not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) & 0o077 \
+                        or before.st_size > limit:
+                    raise RuntimeError("backup evidence is not a bounded private file")
+                raw = opened.read(limit + 1)
+                after = os.fstat(opened.fileno())
+        except OSError as error:
+            raise RuntimeError("backup evidence is unavailable") from error
+        if len(raw) > limit or before.st_size != len(raw) \
+                or before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
+            raise RuntimeError("backup evidence changed during read")
+        return raw
+
+    evidence_raw = read_private(path, 64 * 1024)
+    try:
+        value = json.loads(evidence_raw, object_pairs_hook=BACKUP_OBSERVE.unique_keys)
+    except (ValueError, UnicodeError) as error:
+        raise RuntimeError("backup evidence is invalid JSON") from error
+    required = {"schema_version", "status", "stanza", "completed_at_unix",
+                "artifact_file", "artifact_sha256", "backup_type",
+                "backup_label_sha256", "restore_tested", "observed_at_unix"}
+    if not isinstance(value, dict) or set(value) != required \
+            or value["schema_version"] != 2 or value["status"] != "PASS" \
+            or value["restore_tested"] is not False \
+            or not isinstance(value["stanza"], str) \
+            or re.fullmatch(r"[A-Za-z0-9_-]+", value["stanza"]) is None \
+            or not isinstance(value["artifact_file"], str) \
+            or re.fullmatch(r"[A-Za-z0-9_.-]+", value["artifact_file"]) is None \
+            or value["artifact_file"] in (".", "..", path.name) \
+            or not isinstance(value["artifact_sha256"], str) \
+            or re.fullmatch(r"[0-9a-f]{64}", value["artifact_sha256"]) is None \
+            or not isinstance(value["backup_label_sha256"], str) \
+            or re.fullmatch(r"[0-9a-f]{64}", value["backup_label_sha256"]) is None \
+            or type(value["completed_at_unix"]) is not int \
+            or type(value["observed_at_unix"]) is not int:
         raise RuntimeError("backup evidence has an unsupported schema")
-    age = max(0, now - int(value["completed_at_unix"]))
-    passed = value["status"] == "PASS" and age <= max_age_seconds
-    restore_tested = bool(value["restore_tested"])
+    artifact_raw = read_private(path.parent / value["artifact_file"],
+                                BACKUP_OBSERVE.MAX_INFO_BYTES)
+    if hashlib.sha256(artifact_raw).hexdigest() != value["artifact_sha256"]:
+        raise RuntimeError("backup metadata digest differs")
+    observed = BACKUP_OBSERVE.latest_backup(artifact_raw, value["stanza"], now)
+    if observed != {key: value[key] for key in observed}:
+        raise RuntimeError("backup evidence differs from pgBackRest metadata")
+    age = max(0, now - value["completed_at_unix"])
+    observation_age = max(0, now - value["observed_at_unix"])
+    passed = (age <= max_age_seconds and observation_age <= 3600
+              and value["observed_at_unix"] >= value["completed_at_unix"]
+              and value["observed_at_unix"] <= now + 300)
     return {
         "status": "PASS" if passed else "BLOCKED",
-        "evidence_level": "restore-exercised" if restore_tested else "backup-command-only",
-        "restore_tested": restore_tested,
+        "evidence_level": "backup-metadata-only",
+        "restore_tested": False,
         "age_seconds": age,
+        "observation_age_seconds": observation_age,
         "artifact_sha256": value["artifact_sha256"],
-        "evidence_sha256": sha256_file(path),
+        "evidence_sha256": hashlib.sha256(evidence_raw).hexdigest(),
     }
 
 
