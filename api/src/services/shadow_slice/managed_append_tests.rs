@@ -41,7 +41,7 @@ async fn run(client: &mut Client, root: &Path, packs: &Path) -> Result<ShadowSli
     transaction
         .batch_execute(&format!("SET LOCAL app.user_id='{PRINCIPAL}'"))
         .await?;
-    let result = Box::pin(run_public_shadow_slice(
+    let result = Box::pin(run_release_candidate_build(
         &transaction,
         63,
         "managed_append",
@@ -53,6 +53,28 @@ async fn run(client: &mut Client, root: &Path, packs: &Path) -> Result<ShadowSli
     .await?;
     transaction.commit().await?;
     Ok(result)
+}
+
+fn assert_measured_reads(
+    result: &ShadowSliceResult,
+    adapter_bytes: u64,
+    deferred_bytes: u64,
+    parser_passes: u64,
+) -> Result<()> {
+    let telemetry = &result.telemetry;
+    ensure!(
+        telemetry["ablauf"]["adapter_source_read_bytes"].as_u64() == Some(adapter_bytes)
+            && telemetry["ablauf"]["parser_passes"].as_u64() == Some(parser_passes)
+            && telemetry["source_io"]["application_read_bytes"].as_u64() == Some(deferred_bytes)
+            && telemetry["source_io"]["adapter_read_bytes"].as_u64() == Some(adapter_bytes)
+            && telemetry["source_io"]["total_content_read_bytes"].as_u64()
+                == adapter_bytes.checked_add(deferred_bytes)
+            && telemetry["source_io"]["content_read_coverage"] == "COMPLETE"
+            && telemetry["source_io"]["coverage"] == "PARTIAL"
+            && telemetry["source_io"]["device_read_bytes"].is_null(),
+        "managed release candidate read, parser or coverage telemetry differs"
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -116,19 +138,18 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             "initial full comparison was not counted");
         let manifest_path = root.join("manifest.json");
         let initial_manifest = std::fs::read(&manifest_path)?;
-        ensure!(initial.telemetry["ablauf"]["adapter_source_read_bytes"].as_u64()
-            == Some(2 * (initial_manifest.len() + first_bytes.len()) as u64),
-            "initial full-scan adapter reads were not reconciled");
+        assert_measured_reads(
+            &initial,
+            2 * (initial_manifest.len() + first_bytes.len()) as u64,
+            4 * first_bytes.len() as u64,
+            1,
+        )?;
         drop(client);
         let mut client = connect(&config).await?;
         let repeated = Box::pin(run(&mut client, &root, &packs)).await?;
         ensure!(repeated.reused_generation && repeated.generation_id == initial.generation_id,
             "unchanged managed generation was duplicated");
-        ensure!(repeated.telemetry["ablauf"]["adapter_source_read_bytes"].as_u64()
-            == Some(initial_manifest.len() as u64)
-            && repeated.telemetry["ablauf"]["deferred_source_read_bytes"] == 0
-            && repeated.telemetry["ablauf"]["parser_passes"] == 0,
-            "unchanged managed run did unnecessary source or parser work");
+        assert_measured_reads(&repeated, initial_manifest.len() as u64, 0, 0)?;
 
         let second_bytes = b"{\"event\":\"second\"}\n";
         std::fs::write(&input, second_bytes)?;
@@ -144,6 +165,7 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             .as_u64().context("managed adapter reads were not measured")?;
         ensure!(adapter_reads == 2 * (manifest_size + second_bytes.len() as u64),
             "delta adapter read the old segment or omitted a verification pass");
+        assert_measured_reads(&delta, adapter_reads, 4 * second_bytes.len() as u64, 1)?;
         ensure!(delta.telemetry["ablauf"]["eingang_bytes"].as_u64()
             == Some((first_bytes.len() + second_bytes.len()) as u64),
             "logical input length was not preserved");
