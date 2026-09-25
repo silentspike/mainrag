@@ -20,8 +20,9 @@ use uuid::Uuid;
 #[cfg(feature = "storage-v2-intelligence")]
 #[derive(Debug, Deserialize)]
 pub struct ShadowIntelligenceQuery {
-    pub source_id: i64,
-    pub generation: String,
+    pub source_id: Option<i64>,
+    pub generation: Option<String>,
+    pub read_path: Option<String>,
     pub command: String,
     pub name: Option<String>,
     pub layer: Option<String>,
@@ -29,6 +30,18 @@ pub struct ShadowIntelligenceQuery {
     pub side_effect: Option<String>,
     #[serde(default)]
     pub include_test: bool,
+}
+
+#[cfg(feature = "storage-v2-intelligence")]
+pub async fn intelligence_default_read_path(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let active = state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some();
+    Json(serde_json::json!({
+        "read_path": if active { "storage_v2_active" } else { "current" }
+    }))
 }
 
 #[cfg(feature = "storage-v2-intelligence")]
@@ -45,11 +58,42 @@ pub async fn shadow_intelligence_command(
             "unsupported shadow intelligence command".to_string(),
         ));
     }
-    if req.generation.is_empty() {
+    let active = match (req.read_path.as_deref(), req.generation.as_deref()) {
+        (None, Some(_)) | (Some("storage_v2"), Some(_)) => false,
+        (None, None) | (Some("storage_v2_active"), None) => true,
+        _ => {
+            return Err(crate::error::AppError::BadRequest(
+                "intelligence requires a named generation or the active read path".to_string(),
+            ))
+        }
+    };
+    if !active
+        && (req.source_id.is_none()
+            || !req.generation.as_deref().is_some_and(|generation| {
+                !generation.starts_with('0')
+                    && generation.parse::<i64>().is_ok_and(|sequence| sequence > 0)
+            }))
+    {
         return Err(crate::error::AppError::BadRequest(
-            "an explicit generation selector is required".to_string(),
+            "named intelligence requires a source and positive generation".to_string(),
         ));
     }
+    let manifest_sha256 = if active {
+        Some(
+            state
+                .config
+                .server
+                .storage_v2_default_read_manifest_sha256
+                .clone()
+                .ok_or_else(|| {
+                    crate::error::AppError::BadRequest(
+                        "active storage_v2 read is not configured".to_string(),
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| crate::error::AppError::Unauthorized("invalid user id".to_string()))?;
     let source_id = req.source_id;
@@ -66,40 +110,49 @@ pub async fn shadow_intelligence_command(
         .rls_client
         .with_rls(user_id, claims.is_admin, move |transaction| {
             Box::pin(async move {
-                transaction
-                    .execute(
-                        "SELECT storage_v2_require_test_scope($1, $2)",
-                        &[&source_id, &include_test],
-                    )
-                    .await
-                    .map_err(|error| {
-                        if error.code()
-                            == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
-                        {
-                            crate::error::AppError::Forbidden(
-                                "shadow test source requires explicit admin test scope".to_string(),
-                            )
-                        } else {
-                            crate::error::AppError::Database(error)
-                        }
-                    })?;
-                let row = transaction
-                    .query_one(
-                        "SELECT storage_v2_intelligence_command($1, $2, $3, $4)",
-                        &[&source_id, &generation, &command, &query],
-                    )
-                    .await
-                    .map_err(|error| {
-                        if error.code()
-                            == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
-                        {
-                            crate::error::AppError::Forbidden(
-                                "shadow generation is not authorized".to_string(),
-                            )
-                        } else {
-                            crate::error::AppError::Database(error)
-                        }
-                    })?;
+                let row = if let Some(manifest_sha256) = manifest_sha256.as_ref() {
+                    transaction
+                        .query_one(
+                            "SELECT storage_v2_active_intelligence_command($1,$2,$3,$4,$5)",
+                            &[manifest_sha256, &command, &query, &source_id, &include_test],
+                        )
+                        .await
+                } else {
+                    transaction
+                        .execute(
+                            "SELECT storage_v2_require_test_scope($1, $2)",
+                            &[&source_id, &include_test],
+                        )
+                        .await
+                        .map_err(|error| {
+                            if error.code()
+                                == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+                            {
+                                crate::error::AppError::Forbidden(
+                                    "shadow test source requires explicit admin test scope".to_string(),
+                                )
+                            } else {
+                                crate::error::AppError::Database(error)
+                            }
+                        })?;
+                    transaction
+                        .query_one(
+                            "SELECT storage_v2_intelligence_command($1, $2, $3, $4)",
+                            &[&source_id, &generation, &command, &query],
+                        )
+                        .await
+                }
+                .map_err(|error| {
+                    if error.code()
+                        == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+                    {
+                        crate::error::AppError::Forbidden(
+                            "shadow generation is not authorized".to_string(),
+                        )
+                    } else {
+                        crate::error::AppError::Database(error)
+                    }
+                })?;
                 Ok(row.get::<_, Value>(0))
             })
         })

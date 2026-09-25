@@ -212,6 +212,10 @@ enum Commands {
         #[arg(long)]
         generation: Option<String>,
 
+        /// Read path: auto, current, storage_v2, or storage_v2_active
+        #[arg(long, default_value = "auto")]
+        read_path: String,
+
         /// Include an explicit admin-only synthetic/benchmark source
         #[arg(long)]
         include_test: bool,
@@ -229,6 +233,10 @@ enum Commands {
         /// Read an explicitly named storage-v2 generation (requires --source)
         #[arg(long)]
         generation: Option<String>,
+
+        /// Read path: auto, current, storage_v2, or storage_v2_active
+        #[arg(long, default_value = "auto")]
+        read_path: String,
 
         /// Include an explicit admin-only synthetic/benchmark source
         #[arg(long)]
@@ -248,6 +256,10 @@ enum Commands {
         /// Read an explicitly named storage-v2 generation (requires --source)
         #[arg(long)]
         generation: Option<String>,
+
+        /// Read path: auto, current, storage_v2, or storage_v2_active
+        #[arg(long, default_value = "auto")]
+        read_path: String,
 
         /// Include an explicit admin-only synthetic/benchmark source
         #[arg(long)]
@@ -282,6 +294,10 @@ enum Commands {
         /// Read an explicitly named storage-v2 generation (requires --source)
         #[arg(long)]
         generation: Option<String>,
+
+        /// Read path: auto, current, storage_v2, or storage_v2_active
+        #[arg(long, default_value = "auto")]
+        read_path: String,
 
         /// Include an explicit admin-only synthetic/benchmark source
         #[arg(long)]
@@ -622,6 +638,7 @@ async fn main() -> anyhow::Result<()> {
             symbol,
             source,
             generation,
+            read_path,
             include_test,
         } => {
             commands::card::run(
@@ -629,6 +646,7 @@ async fn main() -> anyhow::Result<()> {
                 &symbol,
                 source.as_deref(),
                 generation.as_deref(),
+                &read_path,
                 include_test,
                 cli.json,
             )
@@ -639,6 +657,7 @@ async fn main() -> anyhow::Result<()> {
             symbol,
             source,
             generation,
+            read_path,
             include_test,
             depth,
         } => {
@@ -647,6 +666,7 @@ async fn main() -> anyhow::Result<()> {
                 &symbol,
                 source.as_deref(),
                 generation.as_deref(),
+                &read_path,
                 include_test,
                 Some(depth),
                 cli.json,
@@ -657,6 +677,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Layers {
             source,
             generation,
+            read_path,
             include_test,
             layer,
             resource,
@@ -667,6 +688,7 @@ async fn main() -> anyhow::Result<()> {
                 &client,
                 source.as_deref(),
                 generation.as_deref(),
+                &read_path,
                 include_test,
                 layer.as_deref(),
                 resource.as_deref(),
@@ -681,6 +703,7 @@ async fn main() -> anyhow::Result<()> {
             symbol,
             source,
             generation,
+            read_path,
             include_test,
         } => {
             commands::ownership::run(
@@ -688,6 +711,7 @@ async fn main() -> anyhow::Result<()> {
                 &symbol,
                 source.as_deref(),
                 generation.as_deref(),
+                &read_path,
                 include_test,
                 cli.json,
             )

@@ -9,6 +9,7 @@ pub async fn run(
     symbol: &str,
     source: Option<&str>,
     generation: Option<&str>,
+    read_path: &str,
     include_test: bool,
     json_output: bool,
 ) -> Result<()> {
@@ -16,6 +17,7 @@ pub async fn run(
         eprint!("{}", "Loading symbol card...".cyan());
     }
 
+    let active = super::intelligence_active(client, read_path, generation).await?;
     if let Some(generation) = generation {
         let source = source.ok_or_else(|| anyhow::anyhow!("--generation requires --source"))?;
         let cards = client
@@ -30,8 +32,15 @@ pub async fn run(
         println!("{}", serde_json::to_string_pretty(&cards)?);
         return Ok(());
     }
+    if active {
+        let cards = client
+            .active_intelligence("card", source, include_test, &[("name", Some(symbol))])
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&cards)?);
+        return Ok(());
+    }
     if include_test {
-        anyhow::bail!("--include-test requires --generation and --source");
+        anyhow::bail!("--include-test requires a storage-v2 read path");
     }
     let cards = client.get_symbol_cards(symbol, source).await?;
 
