@@ -92,7 +92,8 @@ INSERT INTO sources(id, name, type, path) VALUES
     (11, 'synthetic-commit-witness', 'fixture', 'synthetic-commit-witness'),
     (12, 'synthetic-long-search-term', 'fixture', 'synthetic-long-search-term'),
     (13, 'synthetic-sparse-and-bundle', 'fixture', 'synthetic-sparse-and-bundle'),
-    (14, 'synthetic-oversized-search', 'fixture', 'synthetic-oversized-search');
+    (14, 'synthetic-oversized-search', 'fixture', 'synthetic-oversized-search'),
+    (15, 'synthetic-append-baseline', 'fixture', 'synthetic-append-baseline');
 UPDATE sources SET is_test = TRUE WHERE id = 8;
 INSERT INTO fixture_source_access VALUES
     ('{WRITER_ID}', 1, TRUE, TRUE), ('{WRITER_ID}', 3, TRUE, TRUE),
@@ -447,6 +448,93 @@ SELECT (storage_v2_finish_analysis_attempt(
             "the sealed synthetic generation must reconstruct exactly from content anchors",
         )
         self.assertEqual(self.sql("SELECT active_generation_id IS NULL FROM logical_source WHERE id = 1"), "t")
+
+    def test_verified_full_append_frontier_tracks_staged_content_and_generation(self) -> None:
+        node_a, view_a, digest_a = self.make_projection("alpha")
+        first = self.begin(15, "b1" * 32, "b2" * 32)
+        self.stage(first, "stream.jsonl", "alpha", node_a, view_a, digest_a)
+        self.complete_analysis(digest_a)
+        self.commit(first, 1)
+        publish = (
+            f"SELECT storage_v2_publish_full_append_frontiers({first}, "
+            "ARRAY['stream.jsonl']::TEXT[]);"
+        )
+        self.assert_sql_fails(self.admin(publish), "requires a verified generation")
+        self.sql(
+            self.admin(
+                "SELECT storage_v2_verify_generation("
+                f"(SELECT generation_id FROM storage_v2_ingest_run WHERE id={first}), "
+                f"'{'b3' * 32}');"
+            )
+        )
+        self.assert_sql_fails(
+            self.actor(OTHER_ID, publish),
+            "sealed ingest run not found or access denied",
+        )
+        self.assert_sql_fails(
+            self.admin(
+                f"SELECT storage_v2_publish_full_append_frontiers({first}, "
+                "ARRAY['missing.jsonl']::TEXT[]);"
+            ),
+            "absent from the sealed run",
+        )
+        self.assertEqual(self.sql(self.admin(publish)), "1")
+        self.file(ROOT / "migrations/062_storage_v2_verified_full_append_frontier.sql")
+        self.assertEqual(self.sql(self.admin(publish)), "1")
+        self.assert_sql_fails(
+            "SET ROLE mainrag; "
+            f"SET app.user_id = '{ADMIN_ID}'; "
+            "SELECT storage_v2_update_append_frontier("
+            "15, 1, 'fixture-adapter-v1', 0, NULL, 1, "
+            "decode('00', 'hex'), NULL);",
+            "permission denied for function storage_v2_update_append_frontier",
+        )
+        self.assert_sql_fails(
+            "SET ROLE mainrag; "
+            "UPDATE storage_v2_append_frontier SET appends_since_full=99 "
+            "WHERE source_id=15;",
+            "permission denied for table storage_v2_append_frontier",
+        )
+        self.assertEqual(
+            self.sql(
+                "SELECT prefix_bytes || ':' || encode(prefix_sha256, 'hex') || ':' || "
+                "appends_since_full || ':' || last_generation_seq "
+                "FROM storage_v2_append_frontier WHERE source_id=15"
+            ),
+            f"5:{digest_a}:0:1",
+        )
+
+        node_b, view_b, digest_b = self.make_projection("x")
+        second = self.begin(15, "b4" * 32, "b5" * 32)
+        self.stage(second, "stream.jsonl", "x", node_b, view_b, digest_b)
+        self.complete_analysis(digest_b)
+        self.commit(second, 1)
+        self.sql(
+            self.admin(
+                "SELECT storage_v2_verify_generation("
+                f"(SELECT generation_id FROM storage_v2_ingest_run WHERE id={second}), "
+                f"'{'b6' * 32}');"
+            )
+        )
+        self.assert_sql_fails(self.admin(publish), "append baseline run is superseded")
+        self.assertEqual(
+            self.sql(
+                self.admin(
+                    f"SELECT storage_v2_publish_full_append_frontiers({second}, "
+                    "ARRAY['stream.jsonl']::TEXT[]);"
+                )
+            ),
+            "1",
+        )
+        self.assertEqual(
+            self.sql(
+                "SELECT prefix_bytes || ':' || encode(prefix_sha256, 'hex') || ':' || "
+                "appends_since_full || ':' || last_generation_seq "
+                "FROM storage_v2_append_frontier WHERE source_id=15"
+            ),
+            f"1:{digest_b}:0:2",
+            "a full read after shrink establishes a new baseline",
+        )
 
     def test_analysis_retry_append_frontier_cancellation_and_isolation(self) -> None:
         node, view_id, digest_hex = self.make_projection("alpha")
