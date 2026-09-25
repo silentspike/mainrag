@@ -41,7 +41,7 @@ async fn run(client: &mut Client, root: &Path, packs: &Path) -> Result<ShadowSli
     transaction
         .batch_execute(&format!("SET LOCAL app.user_id='{PRINCIPAL}'"))
         .await?;
-    let result = run_public_shadow_slice(
+    let result = Box::pin(run_public_shadow_slice(
         &transaction,
         63,
         "managed_append",
@@ -49,7 +49,7 @@ async fn run(client: &mut Client, root: &Path, packs: &Path) -> Result<ShadowSli
         packs,
         4096,
         COMMIT,
-    )
+    ))
     .await?;
     transaction.commit().await?;
     Ok(result)
@@ -109,7 +109,7 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             &[&root.to_str().context("managed fixture path is not UTF-8")?],
         ).await?;
 
-        let initial = run(&mut client, &root, &packs).await?;
+        let initial = Box::pin(run(&mut client, &root, &packs)).await?;
         ensure!(initial.item_count == 1 && !initial.reused_generation,
             "initial managed generation is incomplete");
         ensure!(initial.telemetry["ablauf"]["append_full_comparisons"] == 1,
@@ -121,7 +121,7 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             "initial full-scan adapter reads were not reconciled");
         drop(client);
         let mut client = connect(&config).await?;
-        let repeated = run(&mut client, &root, &packs).await?;
+        let repeated = Box::pin(run(&mut client, &root, &packs)).await?;
         ensure!(repeated.reused_generation && repeated.generation_id == initial.generation_id,
             "unchanged managed generation was duplicated");
         ensure!(repeated.telemetry["ablauf"]["adapter_source_read_bytes"].as_u64()
@@ -133,7 +133,7 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         let second_bytes = b"{\"event\":\"second\"}\n";
         std::fs::write(&input, second_bytes)?;
         producer(&script, "append", &root, Some(&input))?;
-        let delta = run(&mut client, &root, &packs).await?;
+        let delta = Box::pin(run(&mut client, &root, &packs)).await?;
         ensure!(delta.item_count == 2 && delta.generation_seq > initial.generation_seq,
             "managed delta did not advance its generation");
         ensure!(delta.telemetry["ablauf"]["reuse_bodies"].as_u64().unwrap_or(0) >= 1
@@ -161,21 +161,27 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
 
         let stable_manifest = std::fs::read(&manifest_path)?;
         std::fs::write(&manifest_path, &initial_manifest)?;
-        let shrink = run(&mut client, &root, &packs).await.unwrap_err();
+        let shrink = Box::pin(run(&mut client, &root, &packs))
+            .await
+            .unwrap_err();
         ensure!(shrink.to_string().contains("prefix shrank"),
             "a shortened managed manifest did not fail at the trusted prefix");
         std::fs::write(&manifest_path, &stable_manifest)?;
         let mut rotated: serde_json::Value = serde_json::from_slice(&stable_manifest)?;
         rotated["epoch"] = serde_json::json!(Uuid::new_v4().to_string());
         std::fs::write(&manifest_path, serde_json::to_vec(&rotated)?)?;
-        let rotation = run(&mut client, &root, &packs).await.unwrap_err();
+        let rotation = Box::pin(run(&mut client, &root, &packs))
+            .await
+            .unwrap_err();
         ensure!(rotation.to_string().contains("epoch changed"),
             "an unapproved managed epoch did not fail at the trusted prefix");
         std::fs::write(&manifest_path, &stable_manifest)?;
         let mut drifted: serde_json::Value = serde_json::from_slice(&stable_manifest)?;
         drifted["segments"][0]["sha256"] = serde_json::json!("00".repeat(32));
         std::fs::write(&manifest_path, serde_json::to_vec(&drifted)?)?;
-        let prefix_drift = run(&mut client, &root, &packs).await.unwrap_err();
+        let prefix_drift = Box::pin(run(&mut client, &root, &packs))
+            .await
+            .unwrap_err();
         ensure!(prefix_drift.to_string().contains("trusted prefix chain changed"),
             "managed prefix-chain drift was not classified");
         std::fs::write(&manifest_path, &stable_manifest)?;
@@ -192,7 +198,9 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         ).await?;
         std::fs::write(&input, b"{\"event\":\"third\"}\n")?;
         producer(&script, "append", &root, Some(&input))?;
-        let replacement = run(&mut client, &root, &packs).await.unwrap_err();
+        let replacement = Box::pin(run(&mut client, &root, &packs))
+            .await
+            .unwrap_err();
         ensure!(replacement.to_string().contains("does not match its manifest"),
             "scheduled full comparison did not detect the replaced segment");
         let pointer: Option<i64> = client.query_one(
