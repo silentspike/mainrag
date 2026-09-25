@@ -83,7 +83,7 @@ def passing_units() -> dict:
 def backup(restore_tested: bool = False) -> dict:
     return {
         "status": "PASS",
-        "evidence_level": "restore-exercised" if restore_tested else "backup-command-only",
+        "evidence_level": "restore-exercised" if restore_tested else "backup-metadata-only",
         "restore_tested": restore_tested,
         "age_seconds": 60,
         "artifact_sha256": "2" * 64,
@@ -126,7 +126,7 @@ class PreflightTests(unittest.TestCase):
     def test_complete_fixture_passes_without_claiming_restore(self) -> None:
         result = evaluate()
         self.assertEqual(result["overall_status"], "PASS")
-        self.assertEqual(result["backup"]["evidence_level"], "backup-command-only")
+        self.assertEqual(result["backup"]["evidence_level"], "backup-metadata-only")
         encoded = json.dumps(result)
         self.assertNotIn("/data/", encoded)
         self.assertNotIn("hostname", encoded)
