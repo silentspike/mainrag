@@ -355,7 +355,7 @@ jobs:
               'eval.storage_v2.schema.test_content_schema',
               'eval.storage_v2.schema.test_pack_epoch_fence',
           ])
-          assert suite.countTestCases() >= 29, 'Expected all search and pack reader-fence regressions'
+          assert suite.countTestCases() >= 30, 'Expected search, pack reader-fence and append frontier regressions'
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           raise SystemExit(0 if result.wasSuccessful() and not result.skipped else 1)
           PY

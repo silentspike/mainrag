@@ -66,6 +66,7 @@ TELEMETRY_COUNTERS = {
     "writer_concurrency",
     "fragments_created",
     "largest_item_bytes",
+    "append_full_comparisons",
 }
 
 

@@ -1341,6 +1341,26 @@ where
         )
         .await?
         .get(0);
+    if source_type == "fs" {
+        let append_item_keys = files
+            .iter()
+            .filter(|file| file.language.as_deref() == Some("jsonl") && file.source_range.is_none())
+            .map(|file| file.item_key.clone())
+            .collect::<Vec<_>>();
+        if !append_item_keys.is_empty() {
+            let published: i64 = client
+                .query_one(
+                    "SELECT storage_v2_publish_full_append_frontiers($1, $2)",
+                    &[&run.id, &append_item_keys],
+                )
+                .await?
+                .get(0);
+            if published != i64::try_from(append_item_keys.len())? {
+                bail!("verified append baselines did not cover every selected item");
+            }
+            measurements.append_full_comparisons = u64::try_from(published)?;
+        }
+    }
     let active_generation_after = active_generation(client, source_id).await?;
     if active_generation_after != active_generation_before {
         bail!("active generation changed during the shadow slice");

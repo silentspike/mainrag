@@ -444,6 +444,7 @@ pub struct ShadowIngestMeasurements {
     pub writer_concurrency: u64,
     pub fragments_created: u64,
     pub largest_item_bytes: u64,
+    pub append_full_comparisons: u64,
 }
 
 impl ShadowIngestMeasurements {
@@ -526,6 +527,7 @@ impl ShadowIngestMeasurements {
                 "writer_concurrency": self.writer_concurrency,
                 "fragments_created": self.fragments_created,
                 "largest_item_bytes": self.largest_item_bytes,
+                "append_full_comparisons": self.append_full_comparisons,
             },
             "phase": phases,
             "source_io": {
