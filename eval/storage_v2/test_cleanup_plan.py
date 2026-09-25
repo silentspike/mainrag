@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -88,6 +89,77 @@ class CleanupPlanCaptureTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "accessible"):
                 cleanup.private_create(public / "catalog.json", {})
             self.assertFalse((public / "catalog.json").exists())
+
+    def test_qdrant_inventory_binds_exact_counts_and_rejects_alias_drift(self):
+        for url in ("http://example.org:6333", "http://127.0.0.1:6333/path",
+                    "http://user:password@127.0.0.1:6333"):
+            with self.assertRaises(RuntimeError):
+                cleanup.qdrant_origin(url)
+        with tempfile.TemporaryDirectory() as temporary:
+            key_file = Path(temporary) / "key"
+            key_file.write_text("fixture-key\n")
+            key_file.chmod(0o644)
+            with self.assertRaisesRegex(RuntimeError, "private"):
+                cleanup.qdrant_key(key_file)
+            key_file.chmod(0o600)
+            self.assertEqual(cleanup.qdrant_key(key_file), "fixture-key")
+
+        def response(_origin, _key, path, *, exact_count=False):
+            if path == "/collections":
+                return {"collections": [{"name": "fixture"}]}
+            if path == "/aliases":
+                return {"aliases": [{"alias_name": "current", "collection_name": "fixture"}]}
+            if path == "/collections/fixture":
+                return {"status": "green", "config": {"params": {}}}
+            if path == "/collections/fixture/points/count":
+                self.assertTrue(exact_count)
+                return {"count": 7}
+            self.fail(f"unexpected fixture path: {path}")
+
+        with patch.object(cleanup, "qdrant_response", side_effect=response):
+            observed = cleanup.qdrant_inventory("http://127.0.0.1:6333", None)
+        self.assertEqual(observed["collections"][0]["exact_point_count"], 7)
+        self.assertEqual(observed["aliases"][0]["alias_name"], "current")
+        self.assertEqual(observed["consistency"], "TWO_LIST_READBACKS_NOT_ATOMIC")
+
+        calls = 0
+
+        def drifted(_origin, _key, path, *, exact_count=False):
+            nonlocal calls
+            if path == "/aliases":
+                calls += 1
+                return {"aliases": [] if calls == 2 else [
+                    {"alias_name": "current", "collection_name": "fixture"}]}
+            return response(_origin, _key, path, exact_count=exact_count)
+
+        with patch.object(cleanup, "qdrant_response", side_effect=drifted):
+            with self.assertRaisesRegex(RuntimeError, "drifted"):
+                cleanup.qdrant_inventory("http://127.0.0.1:6333", None)
+
+    def test_runtime_search_binds_clean_tracked_code_and_rejects_drift(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def git(*arguments):
+                subprocess.run(["git", "-C", str(root), *arguments],
+                               check=True, capture_output=True)
+
+            git("init", "-q")
+            source = root / "api/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("const TABLE: &str = \"chunks\";\n")
+            git("add", "api/src/lib.rs")
+            git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+                "commit", "-qm", "fixture")
+            (root / "ops").mkdir()
+            (root / "ops/untracked.txt").write_text("private user work\n")
+            observed = cleanup.runtime_inventory(root, ("chunks",))
+            self.assertEqual(len(observed["files"]), 1)
+            self.assertEqual(observed["matches"][0]["terms"], ["chunks"])
+            self.assertNotIn("private user work", json.dumps(observed))
+            source.write_text("const TABLE: &str = \"files\";\n")
+            with self.assertRaisesRegex(RuntimeError, "clean tracked tree"):
+                cleanup.runtime_inventory(root, ("chunks",))
 
 
 if __name__ == "__main__":

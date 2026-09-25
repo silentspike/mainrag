@@ -18,7 +18,17 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
+
+
+RUNTIME_TERMS = (
+    "files", "chunks", "embeddings", "chunk_embeddings", "indexing_outbox",
+    "legacy_hit_mapping", "qdrant", "outbox",
+)
+RUNTIME_PATHS = ("api/src", "cli/src", "ops")
 
 
 CATALOG_SQL = """
@@ -294,27 +304,209 @@ def private_create(path: Path, value: object) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        raise RuntimeError("Qdrant inventory request redirected")
+
+
+def qdrant_origin(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise RuntimeError("Qdrant origin is invalid") from error
+    if parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "::1") \
+            or port is None or parsed.username or parsed.password \
+            or parsed.path not in ("", "/") or parsed.params or parsed.query \
+            or parsed.fragment:
+        raise RuntimeError("Qdrant inventory requires a loopback HTTP origin")
+    return url.rstrip("/")
+
+
+def qdrant_key(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077 \
+                or metadata.st_size > 4096:
+            raise RuntimeError("Qdrant key file is not private")
+        key = path.read_text().strip()
+    except OSError as error:
+        raise RuntimeError("Qdrant key file is unavailable") from error
+    if not key or "\r" in key or "\n" in key:
+        raise RuntimeError("Qdrant key file is invalid")
+    return key
+
+
+def qdrant_response(origin: str, key: str | None, path: str,
+                    *, exact_count: bool = False) -> dict:
+    data = b'{"exact":true}' if exact_count else None
+    headers = {"Content-Type": "application/json"}
+    if key is not None:
+        headers["api-key"] = key
+    request = urllib.request.Request(origin + path, data=data, headers=headers,
+                                     method="POST" if exact_count else "GET")
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect).open(
+            request, timeout=300 if exact_count else 15
+        ) as response:
+            raw = response.read(2 * 1024 * 1024 + 1)
+    except (OSError, urllib.error.HTTPError) as error:
+        raise RuntimeError("Qdrant inventory request failed") from error
+    if len(raw) > 2 * 1024 * 1024:
+        raise RuntimeError("Qdrant inventory response exceeds its bound")
+    try:
+        value = json.loads(raw, object_pairs_hook=unique_keys)
+    except (UnicodeError, ValueError) as error:
+        raise RuntimeError("Qdrant inventory response is invalid JSON") from error
+    if not isinstance(value, dict) or value.get("status") != "ok" \
+            or not isinstance(value.get("result"), dict):
+        raise RuntimeError("Qdrant inventory response is incomplete")
+    return value["result"]
+
+
+def qdrant_names(origin: str, key: str | None) -> tuple[list[str], list[dict]]:
+    collections = qdrant_response(origin, key, "/collections").get("collections")
+    aliases = qdrant_response(origin, key, "/aliases").get("aliases")
+    if not isinstance(collections, list) or not isinstance(aliases, list) \
+            or len(collections) > 128 or len(aliases) > 256:
+        raise RuntimeError("Qdrant collection or alias inventory is invalid")
+    names = [item.get("name") for item in collections if isinstance(item, dict)]
+    if len(names) != len(collections) or any(not isinstance(name, str)
+                                             or not name or len(name) > 255 for name in names) \
+            or len(names) != len(set(names)):
+        raise RuntimeError("Qdrant collection identities are invalid")
+    normalized_aliases = []
+    for item in aliases:
+        if not isinstance(item, dict) or not isinstance(item.get("alias_name"), str) \
+                or not isinstance(item.get("collection_name"), str) \
+                or item["collection_name"] not in names:
+            raise RuntimeError("Qdrant alias identity is invalid")
+        normalized_aliases.append({"alias_name": item["alias_name"],
+                                   "collection_name": item["collection_name"]})
+    if len({item["alias_name"] for item in normalized_aliases}) != len(normalized_aliases):
+        raise RuntimeError("Qdrant alias identities are duplicated")
+    return sorted(names), sorted(normalized_aliases,
+                                 key=lambda item: item["alias_name"])
+
+
+def qdrant_inventory(url: str, key_file: Path | None) -> dict:
+    origin = qdrant_origin(url)
+    key = qdrant_key(key_file)
+    names, aliases = qdrant_names(origin, key)
+    collections = []
+    for name in names:
+        segment = urllib.parse.quote(name, safe="")
+        details = qdrant_response(origin, key, f"/collections/{segment}")
+        count = qdrant_response(origin, key,
+                                f"/collections/{segment}/points/count",
+                                exact_count=True).get("count")
+        if type(count) is not int or count < 0 \
+                or not isinstance(details.get("status"), str) \
+                or not isinstance(details.get("config"), dict):
+            raise RuntimeError("Qdrant collection detail or exact count is invalid")
+        collections.append({
+            "name": name, "exact_point_count": count,
+            "status": details["status"],
+            "config_sha256": hashlib.sha256(canonical(details["config"])).hexdigest(),
+            "detail_sha256": hashlib.sha256(canonical(details)).hexdigest(),
+        })
+    repeated_names, repeated_aliases = qdrant_names(origin, key)
+    if (names, aliases) != (repeated_names, repeated_aliases):
+        raise RuntimeError("Qdrant collection or alias set drifted during inventory")
+    return {"schema_version": "mainrag.storage-v2.cleanup-qdrant.v1",
+            "consistency": "TWO_LIST_READBACKS_NOT_ATOMIC",
+            "collections": collections, "aliases": aliases}
+
+
+def git_read(root: Path, *arguments: str) -> bytes:
+    completed = subprocess.run(["git", "-C", str(root), *arguments],
+                               capture_output=True, check=False)
+    if completed.returncode or len(completed.stdout) > 16 * 1024 * 1024:
+        raise RuntimeError("tracked runtime source inventory failed")
+    return completed.stdout
+
+
+def runtime_inventory(root: Path, relation_names: tuple[str, ...]) -> dict:
+    root = root.resolve(strict=True)
+    actual_root = Path(os.fsdecode(git_read(root, "rev-parse", "--show-toplevel")).strip())
+    if actual_root != root:
+        raise RuntimeError("runtime inventory must use the repository root")
+    commit = os.fsdecode(git_read(root, "rev-parse", "HEAD")).strip()
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise RuntimeError("runtime inventory commit identity is invalid")
+    if git_read(root, "status", "--porcelain", "--untracked-files=no"):
+        raise RuntimeError("runtime inventory requires a clean tracked tree")
+    raw_paths = git_read(root, "ls-files", "-z", "--", *RUNTIME_PATHS)
+    paths = [Path(os.fsdecode(item)) for item in raw_paths.split(b"\0") if item]
+    if not paths or len(paths) > 10000:
+        raise RuntimeError("runtime inventory tracked file set is invalid")
+    terms = sorted(set((*RUNTIME_TERMS, *relation_names)))
+    files = []
+    matches = []
+    for relative in paths:
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("runtime inventory has an unsafe tracked path")
+        path = root / relative
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 16 * 1024 * 1024:
+            raise RuntimeError("runtime inventory has a nonregular or oversized file")
+        raw = path.read_bytes()
+        try:
+            lines = raw.decode("utf-8").splitlines()
+        except UnicodeError as error:
+            raise RuntimeError("runtime inventory has a non-UTF-8 tracked file") from error
+        files.append({"path": relative.as_posix(),
+                      "sha256": hashlib.sha256(raw).hexdigest()})
+        for number, line in enumerate(lines, 1):
+            found = [term for term in terms if term.lower() in line.lower()]
+            if found:
+                matches.append({"path": relative.as_posix(), "line": number,
+                                "terms": found,
+                                "line_sha256": hashlib.sha256(line.encode()).hexdigest()})
+                if len(matches) > 20000:
+                    raise RuntimeError("runtime caller candidate set exceeds its bound")
+    return {"schema_version": "mainrag.storage-v2.cleanup-runtime-search.v1",
+            "status": "SEARCH_CANDIDATES_NOT_CALLER_PROOF",
+            "commit_sha": commit, "terms": terms,
+            "files": files, "matches": matches}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", required=True)
     parser.add_argument("--local-postgres", action="store_true")
     parser.add_argument("--count-relation", action="append", default=[])
+    parser.add_argument("--qdrant-url")
+    parser.add_argument("--qdrant-api-key-file", type=Path)
+    parser.add_argument("--runtime-root", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     arguments = parser.parse_args()
     if re.fullmatch(r"[A-Za-z0-9_-]+", arguments.database) is None:
         parser.error("database must be a local database name")
     if arguments.output.exists() or arguments.output.is_symlink():
         parser.error("protected output already exists")
+    if arguments.qdrant_api_key_file is not None and arguments.qdrant_url is None:
+        parser.error("Qdrant key requires a Qdrant origin")
     try:
         observed = catalog(arguments.database, arguments.local_postgres,
                            tuple(arguments.count_relation))
+        qdrant = (qdrant_inventory(arguments.qdrant_url, arguments.qdrant_api_key_file)
+                  if arguments.qdrant_url is not None else None)
+        runtime = (runtime_inventory(arguments.runtime_root, tuple(arguments.count_relation))
+                   if arguments.runtime_root is not None else None)
         artifact = {"schema_version": "mainrag.storage-v2.cleanup-catalog.v1",
                     "status": "OBSERVED_ONLY", "catalog": observed,
+                    "qdrant": qdrant,
+                    "runtime_search": runtime,
                     "observed_at_unix": int(time.time()),
                     "before_state_sha256": hashlib.sha256(canonical(observed)).hexdigest(),
                     "operator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                     "limitations": ["Only explicitly requested relations have exact row counts; no reviewed dispositions.",
-                                    "No Qdrant, runtime caller, export or pack reachability inventory.",
+                                    "Qdrant is optional and cannot share a transaction with PostgreSQL.",
+                                    "Runtime text matches require human caller classification and installed-binary binding.",
+                                    "No export or pack reachability inventory.",
                                     "No post-activation acceptance or deletion authority."]}
         digest = private_create(arguments.output, artifact)
     except RuntimeError as error:
@@ -324,6 +516,8 @@ def main() -> int:
     print(json.dumps({"status": "OBSERVED_ONLY", "sha256": digest,
                       "relation_count": len(observed["relations"]),
                       "exact_count_relation_count": len(observed["exact_rows"]),
+                      "qdrant_observed": qdrant is not None,
+                      "runtime_search_observed": runtime is not None,
                       "dependency_count": len(observed["dependencies"])}, sort_keys=True))
     return 0
 
