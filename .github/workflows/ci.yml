@@ -105,6 +105,12 @@ jobs:
         run: |
           cargo test -p mainrag-api --features storage-v2-retrieval --lib services::shadow_slice::tests::final_watermark_scan_counts_both_adapter_and_deferred_reads -- --exact --nocapture | tee final-source-reads-tests.log
           python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("final-source-reads-tests.log").read_text(), "Expected the final source read accounting regression to execute"'
+      - name: Verify managed append producer and adapter contract
+        shell: bash
+        run: |
+          PYTHONPATH=eval python3 -m unittest storage_v2.test_managed_append -v
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib plugins::managed_append::tests::first_party_producer_and_adapter_reject_same_length_replacement -- --exact --nocapture | tee managed-append-tests.log
+          python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("managed-append-tests.log").read_text(), "Expected the managed append adapter regression to execute"'
       - name: Verify CPU backfill route isolation
         shell: bash
         run: |
