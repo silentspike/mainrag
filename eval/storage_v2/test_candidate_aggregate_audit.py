@@ -75,7 +75,8 @@ def source(source_id: int, *, benchmark: bool = False, candidate: bool = True,
 class CandidateAggregateAuditTests(unittest.TestCase):
     @staticmethod
     def inventory(*sources: dict) -> dict:
-        return {"inventory_id": "fixture", "operator_commit_sha": "b" * 40,
+        return {"inventory_id": "fixture", "operator_commit_sha": "d" * 40,
+                "candidate_commit_sha": "b" * 40,
                 "sources": list(sources)}
 
     def test_complete_persisted_shape_remains_observed_only(self) -> None:
