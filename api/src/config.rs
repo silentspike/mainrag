@@ -34,6 +34,9 @@ pub struct ServerConfig {
     pub port: u16,
     pub search_default_limit: Option<u32>,
     pub search_max_limit: Option<u32>,
+    /// Exact activation manifest binding for the opt-in active storage-v2 read path.
+    /// Absence keeps legacy reads as the application default.
+    pub storage_v2_default_read_manifest_sha256: Option<String>,
     pub cors_origins: Vec<String>,
     /// HMAC pepper for API-Key hashing (env: API_KEY_PEPPER)
     pub api_key_pepper: String,
@@ -126,6 +129,20 @@ impl Config {
                     .and_then(|v| v.parse::<u32>().ok())
                     // H8: Hard ceiling to prevent excessive allocations
                     .map(|v| v.min(500)),
+                storage_v2_default_read_manifest_sha256: env::var(
+                    "MAINRAG_STORAGE_V2_DEFAULT_READ_MANIFEST_SHA256",
+                )
+                .ok()
+                .map(|value| {
+                    if value.len() == 64
+                        && value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    {
+                        Ok(value)
+                    } else {
+                        anyhow::bail!("MAINRAG_STORAGE_V2_DEFAULT_READ_MANIFEST_SHA256 must be a lowercase SHA-256")
+                    }
+                })
+                .transpose()?,
                 cors_origins: env::var("CORS_ORIGINS")
                     .unwrap_or_default() // Empty = no CORS (fail-closed)
                     .split(',')

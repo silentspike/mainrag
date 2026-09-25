@@ -52,8 +52,19 @@ pub struct ExactSearchEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActiveSearchEnvelope {
+    pub generation_seq: Option<i64>,
+    pub execution: String,
+    pub fully_scored_views: i64,
+    pub total: i64,
+    pub results: Vec<ExactSearchHit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExactSearchHit {
     pub occurrence_id: i64,
+    #[serde(default)]
+    pub generation_seq: Option<i64>,
     pub external_hit_id: String,
     pub view_id: i64,
     pub source_id: i64,
@@ -88,6 +99,34 @@ pub struct PostgresExactRetrievalBackend<'a> {
 impl<'a> PostgresExactRetrievalBackend<'a> {
     pub fn new(transaction: &'a Transaction<'a>) -> Self {
         Self { transaction }
+    }
+
+    pub async fn search_active(
+        &self,
+        manifest_sha256: &str,
+        ast: &QueryAst,
+        filters: &Value,
+        limit: i64,
+        source_id: Option<i64>,
+        include_test: bool,
+    ) -> Result<ActiveSearchEnvelope> {
+        let ast = serde_json::to_value(ast).context("serialize normalized search AST")?;
+        let row = self
+            .transaction
+            .query_one(
+                "SELECT storage_v2_search_active($1, $2, $3, $4, $5, $6)",
+                &[
+                    &manifest_sha256,
+                    &ast,
+                    filters,
+                    &limit,
+                    &source_id,
+                    &include_test,
+                ],
+            )
+            .await?;
+        let value: Value = row.get(0);
+        serde_json::from_value(value).context("decode active retrieval response")
     }
 }
 
