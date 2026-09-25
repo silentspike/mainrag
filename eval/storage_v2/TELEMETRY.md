@@ -101,6 +101,10 @@ reader from a writer whose pack buffer alone is bounded. The public fixture is
 never fragmented and therefore reports zero fragments while still reporting
 its largest item.
 
+`ablauf.append_full_comparisons` counts unfragmented filesystem JSONL items
+whose verified generation published a full-read append baseline. It is a
+persisted full comparison count, not evidence of incremental source I/O.
+
 Accepted CPU, I/O, and proportional-memory comparisons require root collection
 so `/proc/<pid>/io` and `smaps_rollup` are available for the complete API and
 PostgreSQL process trees. Non-root measurements remain useful for inner phase
