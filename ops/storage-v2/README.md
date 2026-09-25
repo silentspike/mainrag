@@ -157,6 +157,18 @@ The previous set-based evaluator is private; SQL clients use
 `storage_v2_search_active`, which rejects pointer drift before evaluating a
 query. The migration does not change active pointers or the configured default.
 
+Migration 061 adds manifest-bound active `card`, `explain`, `layers`, and
+`ownership` commands. The active SQL function checks the complete activation
+receipt, applies source read permissions, and excludes benchmark sources unless
+an administrator requests test scope. The API's intelligence read-path endpoint
+reports the configured default. These four CLI commands use `--read-path auto`
+by default: legacy when no activation manifest is configured, active storage v2
+when it is. `--read-path current` remains an explicit legacy rollback route;
+`--read-path storage_v2_active` selects active storage v2 explicitly, and
+`--generation SEQUENCE --source NAME` retains named candidate inspection.
+The active command response includes the manifest digest and source-scoped
+results. Installing migration 061 alone does not switch the default.
+
 The API keeps legacy reads as the default unless
 `MAINRAG_STORAGE_V2_DEFAULT_READ_MANIFEST_SHA256` names that exact reviewed
 activation manifest. With that setting, an omitted `read_path` uses the active

@@ -243,6 +243,10 @@ fn authenticated_routes(auth_layer: AuthLayer) -> Router<Arc<AppState>> {
         .route("/intelligence/call-chain", get(handlers::find_call_chain))
         // Intelligence Layer: Symbol Cards, Path Explanation, Negative Evidence
         .route("/intelligence/cards", get(handlers::browse_symbol_cards))
+        .route(
+            "/intelligence/default-read-path",
+            get(handlers::intelligence_default_read_path),
+        )
         .route("/intelligence/cards/:id", get(handlers::get_symbol_card))
         .route("/intelligence/explain_path", post(handlers::explain_path))
         .route(

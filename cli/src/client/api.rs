@@ -1021,6 +1021,75 @@ impl ApiClient {
         response.json().await.context("parse shadow intelligence")
     }
 
+    pub async fn default_intelligence_read_path(&self) -> Result<String> {
+        let url = format!("{}/api/v1/intelligence/default-read-path", self.base_url);
+        let response = self
+            .client
+            .get(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .send()
+            .await
+            .context("default intelligence read-path request failed")?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "default intelligence read-path request failed: {}",
+                response.status()
+            ));
+        }
+        let value: serde_json::Value = response
+            .json()
+            .await
+            .context("parse default intelligence read path")?;
+        match value.get("read_path").and_then(|path| path.as_str()) {
+            Some("current") => Ok("current".to_string()),
+            Some("storage_v2_active") => Ok("storage_v2_active".to_string()),
+            _ => Err(anyhow!(
+                "server returned an unsupported intelligence read path"
+            )),
+        }
+    }
+
+    pub async fn active_intelligence(
+        &self,
+        command: &str,
+        source: Option<&str>,
+        include_test: bool,
+        query: &[(&str, Option<&str>)],
+    ) -> Result<serde_json::Value> {
+        let mut url = format!(
+            "{}/api/v1/intelligence/shadow?read_path=storage_v2_active&command={}&include_test={}",
+            self.base_url,
+            urlencoding::encode(command),
+            include_test
+        );
+        if let Some(source) = source {
+            let source_id = self.get_source_id_by_name(source).await?;
+            url.push_str(&format!("&source_id={source_id}"));
+        }
+        for (key, value) in query {
+            if let Some(value) = value {
+                url.push('&');
+                url.push_str(key);
+                url.push('=');
+                url.push_str(&urlencoding::encode(value));
+            }
+        }
+        let response = self
+            .client
+            .get(&url)
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .send()
+            .await
+            .context("active intelligence request failed")?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "active intelligence request failed: {}",
+                response.status()
+            ));
+        }
+        response.json().await.context("parse active intelligence")
+    }
+
     pub async fn shadow_source_state(
         &self,
         source: &str,
