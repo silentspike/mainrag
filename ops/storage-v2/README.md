@@ -387,6 +387,13 @@ database account.
 
 ## Source release candidates
 
+The authenticated operators `release-candidate.py`, `final-delta.py`, and
+`activation-set.py` accept `--token-file` for a private regular file owned by
+the invoking user (mode 0600). The existing CLI credential file can be used
+without copying its contents into an environment variable or command line.
+`--token-env` remains available for existing automation when no token file is
+specified. Operators never print the token.
+
 Candidate construction is source-bounded and never changes an active pointer.
 First capture the complete registered source and generation state through a
 read-only PostgreSQL snapshot. Use a committed operator checkout and an owned
