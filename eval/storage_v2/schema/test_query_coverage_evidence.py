@@ -125,6 +125,12 @@ SELECT id,'text',digest('alpha visible','sha256'),'','alpha visible',1,1 FROM fi
         # PostgreSQL splits underscores into lexemes while the original sparse
         # posting tokenizer keeps them in one token. Both file versions are
         # identical, so this is a projection gap rather than source drift.
+        self.fixture()
+        fallback_conjunction = {"type": "and", "children": [
+            {"type": "term", "value": "alpha"},
+            {"type": "term", "value": "visible"}]}
+        fallback_before = self.exact_search(fallback_conjunction, source_id=17)
+        self.assertGreater(fallback_before["total"], 0)
         self.sql("INSERT INTO sources(id,name,type,path) VALUES "
                  "(19,'lexical-fixture','fixture','lexical-fixture')")
         content = "foo_3d alpha"
@@ -214,6 +220,17 @@ SELECT id,'text',digest('foo_3d alpha','sha256'),'','foo_3d alpha',1,1
         self.assertEqual(self.exact_search(conjunction, source_id=19), before_conjunction)
         self.assertEqual(self.exact_search(
             {"type": "term", "value": "3d"}, source_id=19), before_term)
+        self.file(schema.ROOT / "migrations/073_storage_v2_set_based_segment_presence.sql")
+        self.sql("GRANT EXECUTE ON FUNCTION storage_v2_source_segment_presence(BIGINT[]) "
+                 "TO storage_v2_shadow_worker")
+        self.assertEqual(self.exact_search(conjunction, source_id=19), before_conjunction)
+        self.assertEqual(self.exact_search(fallback_conjunction, source_id=17), fallback_before)
+        self.assertEqual(self.sql(self.admin(
+            f"SELECT occurrence_id FROM storage_v2_source_segment_presence("
+            f"ARRAY[{occurrence},999999]::BIGINT[])")), str(occurrence))
+        self.assertEqual(self.sql(self.actor(schema.OTHER_ID,
+            f"SELECT count(*) FROM storage_v2_source_segment_presence("
+            f"ARRAY[{occurrence}]::BIGINT[])")), "0")
         self.assertEqual(self.sql(self.admin(
             f"SELECT occurrence_id FROM storage_v2_source_segment_ranks("
             f"ARRAY[{occurrence},999999]::BIGINT[],'foo alpha')")), str(occurrence))
@@ -234,7 +251,9 @@ SELECT id,'text',digest('foo_3d alpha','sha256'),'','foo_3d alpha',1,1
         ):
             definition = self.sql(f"SELECT pg_get_functiondef('{signature}'::regprocedure)")
             self.assertIn("lexical_ranks AS MATERIALIZED", definition)
+            self.assertIn("lexical_presence AS MATERIALIZED", definition)
             self.assertNotIn("LEFT JOIN LATERAL storage_v2_source_segment_rank(", definition)
+            self.assertNotIn("NOT storage_v2_has_lexical_segment(matched.id)", definition)
         self.assertEqual(self.exact_search(
             {"type": "term", "value": "missing"}, source_id=19)["results"], [])
         self.assertEqual(self.exact_search(
