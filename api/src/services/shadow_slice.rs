@@ -16,6 +16,8 @@ use uuid::Uuid;
 
 use crate::db::{content_body, content_graph, generation_ingest};
 use crate::plugins;
+use crate::services::chunker::character::CharacterChunker;
+use crate::services::chunker::Chunker;
 use crate::services::content_store::{
     BodyCodec, BodyIdentity, DictionaryIdentity, PackBuilder, PackEntry, PackReader,
 };
@@ -298,6 +300,7 @@ pub struct ReleaseCandidateVerifyResult {
     pub item_count: i64,
     pub verified_body_count: usize,
     pub verified_logical_bytes: u64,
+    pub lexical_segment_verification: serde_json::Value,
     pub intelligence_export: serde_json::Value,
     pub query_seeds: Vec<CandidateQuerySeed>,
     pub checks: BTreeMap<String, String>,
@@ -413,6 +416,22 @@ where
         .get(0);
     let expected_item_count: i64 = identity.get("expected_item_count");
     validate_candidate_source_state(&state, expected_item_count, active_generation_id)?;
+    let lexical_segment_verification: serde_json::Value = client
+        .query_one(
+            "SELECT storage_v2_verify_lexical_segments($1)",
+            &[&input.generation_id],
+        )
+        .await?
+        .get(0);
+    if lexical_segment_verification["schema_version"]
+        != "mainrag.storage-v2.lexical-segment-verification.v1"
+        || lexical_segment_verification["generation_id"] != input.generation_id
+        || lexical_segment_verification["occurrence_count"] != expected_item_count
+        || lexical_segment_verification["missing_count"] != 0
+        || lexical_segment_verification["invalid_count"] != 0
+    {
+        bail!("candidate lexical segment verification failed");
+    }
     let intelligence_export: serde_json::Value = client
         .query_one(
             "SELECT storage_v2_export_intelligence($1,$2,'public')",
@@ -434,6 +453,7 @@ where
         "intelligence",
         "intervals",
         "legacy_intelligence_export",
+        "lexical_segment_integrity",
     ] {
         checks.insert(check.to_string(), "PASS".to_string());
     }
@@ -453,6 +473,7 @@ where
         item_count: expected_item_count,
         verified_body_count: body_rows.len(),
         verified_logical_bytes,
+        lexical_segment_verification,
         intelligence_export,
         query_seeds,
         checks,
@@ -1466,6 +1487,58 @@ where
                 )
                 .await?
                 .get(0);
+            if mode == SliceMode::ReleaseCandidate {
+                let copied: i64 = client
+                    .query_one(
+                        "SELECT storage_v2_copy_legacy_lexical_segments($1, $2)",
+                        &[&staged.occurrence_id, &staged.artifact_version_id],
+                    )
+                    .await?
+                    .get(0);
+                if copied > 0 {
+                    measurements.lexical_segments_copied = measurements
+                        .lexical_segments_copied
+                        .checked_add(u64::try_from(copied)?)
+                        .context("lexical segment copy count overflow")?;
+                } else if !text.is_empty() {
+                    let chunks = CharacterChunker::default().chunk(text, language.as_deref());
+                    let complete =
+                        !chunks.is_empty() && chunks.iter().all(|chunk| text.contains(&chunk.text));
+                    if complete {
+                        for (index, chunk) in chunks.iter().enumerate() {
+                            let order = i64::try_from(index)?;
+                            client
+                                .execute(
+                                    "SELECT storage_v2_put_lexical_segment($1,$2,$3,$4,$5,$6)",
+                                    &[
+                                        &staged.occurrence_id,
+                                        &staged.artifact_version_id,
+                                        &order,
+                                        &chunk.text,
+                                        &chunk.context_prefix.as_deref().unwrap_or(""),
+                                        &chunk.chunk_type.to_string(),
+                                    ],
+                                )
+                                .await?;
+                        }
+                        measurements.lexical_segments_generated = measurements
+                            .lexical_segments_generated
+                            .checked_add(u64::try_from(chunks.len())?)
+                            .context("lexical segment count overflow")?;
+                    } else {
+                        client
+                            .execute(
+                                "SELECT storage_v2_put_lexical_segment($1,$2,0,$3,'','document')",
+                                &[&staged.occurrence_id, &staged.artifact_version_id, &text],
+                            )
+                            .await?;
+                        measurements.lexical_segments_generated = measurements
+                            .lexical_segments_generated
+                            .checked_add(1)
+                            .context("lexical segment count overflow")?;
+                    }
+                }
+            }
             for card in cards {
                 let generic = json!({
                     "name": card.name,

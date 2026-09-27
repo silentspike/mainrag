@@ -463,6 +463,23 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                                       "chunk_count": 0, "indexed_matches": 0, "literal_matches": 0}]}
         return seed, current, storage, evidence, checkpoint
 
+    def test_body_fts_segment_supports_parser_lexemes_without_sparse_posting(self) -> None:
+        seed, current, storage, proof, checkpoint = self.coverage_fixture()
+        proof["schema_version"] = "mainrag.storage-v2.query-coverage.v2"
+        proof["candidate"][0].update(reference_frequency=0, posting_frequency=0,
+                                     fts_body_matches=True, segment_matches=True)
+        self.assertTrue(MODULE.query_coverage_gates(
+            seed, current, storage, proof, checkpoint)["passed"])
+        for field in ("fts_body_matches", "segment_matches"):
+            invalid = copy.deepcopy(proof)
+            invalid["candidate"][0][field] = False
+            self.assertFalse(MODULE.query_coverage_gates(
+                seed, current, storage, invalid, checkpoint)["passed"])
+        invalid = copy.deepcopy(proof)
+        invalid["candidate"][0]["body_text_matches"] = False
+        self.assertFalse(MODULE.query_coverage_gates(
+            seed, current, storage, invalid, checkpoint)["passed"])
+
     def test_transport_failures_keep_completed_and_pending_proof_without_qualifying(self) -> None:
         seed, current, storage, proof, identity = self.coverage_fixture()
         # Include bodies to prove pending results do not copy full response content.

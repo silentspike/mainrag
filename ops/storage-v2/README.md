@@ -390,6 +390,21 @@ RLS and all activation, watermark, root, and receipt checks retained. Run 067
 as an administrator after 066 and before postactivation ingest. Verify direct
 API receipt writes are denied, the first verified ordinary ingest advances one
 pointer with a receipt, and a failed ingest leaves the old pointer unchanged.
+Migration 068 adds immutable, source-backed lexical segments for release
+candidate search. It copies legacy chunk boundaries and rank keys only when the
+legacy file hash and complete text equal the sealed artifact, and every chunk
+is an exact substring of the bound search document. Otherwise the candidate
+producer generates deterministic character segments from that document without
+requiring an embedding tokenizer. Verification recomputes each
+segment digest and FTS vector from the immutable text; candidate qualification
+requires a passing `lexical_segment_integrity` check. Exact and active search
+can use the projection for single-term PostgreSQL lexemes, including terms
+whose punctuation differs from sparse-posting tokenization. Query-coverage
+proof still requires a body match and a matching segment. Run 068 as an
+administrator after 067, then build a fresh candidate; existing candidates
+have no segment proof and must not be qualified under the new gate. Installation
+does not activate a candidate or alter the active pointer. Before installation,
+retain the current schema definition and database backup for rollback.
 `schema.sql` is a historical bootstrap and intentionally does not apply these
 administrator-only repairs. Do not run the API with an administrator account.
 
