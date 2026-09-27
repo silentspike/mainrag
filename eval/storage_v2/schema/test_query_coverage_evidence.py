@@ -510,6 +510,30 @@ SELECT id,'text',digest('alpha','sha256'),'','alpha','prefixonly',1,1
                           definition)
             self.assertNotIn("1000000.0 + staged.segment_score", definition)
 
+        # Fragmented source items can carry an extracted legacy chunk view
+        # that is not a contiguous substring of the sealed fragment.  Keep a
+        # source-bound immutable rank projection and use it only when the
+        # candidate body itself also matches the query.
+        self.file(schema.ROOT / "migrations/080_storage_v2_legacy_rank_projection.sql")
+        after_legacy_rank_projection = self.exact_search(
+            {"type": "term", "value": "foo"}, source_id=19)
+        self.assertEqual(
+            [row["occurrence_id"] for row in after_legacy_rank_projection["results"]],
+            [row["occurrence_id"] for row in after_rank_parity["results"]],
+        )
+        rank_definition = self.sql(
+            "SELECT pg_get_functiondef("
+            "'storage_v2_source_segment_ranks(bigint[],text)'::regprocedure)")
+        self.assertIn("storage_v2_legacy_lexical_segment", rank_definition)
+        self.assertIn("document.fts_simple @@ query.value", rank_definition)
+        for signature in (
+            "storage_v2_search_exact(bigint,text,jsonb,jsonb,bigint)",
+            "storage_v2_search_active_unchecked(text,jsonb,jsonb,bigint,bigint,boolean)",
+        ):
+            definition = self.sql(f"SELECT pg_get_functiondef('{signature}'::regprocedure)")
+            self.assertIn("CASE WHEN staged.segment_score >= 1000000.0", definition)
+            self.assertNotIn("1000000.0 + staged.segment_score", definition)
+
         known_occurrence = fixture_ids["/synthetic/known.txt"]
         known_artifact = int(self.sql("SELECT artifact_version_id FROM occurrence "
                                       f"WHERE id={known_occurrence}"))
@@ -523,6 +547,8 @@ SELECT id,'text',digest('alpha','sha256'),'','alpha','prefixonly',1,1
         self.assertEqual(self.sql(self.admin(copy_batch)), "2")
         self.assertEqual(self.sql(self.admin(copy_batch)), "2")
         self.assertEqual(self.sql(f"SELECT count(*) FROM storage_v2_lexical_segment "
+                                  f"WHERE occurrence_id={known_occurrence}"), "2")
+        self.assertEqual(self.sql(f"SELECT count(*) FROM storage_v2_legacy_lexical_segment "
                                   f"WHERE occurrence_id={known_occurrence}"), "2")
         self.sql(f"DELETE FROM chunks WHERE id={context_chunk}")
         self.assertEqual(self.sql(self.admin(rank_query)).splitlines(),
