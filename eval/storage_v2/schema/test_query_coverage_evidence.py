@@ -414,3 +414,25 @@ SELECT id,'text',digest('alpha','sha256'),'','alpha','prefixonly',1,1
         self.assertFalse(context_evidence["candidate"][0]["fts_body_matches"])
         self.assertTrue(context_evidence["candidate"][0]["segment_matches"])
         self.assertTrue(context_evidence["candidate"][0]["legacy_segment_matches"])
+
+        # A new generated segment may match the same query. Its order-zero
+        # marker must keep it behind the copied legacy chunk, even after the
+        # legacy chunk row is removed from the fixture database.
+        _, fixture_ids, _ = self.fixture()
+        generated_occurrence = fixture_ids["/synthetic/new.txt"]
+        generated_artifact = int(self.sql(
+            "SELECT artifact_version_id FROM occurrence "
+            f"WHERE id={generated_occurrence}"))
+        self.sql(self.admin(
+            f"SELECT storage_v2_put_lexical_segment({generated_occurrence},"
+            f"{generated_artifact},0,'alpha visible','','text')"))
+        self.file(schema.ROOT / "migrations/076_storage_v2_copied_segment_rank_tier.sql")
+        rank_query = (
+            "SELECT occurrence_id FROM storage_v2_source_segment_ranks("
+            f"ARRAY[{generated_occurrence},{context_occurrence}]::BIGINT[],'alpha') "
+            "ORDER BY score DESC")
+        self.assertEqual(self.sql(self.admin(rank_query)).splitlines(),
+                         [str(context_occurrence), str(generated_occurrence)])
+        self.sql(f"DELETE FROM chunks WHERE id={context_chunk}")
+        self.assertEqual(self.sql(self.admin(rank_query)).splitlines(),
+                         [str(context_occurrence), str(generated_occurrence)])
