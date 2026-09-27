@@ -216,6 +216,13 @@ SELECT id,'text',digest('foo_3d alpha','sha256'),'','foo_3d alpha',1,1
         self.assertEqual(self.exact_search(conjunction, source_id=19), before_conjunction)
         self.assertEqual(self.exact_search(
             {"type": "term", "value": "3d"}, source_id=19), before_term)
+        premature_presence = self.command(
+            "--file", str(schema.ROOT / "migrations/073_storage_v2_set_based_segment_presence.sql"),
+            check=False,
+        )
+        self.assertNotEqual(premature_presence.returncode, 0)
+        self.assertIn("set authorization must precede set presence",
+                      premature_presence.stderr)
         self.file(schema.ROOT / "migrations/072_storage_v2_segment_authorization_set.sql")
         self.assertEqual(self.exact_search(conjunction, source_id=19), before_conjunction)
         self.assertEqual(self.exact_search(

@@ -2,6 +2,22 @@
 -- projection from a projected occurrence whose segments do not match. Gather
 -- presence once for the scoped set; a per-occurrence helper call would repeat
 -- the authorized-source RLS subplan for every candidate row.
+DO $$
+BEGIN
+    IF pg_get_expr(
+        (SELECT polqual FROM pg_policy
+          WHERE polrelid = 'storage_v2_lexical_segment'::REGCLASS
+            AND polname = 'storage_v2_lexical_segment_source'),
+        'storage_v2_lexical_segment'::REGCLASS
+    ) = 'storage_v2_can_access_source(source_id, ''read''::text)'
+       OR strpos(pg_get_functiondef(
+           'storage_v2_source_segment_ranks(bigint[],text)'::REGPROCEDURE
+       ), 'authorized_source AS MATERIALIZED') = 0 THEN
+        RAISE EXCEPTION 'storage-v2 set authorization must precede set presence';
+    END IF;
+END
+$$;
+
 CREATE FUNCTION storage_v2_source_segment_presence(
     p_occurrence_ids BIGINT[]
 ) RETURNS TABLE(occurrence_id BIGINT)
