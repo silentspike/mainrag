@@ -9,11 +9,14 @@ import importlib.util
 import json
 import os
 import re
+import runpy
 import sys
 import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+load_token = runpy.run_path(str(Path(__file__).with_name("operator_token.py")))["load_token"]
 
 
 def sibling(name: str, module_name: str):
@@ -282,6 +285,7 @@ def main() -> int:
     parser.add_argument("--local-postgres", action="store_true")
     parser.add_argument("--api-url", default="http://127.0.0.1:3001")
     parser.add_argument("--token-env", default="MAINRAG_TOKEN")
+    parser.add_argument("--token-file", type=Path)
     parser.add_argument("--baseline-audit", type=Path, required=True)
     parser.add_argument("--baseline-audit-sha256", required=True)
     parser.add_argument("--preflight", type=Path, required=True)
@@ -306,9 +310,10 @@ def main() -> int:
         "plan", "plan_sha256", "receipts", "receipts_sha256",
     )):
         parser.error("finalize requires exact plan and qualification receipt digests")
-    token = os.environ.get(args.token_env)
-    if not token:
-        parser.error("API token environment variable is empty")
+    try:
+        token = load_token(args.token_file, args.token_env)
+    except RuntimeError as error:
+        parser.error(str(error))
     try:
         binary = Path("/opt/mainrag/api/mainrag-api")
         if binary.is_symlink() or not binary.is_file() \

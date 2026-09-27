@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import runpy
 import shutil
 import stat
 import struct
@@ -22,6 +23,8 @@ import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
+
+load_token = runpy.run_path(str(Path(__file__).with_name("operator_token.py")))["load_token"]
 
 
 CHECKS = (
@@ -997,6 +1000,7 @@ def main() -> int:
     parser.add_argument("phase", choices=("build", "verify"))
     parser.add_argument("--api-url", default="http://127.0.0.1:3001")
     parser.add_argument("--token-env", default="MAINRAG_TOKEN")
+    parser.add_argument("--token-file", type=Path)
     parser.add_argument("--source-id", type=int, required=True)
     parser.add_argument("--commit-sha", required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
@@ -1021,9 +1025,10 @@ def main() -> int:
         parser.error("build requires a positive --maximum-build-bytes estimate")
     if arguments.minimum_free_bytes < 0:
         parser.error("--minimum-free-bytes must be non-negative")
-    token = os.environ.get(arguments.token_env)
-    if not token:
-        parser.error(f"token environment variable {arguments.token_env} is empty")
+    try:
+        token = load_token(arguments.token_file, arguments.token_env)
+    except RuntimeError as error:
+        parser.error(str(error))
     (build if arguments.phase == "build" else verify)(arguments, token)
     return 0
 
