@@ -696,6 +696,10 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                              MODULE.sha256_text(json.dumps(proof, sort_keys=True)))
             self.assertEqual(dual_request["query_set_sha256"], MODULE.query_set_sha256(comparisons))
             manifest = calls[10].args[4]["manifest"]
+            self.assertEqual(
+                [item["id"] for item in manifest["query_results"]],
+                [item["fixture"]["id"] for item in comparisons],
+            )
             evidence_id = calls[10].args[4]["evidence_id"]
             self.assertEqual(uuid.UUID(evidence_id).version, 4)
             self.assertEqual(manifest["query_coverage_sha256"],
