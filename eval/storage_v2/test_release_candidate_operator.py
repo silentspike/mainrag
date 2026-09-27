@@ -66,6 +66,51 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "private regular file"):
                 MODULE.load_gold_suite(arguments, checkpoint, verified)
 
+    def test_snapshot_gold_review_binds_frozen_cases_and_same_byte_expectations(self) -> None:
+        checkpoint = {"source_id": 1, "generation_id": 2, "commit_sha": "a" * 40,
+                      "source_watermark_sha256": "b" * 64}
+        verified = {"adapter_profile_id": "adapter", "analysis_profile_id": "analysis",
+                    "search_profile_id": "search"}
+        cases = [{"id": "1" * 64, "query": "positive query",
+                  "expected_path_sha256": "c" * 64, "expects_match": True},
+                 {"id": "2" * 64, "query": "negative query",
+                  "expected_path_sha256": "0" * 64, "expects_match": False}]
+        source_review = {"source_id": 1, "captured_at_unix": 10,
+                         "review_sha256": "d" * 64,
+                         "paths": {"c" * 64: {"status": "same_bytes"}}}
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            review = {"source_id": 1, "source_type": "fs",
+                      "source_class": "fixture-class",
+                      "source_snapshot_review_sha256": "d" * 64,
+                      "reviewed_at_unix": 11, "cases": cases}
+            review_path = directory / "gold-review.json"
+            MODULE.atomic_private_json(review_path, review, replace=False)
+            review_digest = MODULE.hashlib.sha256(review_path.read_bytes()).hexdigest()
+            suite_path, _ = self.write_gold_suite(directory, checkpoint, verified, cases)
+            suite = json.loads(suite_path.read_text())
+            suite["source_snapshot_review_sha256"] = "d" * 64
+            suite["source_snapshot_gold_review_sha256"] = review_digest
+            suite_path.unlink()
+            MODULE.atomic_private_json(suite_path, suite, replace=False)
+            arguments = Namespace(gold_suite=suite_path,
+                                  expected_gold_suite_sha256=MODULE.hashlib.sha256(
+                                      suite_path.read_bytes()).hexdigest(),
+                                  source_snapshot_gold_review=review_path)
+            loaded, summary = MODULE.load_gold_suite(arguments, checkpoint, verified,
+                                                     source_review)
+            self.assertEqual(loaded, cases)
+            self.assertEqual(summary["source_snapshot_gold_review_sha256"], review_digest)
+            source_review["paths"]["c" * 64]["status"] = "changed_bytes"
+            with self.assertRaisesRegex(RuntimeError, "same-byte source path"):
+                MODULE.load_gold_suite(arguments, checkpoint, verified, source_review)
+            source_review["paths"]["c" * 64]["status"] = "same_bytes"
+            arguments.source_snapshot_gold_review = directory / "wrong-review.json"
+            MODULE.atomic_private_json(arguments.source_snapshot_gold_review,
+                                       {**review, "cases": []}, replace=False)
+            with self.assertRaisesRegex(RuntimeError, "digest differs"):
+                MODULE.load_gold_suite(arguments, checkpoint, verified, source_review)
+
     def test_build_uses_unpredictable_public_source_reference(self) -> None:
         result = {"active_generation_before": None, "active_generation_after": None,
                   "item_count": 1, "generation_id": 2, "generation_seq": 1,
@@ -507,6 +552,44 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
         del invalid["candidate"][0]["legacy_segment_matches"]
         self.assertFalse(MODULE.query_coverage_gates(
             seed, current, storage, invalid, checkpoint)["passed"])
+
+    def test_source_snapshot_review_preserves_same_byte_recall_only(self) -> None:
+        seed, current, storage, proof, checkpoint = self.coverage_fixture()
+        proof["schema_version"] = "mainrag.storage-v2.query-coverage.v4"
+        for hit in proof["candidate"]:
+            hit.update(fts_body_matches=True, segment_matches=True,
+                       legacy_segment_matches=False)
+        stale = {**current["results"][0], "chunk_id": 2, "file_path": "stale.txt"}
+        current["results"].append(stale)
+        stale_sha = MODULE.sha256_text(stale["file_path"])
+        proof["current"].append({"chunk_id": 2, "path_sha256": stale_sha,
+                                 "indexed_match": True})
+        proof["legacy_paths"].append({"path_sha256": stale_sha, "chunk_count": 1,
+                                      "indexed_matches": 1, "literal_matches": 1})
+        checkpoint["source_watermark_sha256"] = "c" * 64
+        review = {"source_id": checkpoint["source_id"],
+                  "source_watermark_sha256": checkpoint["source_watermark_sha256"],
+                  "review_sha256": "d" * 64,
+                  "paths": {MODULE.sha256_text("fixture.txt"): {"status": "same_bytes"},
+                            stale_sha: {"status": "changed_bytes"}}}
+        self.assertFalse(MODULE.query_coverage_gates(
+            seed, current, storage, proof, checkpoint)["passed"])
+        accepted = MODULE.query_coverage_gates(
+            seed, current, storage, proof, checkpoint, review)
+        self.assertTrue(accepted["passed"])
+        self.assertEqual(accepted["policy"], "simple-conjunction-source-snapshot-v1")
+        self.assertEqual(accepted["stale_baseline_path_count"], 1)
+        stale_review = copy.deepcopy(review)
+        stale_review["paths"][stale_sha]["status"] = "same_bytes"
+        self.assertFalse(MODULE.query_coverage_gates(
+            seed, current, storage, proof, checkpoint, stale_review)["passed"])
+        stale_seed = {**seed, "expected_path_sha256": stale_sha}
+        self.assertFalse(MODULE.query_coverage_gates(
+            stale_seed, current, storage, proof, checkpoint, review)["passed"])
+        stale_review = copy.deepcopy(review)
+        stale_review["source_watermark_sha256"] = "e" * 64
+        self.assertFalse(MODULE.query_coverage_gates(
+            seed, current, storage, proof, checkpoint, stale_review)["passed"])
 
     def test_restart_waits_for_authenticated_readback(self) -> None:
         unavailable = urllib.error.URLError(ConnectionRefusedError())
