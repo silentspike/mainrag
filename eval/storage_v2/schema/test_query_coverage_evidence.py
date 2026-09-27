@@ -302,3 +302,46 @@ SELECT id,'text',digest('foo_3d alpha','sha256'),'','foo_3d alpha',1,1
             "'','text',to_tsvector('simple','x'))",
             "permission denied",
         )
+
+        # A chunk boundary can turn a substring into a lexeme even when the
+        # complete source document has no such lexeme. The sealed slice and
+        # current chunk agree; the whole-document FTS prefilter must not veto it.
+        boundary_chunk = int(self.sql("""
+INSERT INTO chunks(file_id,chunk_type,content_hash,content_compressed,
+                   content_text,context_prefix,start_line,end_line)
+SELECT id,'text',digest('oo','sha256'),'','oo','oo oo',1,1
+  FROM files WHERE source_id=19 AND path='/synthetic/lexeme.txt'
+RETURNING id;
+"""))
+        self.sql(self.admin(
+            f"SELECT storage_v2_put_lexical_segment({occurrence},{artifact},"
+            f"{boundary_chunk},'oo','oo oo','text')"))
+        self.assertEqual(self.sql(
+            "SELECT to_tsvector('simple','foo_3d alpha') @@ "
+            "websearch_to_tsquery('simple','oo')"), "f")
+        self.assertEqual(self.exact_search(
+            {"type": "term", "value": "oo"}, source_id=19)["results"], [])
+        self.file(schema.ROOT / "migrations/074_storage_v2_source_segment_boundary_parity.sql")
+        self.assertEqual(self.sql(
+            "SELECT count(*) FROM storage_v2_lexical_segment WHERE rank_vector IS NULL"), "0")
+        self.sql(self.admin(
+            f"SELECT storage_v2_put_lexical_segment({occurrence},{artifact},"
+            f"{boundary_chunk},'oo','oo oo','text')"))
+        self.assertEqual(json.loads(self.sql(self.admin(
+            f"SELECT storage_v2_verify_lexical_segments({generation})")))["invalid_count"], 0)
+        boundary_result = self.exact_search(
+            {"type": "term", "value": "oo"}, source_id=19)
+        self.assertEqual([row["occurrence_id"] for row in boundary_result["results"]],
+                         [occurrence])
+        boundary_legacy_score = float(self.sql(
+            "SELECT ts_rank_cd(fts_vector,websearch_to_tsquery('simple','oo')) "
+            f"FROM chunks WHERE id={boundary_chunk}"))
+        boundary_segment_score = float(self.sql(self.admin(
+            f"SELECT score FROM storage_v2_source_segment_rank({occurrence},'oo')")))
+        self.assertAlmostEqual(boundary_segment_score, boundary_legacy_score, places=6)
+        boundary_evidence = json.loads(self.sql(self.admin(
+            f"SELECT storage_v2_candidate_query_evidence(19,{generation},'{COMMIT}',"
+            f"'oo',ARRAY[{occurrence}]::BIGINT[],ARRAY[{boundary_chunk}]::BIGINT[])")))
+        self.assertTrue(boundary_evidence["candidate"][0]["body_text_matches"])
+        self.assertTrue(boundary_evidence["candidate"][0]["fts_body_matches"])
+        self.assertTrue(boundary_evidence["candidate"][0]["segment_matches"])

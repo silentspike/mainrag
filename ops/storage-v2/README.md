@@ -598,8 +598,19 @@ locale. The proof endpoint supports one to eight plain
 alphanumeric/underscore terms up to 128 UTF-8 bytes and at most ten unique
 identities per retrieval path.
 
-Every legacy Top-10 path must remain in the candidate Top-10 in the same relative
-order, and the seed's expected path must be present. Every candidate hit must
+Source-backed lexical search evaluates sealed segment slices with the current
+chunk FTS weights. It does not require the whole-document vector to match:
+tokenization at a chunk boundary can produce a valid chunk lexeme absent from
+the complete document vector. The evidence fallback verifies that the matching
+slice still hashes to the immutable segment witness. This keeps copied legacy
+chunk rank comparable without reading legacy chunks during search or proof.
+The legacy-weight vector is materialized once with each immutable segment,
+backfilled for existing candidates, indexed, and checked during generation
+verification; query-time search does not rebuild it from document text.
+
+Every distinct legacy Top-10 path must remain in the candidate Top-10 in the
+same relative order, and the seed's expected path must be present. Repeated
+chunk hits from one legacy file count as one path. Every candidate hit must
 have positive body support. Negative seeds still require both result sets to be
 empty. Additional paths are classified using legacy chunk counts, FTS matches,
 and independent literal matches as not indexed, lexical projection gaps, content
