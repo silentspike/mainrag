@@ -383,12 +383,15 @@ the runtime owner does not inherit frontier ownership or direct write rights.
 Run 066 in one transaction after 065 and before another candidate build. Check
 the two frontier table and publisher owners, API `SELECT`/`EXECUTE` rights,
 denied direct API writes, and successful publication from a verified run.
-`schema.sql` is a historical bootstrap and intentionally does not apply this
-administrator-only repair. Do not run the API with an administrator account.
-
-The active ingest receipt in migration 065 has the same owner/revocation
-contradiction. Its correction is required before regular postactivation ingest;
-installing 066 alone does not qualify that path.
+Migration 067 applies the same owner separation to the active-ingest receipt
+and its controlled pointer-advance function. It permits that dedicated definer
+to update `logical_source` and `source_generation` through their guard, with
+RLS and all activation, watermark, root, and receipt checks retained. Run 067
+as an administrator after 066 and before postactivation ingest. Verify direct
+API receipt writes are denied, the first verified ordinary ingest advances one
+pointer with a receipt, and a failed ingest leaves the old pointer unchanged.
+`schema.sql` is a historical bootstrap and intentionally does not apply these
+administrator-only repairs. Do not run the API with an administrator account.
 
 ## Source release candidates
 
