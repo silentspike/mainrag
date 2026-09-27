@@ -234,14 +234,21 @@ pub struct CandidateQueryEvidenceInput {
 }
 
 fn validate_candidate_query_evidence(input: &CandidateQueryEvidenceInput) -> Result<()> {
+    let terms: Vec<&str> = input.query.split(' ').collect();
     if input.generation_id <= 0
         || !is_git_sha(&input.commit_sha)
-        || input.query.is_empty()
         || input.query.len() > 128
-        || !input
-            .query
-            .chars()
-            .all(|character| character.is_alphanumeric() || character == '_')
+        || terms.is_empty()
+        || terms.len() > 8
+        || terms.iter().any(|term| {
+            term.is_empty()
+                || ["and", "or", "not"]
+                    .iter()
+                    .any(|operator| term.eq_ignore_ascii_case(operator))
+                || !term
+                    .chars()
+                    .all(|character| character.is_alphanumeric() || character == '_')
+        })
         || [&input.candidate_occurrence_ids, &input.current_chunk_ids]
             .into_iter()
             .any(|ids| {
@@ -250,7 +257,7 @@ fn validate_candidate_query_evidence(input: &CandidateQueryEvidenceInput) -> Res
                     || ids.iter().collect::<BTreeSet<_>>().len() != ids.len()
             })
     {
-        bail!("candidate query evidence requires a named generation, commit, literal term and bounded unique hit IDs");
+        bail!("candidate query evidence requires a named generation, commit, simple conjunction and bounded unique hit IDs");
     }
     Ok(())
 }
@@ -2275,7 +2282,32 @@ where
         }
     }
     let mut seeds = Vec::new();
+    let mut top_paths_by_query: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut selected_queries = BTreeSet::new();
     for (query, path) in candidates {
+        if selected_queries.contains(&query) {
+            continue;
+        }
+        if !top_paths_by_query.contains_key(&query) {
+            let top_paths = client
+                .query(
+                    "SELECT file.path FROM chunks chunk \
+                     JOIN files file ON file.id=chunk.file_id \
+                     WHERE file.source_id=$1 \
+                       AND chunk.fts_vector @@ websearch_to_tsquery('simple',$2) \
+                     ORDER BY ts_rank_cd(chunk.fts_vector, \
+                         websearch_to_tsquery('simple',$2)) DESC, chunk.id ASC LIMIT 10",
+                    &[&source_id, &query],
+                )
+                .await?
+                .into_iter()
+                .map(|row| row.get::<_, String>(0))
+                .collect();
+            top_paths_by_query.insert(query.clone(), top_paths);
+        }
+        if !top_paths_by_query[&query].contains(&path) {
+            continue;
+        }
         let found = client
             .query_one(
                 "SELECT EXISTS ( \
@@ -2301,6 +2333,7 @@ where
         if !found {
             continue;
         }
+        selected_queries.insert(query.clone());
         let expected_path_sha256 = hex::encode(Sha256::digest(path.as_bytes()));
         let id = hex::encode(Sha256::digest(
             format!("mainrag.storage-v2.query-seed.v1\0{query}\0{expected_path_sha256}").as_bytes(),
@@ -2861,7 +2894,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_query_evidence_input_is_bounded_and_literal() {
+    fn candidate_query_evidence_input_is_bounded_and_simple() {
         let input = CandidateQueryEvidenceInput {
             generation_id: 1,
             commit_sha: "a".repeat(40),
@@ -2870,11 +2903,17 @@ mod tests {
             current_chunk_ids: vec![1, 3],
         };
         assert!(validate_candidate_query_evidence(&input).is_ok());
+        let mut conjunction = input.clone();
+        conjunction.query = "alpha beta".into();
+        assert!(validate_candidate_query_evidence(&conjunction).is_ok());
         for query in [
             "",
-            "alpha beta",
-            "id:alpha",
+            "alpha  beta",
+            " alpha beta",
+            "alpha beta ",
+            "a b c d e f g h i",
             "alpha OR beta",
+            "id:alpha",
             "\"alpha\"",
             "alpha.*",
         ] {

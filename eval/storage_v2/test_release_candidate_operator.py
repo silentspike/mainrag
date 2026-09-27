@@ -479,6 +479,22 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
         invalid["candidate"][0]["body_text_matches"] = False
         self.assertFalse(MODULE.query_coverage_gates(
             seed, current, storage, invalid, checkpoint)["passed"])
+        proof["schema_version"] = "mainrag.storage-v2.query-coverage.v3"
+        seed["query"] = "private query"
+        proof["query_sha256"] = MODULE.sha256_text(seed["query"])
+        self.assertTrue(MODULE.query_coverage_gates(
+            seed, current, storage, proof, checkpoint)["passed"])
+
+    def test_restart_waits_for_authenticated_readback(self) -> None:
+        unavailable = urllib.error.URLError(ConnectionRefusedError())
+        with patch.object(MODULE, "source_state", side_effect=[
+            unavailable, {"server_instance_id": "before"}, {"server_instance_id": "after"},
+        ]) as state, patch.object(MODULE.time, "sleep") as sleep:
+            result = MODULE.restarted_source_state("http://fixture.invalid", "private-token", 1, 2,
+                                                   "before")
+        self.assertEqual(result["server_instance_id"], "after")
+        self.assertEqual(state.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
 
     def test_transport_failures_keep_completed_and_pending_proof_without_qualifying(self) -> None:
         seed, current, storage, proof, identity = self.coverage_fixture()
@@ -519,6 +535,7 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                      patch.object(MODULE, "load_gold_suite", return_value=([], {})), \
                      patch.object(MODULE, "validate_telemetry"), \
                      patch.object(MODULE, "verify_intelligence", return_value=intelligence), \
+                     patch.object(MODULE, "candidate_proof", return_value=([], {})), \
                      patch.object(MODULE, "request", side_effect=replies) as request:
                     with self.assertRaises(RuntimeError) as caught:
                         MODULE.verify(arguments, "private-token")
@@ -564,7 +581,8 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
             directory = Path(temporary)
             arguments = Namespace(checkpoint=directory / "checkpoint.json", output=directory / "result.json",
                                   source_id=1, commit_sha="a" * 40, api_url="http://fixture.invalid")
-            checkpoint = {"source_id": 1, "commit_sha": "a" * 40, "generation_seq": 1}
+            checkpoint = {"source_id": 1, "commit_sha": "a" * 40,
+                          "generation_seq": 1, "server_instance_id": "before"}
             MODULE.atomic_private_json(arguments.checkpoint, checkpoint)
             with patch.object(MODULE, "source_state", side_effect=RuntimeError("private-token")), \
                  patch.object(MODULE, "request") as request:
@@ -647,7 +665,7 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
             arguments = Namespace(checkpoint=directory / "checkpoint.json",
                                   output=directory / "result.json", source_id=1,
                                   commit_sha="a" * 40, api_url="http://fixture.invalid",
-                                  max_query_ms=2000, pack_root=directory, minimum_free_bytes=0)
+                                  max_query_ms=2000, pack_root=directory, minimum_free_bytes=1)
             checkpoint = {**identity, "source_ref": "b" * 64, "item_count": 2,
                           "source_watermark_sha256": "c" * 64, "active_generation_id": None,
                           "server_instance_id": "before", "build": {"fixture_sha256": "d" * 64}}
@@ -659,19 +677,22 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                         "adapter_profile_id": "fixture-adapter", "analysis_profile_id": "fixture-analysis",
                         "search_profile_id": "fixture-search"}
             dual = {"status": "PASS", "artifact": {"unexplained_count": 0},
-                    "evidence_id": "fixture-evidence", "artifact_sha256": "e" * 64}
+                    "evidence_id": "00000000-0000-4000-8000-000000000001",
+                    "artifact_sha256": "e" * 64}
             qualified = {**identity, "status": "release_candidate", "evidence_id": "fixture-qualified",
                          "active_generation_id": None}
-            positive = {"id": seed["id"], "query": "reviewed positive query",
+            positive = {"id": seed["id"], "query": "\"reviewed positive query\"",
                         "expected_path_sha256": MODULE.sha256_text("fixture.txt"), "expects_match": True}
-            negative = {"id": "2" * 64, "query": "reviewed negative query",
+            negative = {"id": "2" * 64, "query": "\"reviewed negative query\"",
                         "expected_path_sha256": "0" * 64, "expects_match": False}
             arguments.gold_suite, arguments.expected_gold_suite_sha256 = self.write_gold_suite(
                 directory, checkpoint, verified, [positive, negative])
             empty = {"results": [], "took_ms": 1}
             with patch.object(MODULE, "source_state", return_value={"server_instance_id": "after"}), \
                  patch.object(MODULE, "validate_telemetry"), \
-                 patch.object(MODULE, "verify_intelligence", return_value={}), \
+                 patch.object(MODULE, "verify_intelligence", return_value={
+                     "applicability": "unknown_not_applicable", "commands": [],
+                 }), \
                  patch.object(MODULE, "publish_telemetry"), patch("builtins.print"), \
                  patch.object(MODULE, "request", side_effect=[repeated, verified, current, storage,
                                                              proof, current, current, empty, empty,
@@ -733,10 +754,10 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                         "query_seeds": [seed], "checks": {key: "PASS" for key in MODULE.CHECKS},
                         "adapter_profile_id": "adapter", "analysis_profile_id": "analysis",
                         "search_profile_id": "search"}
-            cases = [{"id": "1" * 64, "query": "reviewed positive query",
+            cases = [{"id": "1" * 64, "query": "\"reviewed positive query\"",
                       "expected_path_sha256": MODULE.sha256_text("fixture.txt"),
                       "expects_match": True},
-                     {"id": "2" * 64, "query": "reviewed negative query",
+                     {"id": "2" * 64, "query": "\"reviewed negative query\"",
                       "expected_path_sha256": "0" * 64, "expects_match": False}]
             arguments.gold_suite, arguments.expected_gold_suite_sha256 = self.write_gold_suite(
                 directory, checkpoint, verified, cases)
