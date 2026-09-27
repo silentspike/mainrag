@@ -610,6 +610,14 @@ or rebuild the vector from document text. Qualification evidence may read a
 legacy chunk to prove that a context-only hit is an exact copied segment from
 the same-byte legacy file; it labels this separately from a body-text match.
 Install 075 after 074 and build fresh candidates for the corrected package.
+Migration 076 gives copied legacy segments a rank tier ahead of generated
+segments for matching plain lexical queries. The copied segment keeps its
+original FTS vector and chunk-order tie key; generated segment sets carry an
+order-zero marker. The rank tier uses only immutable candidate segments, so
+named and active search retain their ordering after legacy chunk cleanup.
+Generated scores are capped below the copied tier; copied scores keep their
+uncapped relative order.
+Install 076 after 075 and qualify candidates against its exact package.
 
 Every distinct legacy Top-10 path must remain in the candidate Top-10 in the
 same relative order, and the seed's expected path must be present. Repeated
