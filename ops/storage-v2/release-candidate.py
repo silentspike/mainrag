@@ -543,8 +543,8 @@ def query_difference_diagnostics(seed: dict[str, Any], current: dict[str, Any],
         if baseline or candidate:
             reasons.append("unexpected_negative_case_hits")
     missing = len(baseline_set - candidate_set)
-    common_order_equal = ([path for path in baseline if path in candidate_set]
-                          == [path for path in candidate if path in baseline_set])
+    common_order_equal = (list(dict.fromkeys(path for path in baseline if path in candidate_set))
+                          == list(dict.fromkeys(path for path in candidate if path in baseline_set)))
     if missing:
         reasons.append("baseline_paths_missing_from_top_k")
     if not common_order_equal:
@@ -713,11 +713,12 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
                 or row["indexed_matches"] > row["chunk_count"] \
                 or row["literal_matches"] > row["chunk_count"]:
             return failed
-    # Added, independently supported paths may not displace a baseline path or
-    # reorder the retained baseline. They are relevant gold hits, not negatives
-    # merely because the legacy index omitted their document or lexical text.
-    retained = [path for path in storage_paths if path in set(current_paths)]
-    positive = (seed["expected_path_sha256"] in storage_paths and retained == current_paths)
+    # One legacy source path can produce several chunk hits. Compare ordered
+    # paths once each; every distinct baseline path still has to remain in the
+    # candidate Top-10 and retain its relative order.
+    baseline_paths = list(dict.fromkeys(current_paths))
+    retained = list(dict.fromkeys(path for path in storage_paths if path in set(baseline_paths)))
+    positive = (seed["expected_path_sha256"] in storage_paths and retained == baseline_paths)
     negative = not current["results"] and not storage["results"]
     classes: dict[str, int] = {}
     for path in set(storage_paths) - set(current_paths):
@@ -733,7 +734,7 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
             "policy": policy,
             "all_candidate_hits_supported": True,
             "all_current_hits_supported": True,
-            "baseline_paths_retained_in_order": retained == current_paths,
+            "baseline_paths_retained_in_order": retained == baseline_paths,
             "additional_path_classes": classes}
 
 
