@@ -99,6 +99,35 @@ class CandidateAggregateAuditTests(unittest.TestCase):
         for private in ("private-source-name", "/private/source-path", '"source_id"'):
             self.assertNotIn(private, serialized)
 
+    def test_source_snapshot_review_is_checked_by_the_aggregate(self) -> None:
+        reviewed = source(1)
+        candidate = reviewed["generations"][0]
+        manifest = candidate["qualification_manifest"]
+        manifest["source_snapshot_review"] = {
+            "review_sha256": "1" * 64,
+            "source_watermark_sha256": candidate["source_watermark_sha256"],
+            "status_counts": {"same_bytes": 1, "changed_bytes": 1},
+        }
+        manifest["gold_suite_summary"]["source_snapshot_review_sha256"] = "1" * 64
+        manifest["gold_suite_summary"]["source_snapshot_gold_review_sha256"] = "3" * 64
+        for query in manifest["query_results"]:
+            query["coverage"] = {
+                "passed": True, "policy": "simple-conjunction-source-snapshot-v1",
+                "source_snapshot_review_sha256": "1" * 64,
+                "baseline_paths_retained_in_order": True,
+                "all_candidate_hits_supported": True,
+                "all_current_hits_supported": True,
+                "same_byte_baseline_path_count": 1,
+                "stale_baseline_path_count": 1,
+            }
+        inventory = self.inventory(reviewed, source(2, benchmark=True))
+        good, _ = AUDIT.audit(inventory, "e" * 64)
+        self.assertTrue(good["persisted_candidate_set_complete"])
+        manifest["query_results"][0]["coverage"]["source_snapshot_review_sha256"] = "2" * 64
+        bad, _ = AUDIT.audit(inventory, "e" * 64)
+        self.assertEqual(bad["persisted_gate_blockers"],
+                         {"source_snapshot_query_contract_invalid": 1})
+
     def test_final_mixed_commit_map_binds_source_local_candidate_commits(self) -> None:
         first = source(1)
         second = source(2, benchmark=True)

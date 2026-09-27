@@ -633,6 +633,26 @@ additional hit. This literal coverage policy does not establish phrase, Boolean,
 semantic, or general relevance quality; the broader benchmark gates remain
 separate. Query seeds are not removed or replaced to make this policy pass.
 
+For a filesystem source whose legacy rows refer to changed or removed source
+files, capture `source-snapshot-review.py` before freezing the gold suite. The
+review hashes every registered legacy file against the current source root and
+checks the read-only release-adapter watermark before and after that scan. It
+stores only path/content hashes and byte states in a protected file. Freeze a
+private gold review whose cases match the suite, then bind both review hashes
+into the suite as `source_snapshot_review_sha256` and
+`source_snapshot_gold_review_sha256`. Pass both protected reviews to
+`release-candidate.py verify` with `--source-snapshot-review`,
+`--source-snapshot-review-sha256`, and `--source-snapshot-gold-review`. Verification
+requires the same live watermark before and after the query set. Only paths
+proved to have identical bytes retain the ordered legacy Top-10 requirement;
+changed or missing paths are classified separately. A positive gold expectation
+pointing to a changed or missing legacy file still fails and must be reviewed
+and frozen before the run. Without this review the strict legacy comparison
+continues to apply. The review digest, watermark, per-query classification,
+and gold binding enter the immutable qualification manifest and aggregate
+audit. The source review does not exempt a candidate hit from the independent
+query-coverage proof.
+
 Filesystem discovery for this command returns metadata and file paths rather
 than retaining the entire corpus. Files above one MiB are split into
 deterministic, contiguous, UTF-8-aligned byte ranges of no more than one MiB
