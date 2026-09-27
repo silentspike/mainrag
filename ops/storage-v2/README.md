@@ -810,3 +810,36 @@ This capture has status `OBSERVED_ONLY`. It does not produce an approved cleanup
 manifest, verify body/pack integrity, authorize GC, remove runtime callers, or
 provide an apply path. Accepted activation, fresh owner approval for an exact
 manifest, and post-cleanup verification remain separate gates.
+# Durable source batches
+
+`source-batch.py` runs one source at a time from a private, frozen JSON plan.
+Each source has an adapter, failure group, planned item count, and ordered
+steps. Supported steps are `source-review`, `candidate-build`,
+`candidate-reconstruct`, and `candidate-verify`. The plan binds an exact
+package commit, source IDs, step arguments, and create-only result paths. Keep
+the plan, state, logs, checkpoints, and qualification artifacts outside Git in
+a private directory. Run the normal preflight, backup, writer, and resource
+gates before starting or resuming the batch.
+
+`run --plan PLAN --state STATE` persists phase transitions and completed item
+counts. `status --state STATE` reports phase progress. `stop --state STATE`
+requests a stop after the currently running source; `run --resume --plan PLAN
+--state STATE` clears that request and continues the same frozen plan. A
+failed source blocks later sources in its failure group while independent
+groups continue. A phase left running after a process crash requires explicit
+reconciliation; the operator does not retry a possible write automatically.
+`reconcile --plan PLAN --state STATE --source-id ID --step-name NAME --outcome
+passed|retry --evidence-file EVIDENCE` binds the decision to a private
+evidence digest. A passed result is rechecked against source and package
+identity. A retry requires no result at the original path. Preserve failed
+artifacts and create a new plan for a changed package or result location.
+
+When a local build checkpoint was lost, `reconstruct-candidate-checkpoint.py`
+can recover it from a verified generation's immutable build witness, sealed
+ingest run, matching adapter observation, and a subsequent API process start.
+For a slow live watermark read, the observation can be a digest-bound protected
+source review; qualification then requires that exact review and rechecks the
+live watermark. The recovered checkpoint retains the original build commit
+and marks the missing original capacity observation explicitly. Qualification
+still rechecks current resource reserve, generation identity, restart, search,
+intelligence, integrity, and source drift before promotion.

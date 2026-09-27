@@ -433,6 +433,48 @@ SELECT id,'text',digest('alpha','sha256'),'','alpha','prefixonly',1,1
             "ORDER BY score DESC")
         self.assertEqual(self.sql(self.admin(rank_query)).splitlines(),
                          [str(context_occurrence), str(generated_occurrence)])
+
+        # The batched writer must preserve the single-row identity and source
+        # authorization checks across idempotent and conflicting groups.
+        self.file(schema.ROOT / "migrations/077_storage_v2_batched_lexical_segments.sql")
+        self.sql("GRANT EXECUTE ON FUNCTION storage_v2_put_lexical_segments("
+                 "BIGINT,BIGINT,BIGINT[],TEXT[],TEXT[],TEXT[]) "
+                 "TO storage_v2_shadow_worker")
+        batch = (f"SELECT storage_v2_put_lexical_segments({generated_occurrence},"
+                 f"{generated_artifact},ARRAY[0,1]::BIGINT[],"
+                 "ARRAY['alpha visible','visible']::TEXT[],"
+                 "ARRAY['','']::TEXT[],ARRAY['text','text']::TEXT[])")
+        self.assertEqual(self.sql(self.admin(batch)), "2")
+        self.assertEqual(self.sql(self.admin(batch)), "2")
+        self.assertEqual(self.sql(f"SELECT count(*) FROM storage_v2_lexical_segment "
+                                  f"WHERE occurrence_id={generated_occurrence}"), "2")
+        self.assert_sql_fails(self.admin(batch.replace("'visible']", "'alpha']")),
+                              "lexical segment identity collision")
+        self.assert_sql_fails(self.actor(schema.OTHER_ID, batch),
+                              "authorized source-backed lexical segment required")
+        self.assert_sql_fails(self.admin(batch.replace("ARRAY[0,1]", "ARRAY[0,0]")),
+                              "valid source-backed lexical segment group required")
+        self.assert_sql_fails(self.admin(batch.replace("ARRAY['alpha visible','visible']",
+                                                       "ARRAY['alpha visible',NULL]")),
+                              "valid source-backed lexical segment group required")
+        self.assert_sql_fails(self.admin(batch.replace("ARRAY['alpha visible','visible']",
+                                                       "ARRAY['alpha visible','missing']")),
+                              "valid source-backed lexical segment group required")
+
+        known_occurrence = fixture_ids["/synthetic/known.txt"]
+        known_artifact = int(self.sql("SELECT artifact_version_id FROM occurrence "
+                                      f"WHERE id={known_occurrence}"))
+        known_file = int(self.sql("SELECT id FROM files WHERE source_id=17 "
+                                  "AND path='/synthetic/known.txt'"))
+        self.sql("INSERT INTO chunks(file_id,chunk_type,content_hash,content_compressed,"
+                 "content_text,start_line,end_line) VALUES "
+                 f"({known_file},'text',digest('alpha','sha256'),'','alpha',1,1)")
+        copy_batch = (f"SELECT storage_v2_copy_legacy_lexical_segments("
+                      f"{known_occurrence},{known_artifact})")
+        self.assertEqual(self.sql(self.admin(copy_batch)), "2")
+        self.assertEqual(self.sql(self.admin(copy_batch)), "2")
+        self.assertEqual(self.sql(f"SELECT count(*) FROM storage_v2_lexical_segment "
+                                  f"WHERE occurrence_id={known_occurrence}"), "2")
         self.sql(f"DELETE FROM chunks WHERE id={context_chunk}")
         self.assertEqual(self.sql(self.admin(rank_query)).splitlines(),
                          [str(context_occurrence), str(generated_occurrence)])

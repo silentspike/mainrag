@@ -123,13 +123,13 @@ def atomic_private_json(path: Path, value: object, *, replace: bool = True) -> N
 def source_state(api_url: str, token: str, source_id: int, generation: int) -> dict[str, Any]:
     query = urllib.parse.urlencode({"generation": generation, "include_test": "true"})
     return request(api_url, token, "GET", f"/api/v1/sources/{source_id}/shadow-state?{query}",
-                   timeout_seconds=5)
+                   timeout_seconds=30)
 
 
 def restarted_source_state(api_url: str, token: str, source_id: int,
                            generation: int, previous_instance: str) -> dict[str, Any]:
     """Wait for the authenticated API readback after an operator restart."""
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 90
     while True:
         try:
             state = source_state(api_url, token, source_id, generation)
@@ -144,6 +144,36 @@ def restarted_source_state(api_url: str, token: str, source_id: int,
         if time.monotonic() >= deadline:
             raise RuntimeError("restarted API did not become ready with a new instance")
         time.sleep(0.5)
+
+
+def reconstructed_source_state(api_url: str, token: str, checkpoint: dict[str, Any]) -> dict[str, Any]:
+    """Recheck a restart proven by persisted generation and live service ages."""
+    proof = checkpoint.get("reconstruction_evidence")
+    if not isinstance(proof, dict) or proof.get("generation_status") != "verified" \
+            or proof.get("run_status") != "sealed" \
+            or type(proof.get("generation_created_at_unix")) is not int:
+        raise RuntimeError("reconstructed checkpoint lacks persisted restart proof")
+    review_sha256 = proof.get("source_snapshot_review_sha256")
+    if review_sha256 is not None and (not isinstance(review_sha256, str)
+                                     or not re.fullmatch(r"[0-9a-f]{64}", review_sha256)):
+        raise RuntimeError("reconstructed source review digest is invalid")
+    service = subprocess.run(
+        ["systemctl", "show", "mainrag-api.service", "-p", "ExecMainPID", "--value"],
+        capture_output=True, text=True, check=False)
+    if service.returncode != 0 or not service.stdout.strip().isdigit():
+        raise RuntimeError("API service process is unavailable for restart proof")
+    pid = int(service.stdout.strip())
+    if pid <= 0:
+        raise RuntimeError("API service process is inactive")
+    age = subprocess.run(["ps", "-o", "etimes=", "-p", str(pid)],
+                         capture_output=True, text=True, check=False)
+    if age.returncode != 0 or not age.stdout.strip().isdigit() \
+            or int(time.time()) - int(age.stdout.strip()) <= proof["generation_created_at_unix"] + 2:
+        raise RuntimeError("API restart after the persisted build is not established")
+    state = source_state(api_url, token, checkpoint["source_id"], checkpoint["generation_seq"])
+    if state["server_instance_id"] != checkpoint["server_instance_id"]:
+        raise RuntimeError("API instance changed after checkpoint reconstruction")
+    return state
 
 
 def publish_telemetry(value: object) -> None:
@@ -953,10 +983,18 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
     if checkpoint["source_id"] != arguments.source_id or checkpoint["commit_sha"] != arguments.commit_sha:
         raise RuntimeError("checkpoint source or commit identity differs")
     progress["phase"] = "restart_state"
-    state = restarted_source_state(
-        arguments.api_url, token, arguments.source_id,
-        checkpoint["generation_seq"], checkpoint["server_instance_id"],
-    )
+    if checkpoint.get("reconstructed_from_persisted_witness") is True:
+        review_sha256 = checkpoint["reconstruction_evidence"].get("source_snapshot_review_sha256")
+        if review_sha256 is not None and (
+                arguments.source_snapshot_review is None
+                or arguments.source_snapshot_review_sha256 != review_sha256):
+            raise RuntimeError("reconstructed checkpoint requires exact source review recheck")
+        state = reconstructed_source_state(arguments.api_url, token, checkpoint)
+    else:
+        state = restarted_source_state(
+            arguments.api_url, token, arguments.source_id,
+            checkpoint["generation_seq"], checkpoint["server_instance_id"],
+        )
     progress["phase"] = "resource_before_resume"
     free_before_resume = shutil.disk_usage(arguments.pack_root).free
     progress["free_bytes_before_resume"] = free_before_resume

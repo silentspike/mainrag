@@ -447,6 +447,8 @@ pub struct ShadowIngestMeasurements {
     pub append_full_comparisons: u64,
     pub lexical_segments_copied: u64,
     pub lexical_segments_generated: u64,
+    pub lexical_segment_batch_calls: u64,
+    pub db_staging_round_trips: u64,
 }
 
 impl ShadowIngestMeasurements {
@@ -532,6 +534,8 @@ impl ShadowIngestMeasurements {
                 "append_full_comparisons": self.append_full_comparisons,
                 "lexical_segments_copied": self.lexical_segments_copied,
                 "lexical_segments_generated": self.lexical_segments_generated,
+                "lexical_segment_batch_calls": self.lexical_segment_batch_calls,
+                "db_staging_round_trips": self.db_staging_round_trips,
             },
             "phase": phases,
             "source_io": {
