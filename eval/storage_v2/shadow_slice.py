@@ -67,6 +67,8 @@ TELEMETRY_COUNTERS = {
     "fragments_created",
     "largest_item_bytes",
     "append_full_comparisons",
+    "lexical_segments_copied",
+    "lexical_segments_generated",
 }
 
 

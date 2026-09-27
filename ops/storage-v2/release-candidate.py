@@ -35,6 +35,7 @@ CHECKS = (
     "intelligence",
     "intervals",
     "legacy_intelligence_export",
+    "lexical_segment_integrity",
     "resource_budget",
     "restart_resume",
     "search_quality",
@@ -70,6 +71,8 @@ TELEMETRY_COUNTERS = {
     "writer_concurrency",
     "fragments_created",
     "largest_item_bytes",
+    "lexical_segments_copied",
+    "lexical_segments_generated",
 }
 THIN_POOL_MAX_DATA_PERCENT = Decimal(75)
 THIN_POOL_MAX_METADATA_PERCENT = Decimal(70)
@@ -619,7 +622,9 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
                          evidence: dict[str, Any], checkpoint: dict[str, Any]) -> dict[str, Any]:
     """Require complete legacy path recall and independent support for every new hit."""
     failed = {"passed": False, "policy": "literal-coverage-non-inferiority-v1"}
-    if evidence.get("schema_version") != "mainrag.storage-v2.query-coverage.v1" \
+    version = evidence.get("schema_version")
+    if version not in {"mainrag.storage-v2.query-coverage.v1",
+                       "mainrag.storage-v2.query-coverage.v2"} \
             or evidence.get("query_sha256") != sha256_text(seed["query"]) \
             or any(type(evidence.get(key)) is not int or evidence[key] <= 0
                    for key in ("source_id", "generation_id", "generation_seq")) \
@@ -656,9 +661,14 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
                     or len(row["body_sha256"]) != 64 \
                     or any(c not in "0123456789abcdef" for c in row["body_sha256"]) \
                     or type(row.get("reference_frequency")) is not int \
-                    or row["reference_frequency"] <= 0 \
                     or type(row.get("posting_frequency")) is not int \
-                    or row["posting_frequency"] != row["reference_frequency"]:
+                    or not (
+                        row["reference_frequency"] > 0
+                        and row["posting_frequency"] == row["reference_frequency"]
+                        or version == "mainrag.storage-v2.query-coverage.v2"
+                        and row.get("fts_body_matches") is True
+                        and row.get("segment_matches") is True
+                    ):
                 return failed
     current_paths = path_identity(current["results"])
     storage_paths = path_identity(storage["results"])
