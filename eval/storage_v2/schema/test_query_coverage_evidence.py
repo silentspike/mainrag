@@ -461,6 +461,55 @@ SELECT id,'text',digest('alpha','sha256'),'','alpha','prefixonly',1,1
                                                        "ARRAY['alpha visible','missing']")),
                               "valid source-backed lexical segment group required")
 
+        # Presence is a boolean support check. It must retain the authorized
+        # source boundary, duplicate-input semantics, and search results while
+        # avoiding a full segment join and DISTINCT over every segment row.
+        before_presence = self.exact_search(
+            {"type": "and", "children":[
+                {"type": "term", "value": "foo"},
+                {"type": "term", "value": "alpha"}]}, source_id=19)
+        self.file(schema.ROOT / "migrations/078_storage_v2_short_circuit_segment_presence.sql")
+        self.assertEqual(self.exact_search(
+            {"type": "and", "children":[
+                {"type": "term", "value": "foo"},
+                {"type": "term", "value": "alpha"}]}, source_id=19),
+            before_presence)
+        self.assertEqual(self.sql(self.admin(
+            f"SELECT occurrence_id FROM storage_v2_source_segment_presence("
+            f"ARRAY[{occurrence},{occurrence},999999]::BIGINT[])")), str(occurrence))
+        self.assertEqual(self.sql(self.actor(schema.OTHER_ID,
+            f"SELECT count(*) FROM storage_v2_source_segment_presence("
+            f"ARRAY[{occurrence}]::BIGINT[])")), "0")
+        presence_definition = self.sql(
+            "SELECT pg_get_functiondef("
+            "'storage_v2_source_segment_presence(bigint[])'::regprocedure)")
+        self.assertIn("WHERE EXISTS", presence_definition)
+        self.assertNotIn("SELECT DISTINCT segment.occurrence_id", presence_definition)
+
+        # Segment support remains a matching gate, while the established
+        # posting score keeps the retrieval order stable for existing hits.
+        before_rank_parity = self.exact_search(
+            {"type": "term", "value": "foo"}, source_id=19)
+        self.file(schema.ROOT / "migrations/079_storage_v2_lexical_rank_parity.sql")
+        after_rank_parity = self.exact_search(
+            {"type": "term", "value": "foo"}, source_id=19)
+        self.assertEqual(
+            [row["occurrence_id"] for row in after_rank_parity["results"]],
+            [row["occurrence_id"] for row in before_rank_parity["results"]],
+        )
+        self.assertEqual(
+            [row["content"] for row in after_rank_parity["results"]],
+            [row["content"] for row in before_rank_parity["results"]],
+        )
+        for signature in (
+            "storage_v2_search_exact(bigint,text,jsonb,jsonb,bigint)",
+            "storage_v2_search_active_unchecked(text,jsonb,jsonb,bigint,bigint,boolean)",
+        ):
+            definition = self.sql(f"SELECT pg_get_functiondef('{signature}'::regprocedure)")
+            self.assertIn("lexical_score + graph_score + semantic_score + rerank_score AS final_score",
+                          definition)
+            self.assertNotIn("1000000.0 + staged.segment_score", definition)
+
         known_occurrence = fixture_ids["/synthetic/known.txt"]
         known_artifact = int(self.sql("SELECT artifact_version_id FROM occurrence "
                                       f"WHERE id={known_occurrence}"))
