@@ -26,6 +26,31 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ReleaseCandidateOperatorTests(unittest.TestCase):
+    def test_reconstructed_restart_accepts_newer_instance_only_for_same_generation(self) -> None:
+        checkpoint = {
+            "source_id": 1, "generation_id": 2, "generation_seq": 3,
+            "active_generation_id": None, "server_instance_id": "earlier",
+            "reconstruction_evidence": {
+                "generation_status": "verified", "run_status": "sealed",
+                "generation_created_at_unix": 100,
+                "source_snapshot_review_sha256": None,
+            },
+        }
+        state = {"generation_id": 2, "generation_seq": 3,
+                 "active_generation_id": None, "status": "verified",
+                 "server_instance_id": "later"}
+        process = [SimpleNamespace(returncode=0, stdout="456\n"),
+                   SimpleNamespace(returncode=0, stdout="100\n")]
+        with patch.object(MODULE.subprocess, "run", side_effect=process), \
+                patch.object(MODULE.time, "time", return_value=1000), \
+                patch.object(MODULE, "source_state", return_value=state):
+            self.assertEqual(MODULE.reconstructed_source_state("api", "token", checkpoint), state)
+        with patch.object(MODULE.subprocess, "run", side_effect=process), \
+                patch.object(MODULE.time, "time", return_value=1000), \
+                patch.object(MODULE, "source_state", return_value={**state, "generation_id": 4}):
+            with self.assertRaisesRegex(RuntimeError, "generation or active pointer changed"):
+                MODULE.reconstructed_source_state("api", "token", checkpoint)
+
     def write_gold_suite(self, directory: Path, checkpoint: dict, verified: dict,
                          cases: list[dict]) -> tuple[Path, str]:
         path = directory / "gold-suite.json"
