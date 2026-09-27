@@ -188,7 +188,7 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         assert_measured_reads(
             &initial,
             2 * (initial_manifest.len() + first_bytes.len()) as u64,
-            4 * first_bytes.len() as u64,
+            3 * first_bytes.len() as u64,
             1,
         )?;
         drop(client);
@@ -212,7 +212,7 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             .as_u64().context("managed adapter reads were not measured")?;
         ensure!(adapter_reads == 2 * (manifest_size + second_bytes.len() as u64),
             "delta adapter read the old segment or omitted a verification pass");
-        assert_measured_reads(&delta, adapter_reads, 4 * second_bytes.len() as u64, 1)?;
+        assert_measured_reads(&delta, adapter_reads, 3 * second_bytes.len() as u64, 1)?;
         ensure!(delta.telemetry["ablauf"]["eingang_bytes"].as_u64()
             == Some((first_bytes.len() + second_bytes.len()) as u64),
             "logical input length was not preserved");
