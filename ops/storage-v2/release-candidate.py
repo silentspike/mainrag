@@ -882,12 +882,14 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             )
             query_coverage.append(coverage)
         gates = search_query_gates(seed, current, storage, arguments.max_query_ms, coverage, checkpoint)
+        case_run_id = sha256_text(f"{kind}:{seed['id']}")
+        gates["id"] = case_run_id
         quality_passed &= gates["quality_passed"]
         performance_passed &= gates["performance_passed"]
         degradation_passed &= gates["degradation_passed"]
-        # Gold cases may deliberately reuse automatic seed IDs for the same
-        # reviewed query. Dual-read fixtures need unique IDs across both sets.
-        fixture = {"id": sha256_text(f"{kind}:{seed['id']}"),
+        # Gold cases may reuse automatic seed IDs. Both dual-read fixtures and
+        # persisted query results need unique IDs across the two sets.
+        fixture = {"id": case_run_id,
                    "kind": kind, "query": seed["query"],
                    "phrase": False, "k": 10}
         if coverage is not None:
