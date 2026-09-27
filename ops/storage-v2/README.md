@@ -405,6 +405,13 @@ administrator after 067, then build a fresh candidate; existing candidates
 have no segment proof and must not be qualified under the new gate. Installation
 does not activate a candidate or alter the active pointer. Before installation,
 retain the current schema definition and database backup for rollback.
+Migration 069 extends source-backed rank to bounded plain conjunctions. It
+admits only hits with a matching verified segment for generations with that
+projection; older generations retain their previous retrieval path. Its query
+evidence checks immutable body text, a matching segment, current indexed hits,
+path recall and retained order. Boolean, phrase and exact ASTs retain their
+existing behavior. Install 069 after 068 and build fresh candidates under the
+accepted package.
 `schema.sql` is a historical bootstrap and intentionally does not apply these
 administrator-only repairs. Do not run the API with an administrator account.
 
@@ -529,15 +536,20 @@ raw SHA-256 was reviewed and supplied explicitly. Schema
 `cases`. Each case has an opaque 64-character hexadecimal `id`, a `query`, an
 `expected_path_sha256`, and boolean `expects_match`. At least one positive and
 one negative case with distinct queries are required; all cases must pass the
-existing quality, latency, and degradation gates. Single-term cases use the
-server's body-backed literal coverage proof; other queries require identical
-ordered current and candidate paths. Gold cases join the dual-read query set.
+existing quality, latency, and degradation gates. Single terms and bounded
+plain conjunctions use the server's body-backed segment coverage proof; other
+queries require identical ordered current and candidate paths. Automatic
+positive seeds are selected only when their path is in the current keyword
+top ten for that query. Gold cases join the dual-read query set.
 The suite digest and class are recorded in private qualification evidence.
 Digest matching does not itself establish representative class coverage; the
 reviewed suite and later all-source aggregate must prove that separately.
 Failed automatic seeds still fail qualification even if gold cases pass.
 Before the restart/resume build request, verification rechecks the pack reserve
-and records its free-byte readback in protected attempt evidence.
+and records its free-byte readback in protected attempt evidence. It waits for
+an authenticated readback from a new API instance after restart and validates
+the complete qualification manifest against the aggregate-audit proof contract
+before submitting an immutable candidate.
 
 A failed query gate writes a protected `FAIL` artifact to the requested output
 before returning nonzero. It records each query's quality, measured latency,
