@@ -195,10 +195,21 @@ SELECT id,'text',digest('foo_3d alpha','sha256'),'','foo_3d alpha',1,1
         self.assertTrue(evidence["candidate"][0]["fts_body_matches"])
         self.assertTrue(evidence["candidate"][0]["segment_matches"])
         self.file(schema.ROOT / "migrations/069_storage_v2_conjunctive_lexical_parity.sql")
+        self.file(schema.ROOT / "migrations/070_storage_v2_lexical_segment_rls.sql")
+        self.sql("GRANT EXECUTE ON FUNCTION storage_v2_has_lexical_segment(BIGINT) "
+                 "TO storage_v2_shadow_worker")
         conjunction = {"type": "and", "children": [
             {"type": "term", "value": "foo"}, {"type": "term", "value": "alpha"}]}
         self.assertEqual([row["occurrence_id"] for row in
                           self.exact_search(conjunction, source_id=19)["results"]], [occurrence])
+        self.assertEqual(self.exact_search(
+            {"type": "term", "value": "missing"}, source_id=19)["results"], [])
+        self.assertEqual(self.exact_search(
+            {"type": "and", "children": [
+                {"type": "term", "value": "foo"},
+                {"type": "term", "value": "missing"}]}, source_id=19)["results"], [])
+        self.assertEqual(self.sql(self.admin(
+            f"SELECT storage_v2_has_lexical_segment({occurrence})")), "t")
         legacy_score = float(self.sql(
             f"SELECT ts_rank_cd(fts_vector,websearch_to_tsquery('simple','foo alpha')) "
             f"FROM chunks WHERE id={legacy}"))
