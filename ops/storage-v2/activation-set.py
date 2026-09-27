@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import runpy
 import stat
 import subprocess
 import sys
@@ -24,6 +25,8 @@ import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
+
+load_token = runpy.run_path(str(Path(__file__).with_name("operator_token.py")))["load_token"]
 
 
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -376,7 +379,7 @@ def plan_command(args: argparse.Namespace) -> None:
                      preflight, args.preflight_sha256, args.installed_binary,
                      live_rows(args.database, args.local_postgres), args.database,
                      args.local_postgres, now)
-    verify_current_api_watermarks(args.api_url, os.environ.get(args.token_env, ""),
+    verify_current_api_watermarks(args.api_url, args.api_token,
                                   audit["candidate_set"])
     private_write(args.output, plan)
     print(json.dumps({"status": plan["status"],
@@ -522,7 +525,7 @@ def apply_command(args: argparse.Namespace) -> None:
         audit, plan["persisted_audit_sha256"], acceptance,
         plan["aggregate_acceptance_sha256"], args.installed_binary,
         fresh_preflight, now)
-    verify_current_api_watermarks(args.api_url, os.environ.get(args.token_env, ""),
+    verify_current_api_watermarks(args.api_url, args.api_token,
                                   candidate_set)
     validate_preflight(fresh_preflight, acceptance["preflight_operator_commit_sha"],
                        acceptance["schema_sha256"], now, maximum_age=300)
@@ -583,6 +586,7 @@ def main() -> int:
     parser.add_argument("--local-postgres", action="store_true")
     parser.add_argument("--api-url", default="http://127.0.0.1:3001")
     parser.add_argument("--token-env", default="MAINRAG_TOKEN")
+    parser.add_argument("--token-file", type=Path)
     parser.add_argument("--audit", type=Path, required=True)
     parser.add_argument("--audit-sha256")
     parser.add_argument("--acceptance", type=Path, required=True)
@@ -613,6 +617,10 @@ def main() -> int:
         parser.error("apply requires the exact plan, approval and admin context")
     if args.output.exists() or args.output.is_symlink():
         parser.error("protected plan output already exists")
+    try:
+        args.api_token = load_token(args.token_file, args.token_env)
+    except RuntimeError as error:
+        parser.error(str(error))
     try:
         (plan_command if args.phase == "plan" else apply_command)(args)
     except (RuntimeError, OSError, FileExistsError) as error:
