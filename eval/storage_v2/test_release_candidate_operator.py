@@ -811,6 +811,24 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
         evidence["candidate"].pop()
         self.assertFalse(MODULE.query_coverage_gates(seed, current, storage, evidence, checkpoint)["passed"])
 
+    def test_repeated_legacy_chunks_count_as_one_retained_path(self) -> None:
+        seed, current, storage, evidence, checkpoint = self.coverage_fixture()
+        repeated = {**current["results"][0], "chunk_id": 2}
+        current["results"].append(repeated)
+        evidence["current"].append({
+            "chunk_id": 2,
+            "path_sha256": MODULE.sha256_text(repeated["file_path"]),
+            "indexed_match": True,
+        })
+        result = MODULE.search_query_gates(seed, current, storage, 2000, evidence, checkpoint)
+        self.assertTrue(result["quality_passed"])
+        self.assertTrue(result["coverage"]["baseline_paths_retained_in_order"])
+        self.assertEqual(result["diagnostics"]["current_repeated_path_hits"], 1)
+        storage["results"].pop(0)
+        evidence["candidate"].pop(0)
+        self.assertFalse(MODULE.query_coverage_gates(
+            seed, current, storage, evidence, checkpoint)["passed"])
+
     def test_release_candidate_telemetry_requires_fragment_bounds(self) -> None:
         telemetry = {
             "phase": {name: 1.0 for name in MODULE.TELEMETRY_PHASES},
