@@ -156,6 +156,16 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             .output()?;
         ensure!(lexical_rls.status.success(), "managed fixture lexical RLS migration failed: {}",
             String::from_utf8_lossy(&lexical_rls.stderr));
+        let lexical_batches = Command::new("psql")
+            .arg("-X").arg("--no-psqlrc")
+            .arg("--set=ON_ERROR_STOP=1")
+            .arg("--host=127.0.0.1").arg("--username=fixture")
+            .arg("--dbname").arg(&database)
+            .arg("--file").arg(project.join("migrations/077_storage_v2_batched_lexical_segments.sql"))
+            .env("PGPASSWORD", "fixture_only")
+            .output()?;
+        ensure!(lexical_batches.status.success(), "managed fixture lexical batch migration failed: {}",
+            String::from_utf8_lossy(&lexical_batches.stderr));
         client.batch_execute(&format!(
             "CREATE TABLE users(id UUID PRIMARY KEY, is_admin BOOLEAN NOT NULL); \
              INSERT INTO users VALUES ('{PRINCIPAL}', TRUE); \
@@ -178,7 +188,7 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         assert_measured_reads(
             &initial,
             2 * (initial_manifest.len() + first_bytes.len()) as u64,
-            4 * first_bytes.len() as u64,
+            3 * first_bytes.len() as u64,
             1,
         )?;
         drop(client);
@@ -202,7 +212,7 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             .as_u64().context("managed adapter reads were not measured")?;
         ensure!(adapter_reads == 2 * (manifest_size + second_bytes.len() as u64),
             "delta adapter read the old segment or omitted a verification pass");
-        assert_measured_reads(&delta, adapter_reads, 4 * second_bytes.len() as u64, 1)?;
+        assert_measured_reads(&delta, adapter_reads, 3 * second_bytes.len() as u64, 1)?;
         ensure!(delta.telemetry["ablauf"]["eingang_bytes"].as_u64()
             == Some((first_bytes.len() + second_bytes.len()) as u64),
             "logical input length was not preserved");

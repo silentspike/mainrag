@@ -1201,15 +1201,12 @@ where
         }
         content_body::publish_pack(client, pack_id).await?;
         let published_reader = published_pack.reader();
-        for ((representative, _), entry) in missing_groups.iter().zip(&entries) {
-            let expected_bytes = files[*representative].load_verified_bytes().await?;
-            let verified =
-                published_reader.verify_to_staging(entry, None, pack_root, io_buffer_bytes)?;
-            let mut reconstructed = Vec::with_capacity(expected_bytes.len());
-            verified.copy_to(&mut reconstructed)?;
-            if reconstructed.as_slice() != expected_bytes.as_ref() {
-                bail!("published pack failed exact artifact reconstruction");
-            }
+        for entry in &entries {
+            // The entry digest was obtained from verified source bytes. Check
+            // the published representation against that digest without another
+            // source read; the final adapter watermark check still detects
+            // source drift before sealing the generation.
+            published_reader.verify_integrity(entry, None, io_buffer_bytes)?;
         }
         result_pack_id = Some(pack_id);
         result_pack_stored_bytes = published_pack.manifest.stored_bytes;
@@ -1471,6 +1468,7 @@ where
                 },
             )
             .await?;
+            measurements.db_staging_round_trips += 1;
             let identifiers = search_exact_identifiers(text);
             let _document_id: i64 = client
                 .query_one(
@@ -1494,6 +1492,7 @@ where
                 )
                 .await?
                 .get(0);
+            measurements.db_staging_round_trips += 1;
             if mode == SliceMode::ReleaseCandidate {
                 let copied: i64 = client
                     .query_one(
@@ -1502,6 +1501,7 @@ where
                     )
                     .await?
                     .get(0);
+                measurements.db_staging_round_trips += 1;
                 if copied > 0 {
                     measurements.lexical_segments_copied = measurements
                         .lexical_segments_copied
@@ -1512,33 +1512,69 @@ where
                     let complete =
                         !chunks.is_empty() && chunks.iter().all(|chunk| text.contains(&chunk.text));
                     if complete {
-                        for (index, chunk) in chunks.iter().enumerate() {
-                            let order = i64::try_from(index)?;
-                            client
-                                .execute(
-                                    "SELECT storage_v2_put_lexical_segment($1,$2,$3,$4,$5,$6)",
+                        for (batch_index, batch) in chunks.chunks(256).enumerate() {
+                            let start = batch_index
+                                .checked_mul(256)
+                                .context("lexical segment order overflow")?;
+                            let orders = (start..start + batch.len())
+                                .map(i64::try_from)
+                                .collect::<std::result::Result<Vec<_>, _>>()?;
+                            let texts = batch
+                                .iter()
+                                .map(|chunk| chunk.text.as_str())
+                                .collect::<Vec<_>>();
+                            let prefixes = batch
+                                .iter()
+                                .map(|chunk| chunk.context_prefix.as_deref().unwrap_or(""))
+                                .collect::<Vec<_>>();
+                            let types = batch
+                                .iter()
+                                .map(|chunk| chunk.chunk_type.to_string())
+                                .collect::<Vec<_>>();
+                            let staged_count: i64 = client
+                                .query_one(
+                                    "SELECT storage_v2_put_lexical_segments($1,$2,$3,$4,$5,$6)",
                                     &[
                                         &staged.occurrence_id,
                                         &staged.artifact_version_id,
-                                        &order,
-                                        &chunk.text,
-                                        &chunk.context_prefix.as_deref().unwrap_or(""),
-                                        &chunk.chunk_type.to_string(),
+                                        &orders,
+                                        &texts,
+                                        &prefixes,
+                                        &types,
                                     ],
                                 )
-                                .await?;
+                                .await?
+                                .get(0);
+                            measurements.lexical_segment_batch_calls += 1;
+                            measurements.db_staging_round_trips += 1;
+                            if staged_count != i64::try_from(batch.len())? {
+                                bail!("lexical segment group was not staged completely");
+                            }
                         }
                         measurements.lexical_segments_generated = measurements
                             .lexical_segments_generated
                             .checked_add(u64::try_from(chunks.len())?)
                             .context("lexical segment count overflow")?;
                     } else {
+                        let orders = [0_i64];
+                        let texts = [text];
+                        let prefixes = [""];
+                        let types = ["document"];
                         client
-                            .execute(
-                                "SELECT storage_v2_put_lexical_segment($1,$2,0,$3,'','document')",
-                                &[&staged.occurrence_id, &staged.artifact_version_id, &text],
+                            .query_one(
+                                "SELECT storage_v2_put_lexical_segments($1,$2,$3,$4,$5,$6)",
+                                &[
+                                    &staged.occurrence_id,
+                                    &staged.artifact_version_id,
+                                    &orders.as_slice(),
+                                    &texts.as_slice(),
+                                    &prefixes.as_slice(),
+                                    &types.as_slice(),
+                                ],
                             )
                             .await?;
+                        measurements.lexical_segment_batch_calls += 1;
+                        measurements.db_staging_round_trips += 1;
                         measurements.lexical_segments_generated = measurements
                             .lexical_segments_generated
                             .checked_add(1)
@@ -1585,6 +1621,7 @@ where
                     )
                     .await?
                     .get(0);
+                measurements.db_staging_round_trips += 1;
             }
             client
                 .execute(
@@ -1599,6 +1636,7 @@ where
                     ],
                 )
                 .await?;
+            measurements.db_staging_round_trips += 1;
             measurements.record_stage(ShadowIngestStage::DatabaseStage, database_started.elapsed());
         }
     }
@@ -1871,9 +1909,15 @@ fn record_final_source_reads(
 async fn canonical_fixture_hash(files: &mut [SliceFile]) -> Result<(String, u64)> {
     let mut digest = Sha256::new();
     let mut input_bytes = 0_u64;
-    for file in files {
-        let (content_sha256, logical_length) = {
-            let bytes = file.load_bytes().await?;
+    // Keep the canonical manifest order while overlapping small-file reads.
+    // The batch bounds retained content regardless of total source size.
+    for batch in files.chunks_mut(8) {
+        let bytes =
+            futures::future::try_join_all(batch.iter().map(|file| async {
+                Ok::<_, anyhow::Error>(file.load_bytes().await?.into_owned())
+            }))
+            .await?;
+        for (file, bytes) in batch.iter_mut().zip(bytes) {
             let logical_length = bytes.len() as u64;
             if file.source_range.is_some() {
                 digest.update((file.item_key.len() as u64).to_be_bytes());
@@ -1882,14 +1926,13 @@ async fn canonical_fixture_hash(files: &mut [SliceFile]) -> Result<(String, u64)
             digest.update((file.path.len() as u64).to_be_bytes());
             digest.update(file.path.as_bytes());
             digest.update(logical_length.to_be_bytes());
-            digest.update(bytes.as_ref());
-            (Sha256::digest(bytes.as_ref()).into(), logical_length)
-        };
-        file.content_sha256 = Some(content_sha256);
-        file.logical_length = logical_length;
-        input_bytes = input_bytes
-            .checked_add(logical_length)
-            .context("source byte count overflow")?;
+            digest.update(&bytes);
+            file.content_sha256 = Some(Sha256::digest(&bytes).into());
+            file.logical_length = logical_length;
+            input_bytes = input_bytes
+                .checked_add(logical_length)
+                .context("source byte count overflow")?;
+        }
     }
     Ok((hex::encode(digest.finalize()), input_bytes))
 }
