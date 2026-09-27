@@ -624,6 +624,87 @@ SELECT (storage_v2_finish_analysis_attempt(
             "SELECT active_generation_id IS NULL FROM logical_source WHERE id=28"
         ), "t")
 
+    def test_z_runtime_owner_can_publish_only_through_controlled_frontiers(self) -> None:
+        # The superuser-owned schema fixture otherwise hides this production
+        # owner/revocation contradiction.
+        self.sql(
+            "INSERT INTO sources(id, name, type, path) VALUES "
+            "(29, 'synthetic-frontier-owner', 'fixture', 'synthetic-frontier-owner'), "
+            "(30, 'synthetic-managed-owner', 'managed_append', 'synthetic-managed-owner')"
+        )
+        node, view, digest = self.make_projection("controlled-owner")
+        full_run = self.begin(29, "d1" * 32, "d2" * 32)
+        self.stage(full_run, "stream.jsonl", "controlled-owner", node, view, digest)
+        self.complete_analysis(digest)
+        self.commit(full_run, 1)
+        self.sql(self.admin(
+            "SELECT storage_v2_verify_generation("
+            f"(SELECT generation_id FROM storage_v2_ingest_run WHERE id={full_run}), "
+            f"'{'d3' * 32}');"
+        ))
+        profile = "mainrag.managed-append-owner.v2.manifest"
+        managed_run = self.begin(30, "d4" * 32, "d5" * 32, adapter_profile=profile)
+        self.stage(managed_run, "epoch/segments/00000001-a.jsonl", "controlled-owner",
+                   node, view, digest, adapter_profile=profile)
+        self.commit(managed_run, 1)
+        self.sql(self.admin(
+            "SELECT storage_v2_verify_generation("
+            f"(SELECT generation_id FROM storage_v2_ingest_run WHERE id={managed_run}), "
+            f"'{'d6' * 32}');"
+        ))
+
+        self.sql(
+            "GRANT SELECT, UPDATE ON ALL TABLES IN SCHEMA public TO mainrag; "
+            "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag; "
+            "ALTER TABLE storage_v2_ingest_run OWNER TO mainrag; "
+            "ALTER TABLE source_generation OWNER TO mainrag; "
+            "ALTER TABLE storage_v2_ingest_run_item OWNER TO mainrag; "
+            "ALTER TABLE source_item OWNER TO mainrag; "
+            "ALTER TABLE sources OWNER TO mainrag; "
+            "ALTER TABLE storage_v2_append_frontier OWNER TO mainrag; "
+            "ALTER TABLE storage_v2_managed_append_frontier OWNER TO mainrag; "
+            "ALTER FUNCTION storage_v2_publish_full_append_frontiers(BIGINT, TEXT[]) "
+            "OWNER TO mainrag; "
+            "ALTER FUNCTION storage_v2_publish_managed_append_frontier("
+            "BIGINT, BIGINT, UUID, BIGINT, BYTEA, BOOLEAN) OWNER TO mainrag; "
+            "REVOKE INSERT, UPDATE, DELETE ON storage_v2_append_frontier, "
+            "storage_v2_managed_append_frontier FROM mainrag;"
+        )
+        full_publish = (
+            f"SELECT storage_v2_publish_full_append_frontiers({full_run}, "
+            "ARRAY['stream.jsonl']::TEXT[]);"
+        )
+        managed_publish = (
+            f"SELECT storage_v2_publish_managed_append_frontier({managed_run}, NULL, "
+            "'00000000-0000-4000-8000-000000000066', 1, "
+            f"decode('{'d7' * 32}', 'hex'), TRUE);"
+        )
+        def runtime(statement: str) -> str:
+            return f"SET ROLE mainrag; SET app.user_id = '{ADMIN_ID}'; {statement}"
+
+        self.assert_sql_fails(runtime(full_publish),
+                              "permission denied for table storage_v2_append_frontier")
+        self.assert_sql_fails(runtime(managed_publish),
+                              "permission denied for table storage_v2_managed_append_frontier")
+        self.file(ROOT / "migrations/066_storage_v2_controlled_frontier_owner.sql")
+        self.assertEqual(self.sql(runtime(full_publish)), "1")
+        self.assertEqual(self.sql(runtime(managed_publish)), "1")
+        self.file(ROOT / "migrations/066_storage_v2_controlled_frontier_owner.sql")
+        self.assertEqual(self.sql(runtime(full_publish)), "1")
+        self.assertEqual(self.sql(runtime(managed_publish)), "1")
+        self.assert_sql_fails(
+            runtime("UPDATE storage_v2_append_frontier SET appends_since_full=99 "
+                    "WHERE source_id=29;"),
+            "permission denied for table storage_v2_append_frontier",
+        )
+        self.assert_sql_fails(
+            runtime("UPDATE storage_v2_managed_append_frontier "
+                    "SET appends_since_full=99 WHERE source_id=30;"),
+            "permission denied for table storage_v2_managed_append_frontier",
+        )
+        self.assertEqual(self.sql(runtime(full_publish)), "1")
+        self.assertEqual(self.sql(runtime(managed_publish)), "1")
+
     def test_analysis_retry_append_frontier_cancellation_and_isolation(self) -> None:
         node, view_id, digest_hex = self.make_projection("alpha")
         run_id = self.begin(2, "5" * 64, "6" * 64)

@@ -375,15 +375,20 @@ managed append; it reports the mode explicitly. Legacy mutable
 index and Qdrant state remain untouched. Installing migration 065 does not
 activate a generation or change the default read path.
 
-Apply the storage-v2 migrations as the database runtime/table owner. The
-controlled-write triggers deliberately require the table owner and the
-`SECURITY DEFINER` functions to have the same identity. Applying migrations as
-a superuser while leaving the new tables and functions owned by that superuser
-will make the ordinary API runtime fail closed. Before candidate construction,
-verify that the storage-v2 base tables, sequences, enum types, view, and all
-`storage_v2_*` functions have the same owner as the existing `sources` table.
-Do not work around an ownership mismatch by running the API with a privileged
-database account.
+Apply migrations 029–065 as the database runtime/table owner. Migration 066 is
+an administrator-owned exception: it creates a dedicated NOLOGIN role and
+transfers the two append frontier tables and their checked publishers to that
+role. The role inherits the runtime owner's privileges to inspect sealed runs;
+the runtime owner does not inherit frontier ownership or direct write rights.
+Run 066 in one transaction after 065 and before another candidate build. Check
+the two frontier table and publisher owners, API `SELECT`/`EXECUTE` rights,
+denied direct API writes, and successful publication from a verified run.
+`schema.sql` is a historical bootstrap and intentionally does not apply this
+administrator-only repair. Do not run the API with an administrator account.
+
+The active ingest receipt in migration 065 has the same owner/revocation
+contradiction. Its correction is required before regular postactivation ingest;
+installing 066 alone does not qualify that path.
 
 ## Source release candidates
 
