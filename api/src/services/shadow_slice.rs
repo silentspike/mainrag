@@ -16,7 +16,8 @@ use uuid::Uuid;
 
 use crate::db::{content_body, content_graph, generation_ingest};
 use crate::plugins;
-use crate::services::chunker::get_default_chunker;
+use crate::services::chunker::character::CharacterChunker;
+use crate::services::chunker::Chunker;
 use crate::services::content_store::{
     BodyCodec, BodyIdentity, DictionaryIdentity, PackBuilder, PackEntry, PackReader,
 };
@@ -1500,7 +1501,7 @@ where
                         .checked_add(u64::try_from(copied)?)
                         .context("lexical segment copy count overflow")?;
                 } else if !text.is_empty() {
-                    let chunks = get_default_chunker().chunk(text, language.as_deref());
+                    let chunks = CharacterChunker::default().chunk(text, language.as_deref());
                     let complete =
                         !chunks.is_empty() && chunks.iter().all(|chunk| text.contains(&chunk.text));
                     if complete {
