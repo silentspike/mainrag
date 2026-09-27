@@ -423,6 +423,16 @@ where
         .get(0);
     let expected_item_count: i64 = identity.get("expected_item_count");
     validate_candidate_source_state(&state, expected_item_count, active_generation_id)?;
+    // Reconstructing every segment projection can exceed the API role's
+    // ordinary query deadline on large sources. Raise it only for this bounded
+    // integrity query, then restore the transaction's prior setting.
+    let previous_statement_timeout: String = client
+        .query_one("SHOW statement_timeout", &[])
+        .await?
+        .get(0);
+    client
+        .query_one("SELECT set_config('statement_timeout', '30min', TRUE)", &[])
+        .await?;
     let lexical_segment_verification: serde_json::Value = client
         .query_one(
             "SELECT storage_v2_verify_lexical_segments($1)",
@@ -430,6 +440,12 @@ where
         )
         .await?
         .get(0);
+    client
+        .query_one(
+            "SELECT set_config('statement_timeout', $1, TRUE)",
+            &[&previous_statement_timeout],
+        )
+        .await?;
     if lexical_segment_verification["schema_version"]
         != "mainrag.storage-v2.lexical-segment-verification.v1"
         || lexical_segment_verification["generation_id"] != input.generation_id
