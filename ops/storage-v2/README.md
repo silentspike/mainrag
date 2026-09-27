@@ -602,16 +602,20 @@ Source-backed lexical search evaluates sealed segment slices with the current
 chunk FTS weights. It does not require the whole-document vector to match:
 tokenization at a chunk boundary can produce a valid chunk lexeme absent from
 the complete document vector. The evidence fallback verifies that the matching
-slice still hashes to the immutable segment witness. This keeps copied legacy
-chunk rank comparable without reading legacy chunks during search or proof.
-The legacy-weight vector is materialized once with each immutable segment,
-backfilled for existing candidates, indexed, and checked during generation
-verification; query-time search does not rebuild it from document text.
+slice still hashes to the immutable segment witness. Migration 075 restores
+ranking on the existing immutable segment vector after 074 temporarily used a
+body-only auxiliary vector. The installed chunk projection includes body,
+context prefix, and chunk type. Query-time search does not read legacy chunks
+or rebuild the vector from document text. Qualification evidence may read a
+legacy chunk to prove that a context-only hit is an exact copied segment from
+the same-byte legacy file; it labels this separately from a body-text match.
+Install 075 after 074 and build fresh candidates for the corrected package.
 
 Every distinct legacy Top-10 path must remain in the candidate Top-10 in the
 same relative order, and the seed's expected path must be present. Repeated
 chunk hits from one legacy file count as one path. Every candidate hit must
-have positive body support. Negative seeds still require both result sets to be
+have independent body or exact copied-legacy-segment support. Negative seeds
+still require both result sets to be
 empty. Additional paths are classified using legacy chunk counts, FTS matches,
 and independent literal matches as not indexed, lexical projection gaps, content
 gaps, or ranking expansion. The full proof is retained privately; its digest is
