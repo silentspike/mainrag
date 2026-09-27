@@ -394,7 +394,8 @@ Migration 068 adds immutable, source-backed lexical segments for release
 candidate search. It copies legacy chunk boundaries and rank keys only when the
 legacy file hash and complete text equal the sealed artifact, and every chunk
 is an exact substring of the bound search document. Otherwise the candidate
-producer generates segments from that document. Verification recomputes each
+producer generates deterministic character segments from that document without
+requiring an embedding tokenizer. Verification recomputes each
 segment digest and FTS vector from the immutable text; candidate qualification
 requires a passing `lexical_segment_integrity` check. Exact and active search
 can use the projection for single-term PostgreSQL lexemes, including terms
