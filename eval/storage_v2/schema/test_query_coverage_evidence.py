@@ -200,8 +200,29 @@ SELECT id,'text',digest('foo_3d alpha','sha256'),'','foo_3d alpha',1,1
                  "TO storage_v2_shadow_worker")
         conjunction = {"type": "and", "children": [
             {"type": "term", "value": "foo"}, {"type": "term", "value": "alpha"}]}
+        before_conjunction = self.exact_search(conjunction, source_id=19)
+        before_term = self.exact_search({"type": "term", "value": "3d"}, source_id=19)
         self.assertEqual([row["occurrence_id"] for row in
-                          self.exact_search(conjunction, source_id=19)["results"]], [occurrence])
+                          before_conjunction["results"]], [occurrence])
+        self.file(schema.ROOT / "migrations/071_storage_v2_set_based_segment_ranking.sql")
+        self.sql("GRANT EXECUTE ON FUNCTION storage_v2_source_segment_ranks(BIGINT[],TEXT) "
+                 "TO storage_v2_shadow_worker")
+        self.assertEqual(self.exact_search(conjunction, source_id=19), before_conjunction)
+        self.assertEqual(self.exact_search(
+            {"type": "term", "value": "3d"}, source_id=19), before_term)
+        self.assertEqual(self.sql(self.admin(
+            f"SELECT occurrence_id FROM storage_v2_source_segment_ranks("
+            f"ARRAY[{occurrence},999999]::BIGINT[],'foo alpha')")), str(occurrence))
+        self.assertEqual(self.sql(self.actor(schema.OTHER_ID,
+            f"SELECT count(*) FROM storage_v2_source_segment_ranks("
+            f"ARRAY[{occurrence}]::BIGINT[],'foo alpha')")), "0")
+        for signature in (
+            "storage_v2_search_exact(bigint,text,jsonb,jsonb,bigint)",
+            "storage_v2_search_active_unchecked(text,jsonb,jsonb,bigint,bigint,boolean)",
+        ):
+            definition = self.sql(f"SELECT pg_get_functiondef('{signature}'::regprocedure)")
+            self.assertIn("lexical_ranks AS MATERIALIZED", definition)
+            self.assertNotIn("LEFT JOIN LATERAL storage_v2_source_segment_rank(", definition)
         self.assertEqual(self.exact_search(
             {"type": "term", "value": "missing"}, source_id=19)["results"], [])
         self.assertEqual(self.exact_search(
