@@ -47,6 +47,24 @@ def candidate_proof(manifest: object) -> tuple[list[str], dict | None]:
     gold = manifest.get("gold_suite_summary")
     if not gold_summary_valid(gold):
         failures.append("gold_suite_binding_missing")
+    snapshot = manifest.get("source_snapshot_review")
+    if snapshot is not None:
+        counts = snapshot.get("status_counts") if isinstance(snapshot, dict) else None
+        if (not isinstance(snapshot, dict)
+                or not digest_identity(snapshot.get("review_sha256"))
+                or not digest_identity(snapshot.get("source_watermark_sha256"))
+                or not isinstance(counts, dict)
+                or not counts
+                or any(key not in {"same_bytes", "changed_bytes", "source_file_missing"}
+                       or type(value) is not int or value < 0
+                       for key, value in counts.items())
+                or not isinstance(gold, dict)
+                or gold.get("source_snapshot_review_sha256")
+                != snapshot.get("review_sha256")
+                or not digest_identity(gold.get("source_snapshot_gold_review_sha256"))):
+            failures.append("source_snapshot_review_invalid")
+    elif isinstance(gold, dict) and gold.get("source_snapshot_review_sha256") is not None:
+        failures.append("source_snapshot_review_invalid")
     automatic = manifest.get("query_seed_summary")
     automatic_count = automatic.get("case_count") if isinstance(automatic, dict) else None
     if type(automatic_count) is not int or automatic_count < 0:
@@ -72,6 +90,21 @@ def candidate_proof(manifest: object) -> tuple[list[str], dict | None]:
                         and (not isinstance(query["coverage"], dict)
                              or query["coverage"].get("passed") is not True)):
                 failures.append("query_result_gate_failed")
+                break
+            coverage = query.get("coverage")
+            if snapshot is not None and (
+                (coverage is None and query.get("same_path_order") is not True)
+                or (coverage is not None and (
+                    coverage.get("policy") != "simple-conjunction-source-snapshot-v1"
+                    or coverage.get("source_snapshot_review_sha256")
+                    != snapshot.get("review_sha256")
+                    or coverage.get("baseline_paths_retained_in_order") is not True
+                    or coverage.get("all_candidate_hits_supported") is not True
+                    or coverage.get("all_current_hits_supported") is not True
+                    or any(type(coverage.get(key)) is not int or coverage[key] < 0
+                           for key in ("same_byte_baseline_path_count",
+                                       "stale_baseline_path_count"))))):
+                failures.append("source_snapshot_query_contract_invalid")
                 break
             seen.add(query["id"])
     if any(not digest_identity(manifest.get(key)) for key in (
@@ -157,6 +190,12 @@ def gold_summary_valid(value: object) -> bool:
         return False
     if value.get("schema_version") != "mainrag.storage-v2.gold-suite-summary.v1":
         return False
+    if (value.get("source_snapshot_review_sha256") is not None
+            and not digest_identity(value["source_snapshot_review_sha256"])):
+        return False
+    if (value.get("source_snapshot_gold_review_sha256") is not None
+            and not digest_identity(value["source_snapshot_gold_review_sha256"])):
+        return False
     if not isinstance(value.get("suite_sha256"), str) or not re.fullmatch(
         r"[0-9a-f]{64}", value["suite_sha256"]
     ) or not isinstance(value.get("source_class"), str) or not value["source_class"]:
@@ -234,6 +273,12 @@ def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
             proof_failures, proof_summary = candidate_proof(
                 candidate.get("qualification_manifest"))
             failures.extend(proof_failures)
+            snapshot = candidate.get("qualification_manifest", {}).get(
+                "source_snapshot_review") if isinstance(
+                    candidate.get("qualification_manifest"), dict) else None
+            if isinstance(snapshot, dict) and snapshot.get(
+                    "source_watermark_sha256") != candidate.get("source_watermark_sha256"):
+                failures.append("source_snapshot_watermark_mismatch")
             source_expected = expected_by_source.get(source["source_id"])
             if expected_by_source:
                 commit_matches = source_expected == (

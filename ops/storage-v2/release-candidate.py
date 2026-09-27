@@ -406,6 +406,69 @@ def path_identity(results: list[dict[str, Any]]) -> list[str]:
     return identity
 
 
+def read_snapshot_review(path: Path, expected_sha256: str, checkpoint: dict[str, Any],
+                         adapter_profile_id: str) -> dict[str, Any]:
+    """Require a bounded private source-drift review for the exact watermark."""
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise RuntimeError("exact source snapshot review digest is required")
+    metadata = path.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077 \
+            or metadata.st_size > 32 * 1024 * 1024:
+        raise RuntimeError("source snapshot review must be a bounded private regular file")
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise RuntimeError("source snapshot review digest differs")
+    review = json.loads(raw)
+    if not isinstance(review, dict) \
+            or review.get("schema_version") != "mainrag.storage-v2.source-snapshot-review.v1" \
+            or review.get("source_id") != checkpoint["source_id"] \
+            or review.get("source_type") != "fs" \
+            or review.get("source_watermark_sha256") != checkpoint["source_watermark_sha256"] \
+            or review.get("adapter_profile_id") != adapter_profile_id \
+            or type(review.get("item_count")) is not int or review["item_count"] < 0 \
+            or type(review.get("captured_at_unix")) is not int \
+            or any(not isinstance(review.get(key), str)
+                   or not re.fullmatch(r"[0-9a-f]{64}", review[key])
+                   for key in ("source_root_sha256", "source_config_sha256")):
+        raise RuntimeError("source snapshot review identity differs")
+    paths = review.get("paths")
+    if not isinstance(paths, dict) or not paths:
+        raise RuntimeError("source snapshot review path set is empty")
+    counts: dict[str, int] = {}
+    for path_sha, row in paths.items():
+        if not isinstance(path_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", path_sha) \
+                or not isinstance(row, dict) or row.get("status") not in {
+                    "same_bytes", "changed_bytes", "source_file_missing"
+                } or not isinstance(row.get("legacy_sha256"), str) \
+                or not re.fullmatch(r"[0-9a-f]{64}", row["legacy_sha256"]):
+            raise RuntimeError("source snapshot review path identity differs")
+        observed = row.get("observed_sha256")
+        if (row["status"] == "source_file_missing" and observed is not None) \
+                or (row["status"] != "source_file_missing"
+                    and (not isinstance(observed, str)
+                         or not re.fullmatch(r"[0-9a-f]{64}", observed)
+                         or (observed == row["legacy_sha256"])
+                         != (row["status"] == "same_bytes"))):
+            raise RuntimeError("source snapshot review byte classification differs")
+        counts[row["status"]] = counts.get(row["status"], 0) + 1
+    if review.get("status_counts") != counts:
+        raise RuntimeError("source snapshot review counts differ")
+    review["review_sha256"] = expected_sha256
+    return review
+
+
+def require_live_snapshot(api_url: str, token: str, source_id: int,
+                          review: dict[str, Any]) -> None:
+    live = request(api_url, token, "GET",
+                   f"/api/v1/admin/sources/{source_id}/storage-v2-release-watermark",
+                   timeout_seconds=120)
+    if (live.get("source_id") != source_id
+            or live.get("source_watermark_sha256") != review["source_watermark_sha256"]
+            or live.get("adapter_profile_id") != review["adapter_profile_id"]
+            or live.get("item_count") != review["item_count"]):
+        raise RuntimeError("live source adapter differs from frozen snapshot review")
+
+
 def query_set_sha256(comparisons: list[dict[str, Any]]) -> str:
     fixtures = sorted(
         json.dumps(item["fixture"], sort_keys=True, separators=(",", ":")).encode()
@@ -442,7 +505,8 @@ def query_seed_summary(seeds: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def load_gold_suite(arguments: argparse.Namespace, checkpoint: dict[str, Any],
-                    verified: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+                    verified: dict[str, Any],
+                    source_review: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Bind a protected, reviewed source-class suite to this exact candidate."""
     path = arguments.gold_suite
     expected = arguments.expected_gold_suite_sha256
@@ -480,6 +544,40 @@ def load_gold_suite(arguments: argparse.Namespace, checkpoint: dict[str, Any],
     if any(type(suite.get(key)) is not type(value) or suite[key] != value
            for key, value in bindings.items()):
         raise RuntimeError("gold suite candidate identity differs")
+    source_review_sha256 = (source_review["review_sha256"]
+                            if source_review is not None else None)
+    if suite.get("source_snapshot_review_sha256") != source_review_sha256:
+        raise RuntimeError("gold suite source snapshot review binding differs")
+    gold_review_sha256 = suite.get("source_snapshot_gold_review_sha256")
+    if (source_review is not None and
+        (not isinstance(gold_review_sha256, str)
+         or not re.fullmatch(r"[0-9a-f]{64}", gold_review_sha256))) \
+            or (source_review_sha256 is None and gold_review_sha256 is not None):
+        raise RuntimeError("gold suite independent snapshot review binding differs")
+    if source_review is not None:
+        review_path = getattr(arguments, "source_snapshot_gold_review", None)
+        if review_path is None:
+            raise RuntimeError("independent source snapshot gold review is required")
+        review_metadata = review_path.lstat()
+        if (not stat.S_ISREG(review_metadata.st_mode)
+                or stat.S_IMODE(review_metadata.st_mode) & 0o077
+                or review_metadata.st_size > 1024 * 1024):
+            raise RuntimeError("source snapshot gold review must be a bounded private file")
+        review_raw = review_path.read_bytes()
+        if hashlib.sha256(review_raw).hexdigest() != gold_review_sha256:
+            raise RuntimeError("source snapshot gold review digest differs")
+        gold_review = json.loads(review_raw, object_pairs_hook=unique_keys)
+        if (not isinstance(gold_review, dict)
+                or gold_review.get("source_id") != checkpoint["source_id"]
+                or gold_review.get("source_type") != "fs"
+                or gold_review.get("source_class") != suite.get("source_class")
+                or gold_review.get("source_snapshot_review_sha256")
+                != source_review_sha256
+                or gold_review.get("cases") != suite.get("cases")
+                or type(gold_review.get("reviewed_at_unix")) is not int
+                or gold_review["reviewed_at_unix"]
+                < source_review["captured_at_unix"]):
+            raise RuntimeError("source snapshot gold review differs from frozen source")
     source_class = suite.get("source_class")
     cases = suite.get("cases")
     if not isinstance(source_class, str) or not 1 <= len(source_class) <= 80:
@@ -494,6 +592,10 @@ def load_gold_suite(arguments: argparse.Namespace, checkpoint: dict[str, Any],
             "id", "query", "expected_path_sha256", "expects_match",
         }:
             raise RuntimeError("gold suite case shape differs")
+        if source_review is not None and case["expects_match"] is True \
+                and source_review["paths"].get(case["expected_path_sha256"], {}).get(
+                    "status") != "same_bytes":
+            raise RuntimeError("positive gold expectation is not a same-byte source path")
         if not isinstance(case["id"], str) or not re.fullmatch(r"[0-9a-f]{64}", case["id"]):
             raise RuntimeError("gold suite case ID must be opaque SHA-256")
         if not isinstance(case["query"], str) or not 1 <= len(case["query"].encode()) <= 512:
@@ -520,6 +622,8 @@ def load_gold_suite(arguments: argparse.Namespace, checkpoint: dict[str, Any],
         "negative_case_count": negative,
         "distinct_query_count": len({case["query"] for case in cases}),
         "representative_coverage": "SUITE_DIGEST_BOUND_REVIEW_EXTERNAL",
+        "source_snapshot_review_sha256": source_review_sha256,
+        "source_snapshot_gold_review_sha256": gold_review_sha256,
     }
 
 
@@ -602,7 +706,8 @@ def repeated_result_diagnostics(left: dict[str, Any], right: dict[str, Any]) -> 
 def search_query_gates(seed: dict[str, Any], current: dict[str, Any],
                        storage: dict[str, Any], max_query_ms: int,
                        coverage: dict[str, Any] | None = None,
-                       checkpoint: dict[str, Any] | None = None) -> dict[str, Any]:
+                       checkpoint: dict[str, Any] | None = None,
+                       source_review: dict[str, Any] | None = None) -> dict[str, Any]:
     """Classify observable failures without accepting a plausible difference."""
     current_paths = path_identity(current["results"])
     storage_paths = path_identity(storage["results"])
@@ -613,7 +718,8 @@ def search_query_gates(seed: dict[str, Any], current: dict[str, Any],
     )
     coverage_check = None
     if coverage is not None:
-        coverage_check = query_coverage_gates(seed, current, storage, coverage, checkpoint or {})
+        coverage_check = query_coverage_gates(
+            seed, current, storage, coverage, checkpoint or {}, source_review)
         quality = coverage_check["passed"]
     took_ms = storage.get("took_ms")
     performance = (type(took_ms) is int and 0 <= took_ms <= max_query_ms)
@@ -644,10 +750,12 @@ def search_query_gates(seed: dict[str, Any], current: dict[str, Any],
 
 
 def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage: dict[str, Any],
-                         evidence: dict[str, Any], checkpoint: dict[str, Any]) -> dict[str, Any]:
+                         evidence: dict[str, Any], checkpoint: dict[str, Any],
+                         source_review: dict[str, Any] | None = None) -> dict[str, Any]:
     """Require complete legacy path recall and independent support for every new hit."""
     version = evidence.get("schema_version")
-    policy = ("simple-conjunction-non-inferiority-v2"
+    policy = ("simple-conjunction-source-snapshot-v1" if source_review is not None else
+              "simple-conjunction-non-inferiority-v2"
               if version == "mainrag.storage-v2.query-coverage.v4" else
               "simple-conjunction-non-inferiority-v1"
               if version == "mainrag.storage-v2.query-coverage.v3"
@@ -657,6 +765,8 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
                        "mainrag.storage-v2.query-coverage.v2",
                        "mainrag.storage-v2.query-coverage.v3",
                        "mainrag.storage-v2.query-coverage.v4"} \
+            or (source_review is not None
+                and version != "mainrag.storage-v2.query-coverage.v4") \
             or evidence.get("query_sha256") != sha256_text(seed["query"]) \
             or any(type(evidence.get(key)) is not int or evidence[key] <= 0
                    for key in ("source_id", "generation_id", "generation_seq")) \
@@ -728,8 +838,35 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
     # paths once each; every distinct baseline path still has to remain in the
     # candidate Top-10 and retain its relative order.
     baseline_paths = list(dict.fromkeys(current_paths))
-    retained = list(dict.fromkeys(path for path in storage_paths if path in set(baseline_paths)))
-    positive = (seed["expected_path_sha256"] in storage_paths and retained == baseline_paths)
+    if source_review is not None:
+        if (source_review.get("source_id") != checkpoint["source_id"]
+                or source_review.get("source_watermark_sha256")
+                != checkpoint["source_watermark_sha256"]
+                or not isinstance(source_review.get("paths"), dict)
+                or not isinstance(source_review.get("review_sha256"), str)
+                or any(path not in source_review["paths"] for path in baseline_paths)):
+            return failed
+        if any(not isinstance(source_review["paths"][path], dict)
+               for path in baseline_paths):
+            return failed
+        required_paths = [path for path in baseline_paths
+                          if source_review["paths"][path].get("status") == "same_bytes"]
+        stale_paths = [path for path in baseline_paths
+                       if source_review["paths"][path].get("status") in {
+                           "changed_bytes", "source_file_missing"}]
+        if len(required_paths) + len(stale_paths) != len(baseline_paths):
+            return failed
+    else:
+        required_paths = baseline_paths
+        stale_paths = []
+    retained = list(dict.fromkeys(path for path in storage_paths if path in set(required_paths)))
+    expected_review = (source_review["paths"].get(seed["expected_path_sha256"])
+                       if source_review is not None else None)
+    positive = (expected_review is None
+                or (isinstance(expected_review, dict)
+                    and expected_review.get("status") == "same_bytes")) \
+               and (seed["expected_path_sha256"] in storage_paths
+                and retained == required_paths)
     negative = not current["results"] and not storage["results"]
     classes: dict[str, int] = {}
     for path in set(storage_paths) - set(current_paths):
@@ -743,9 +880,13 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
         classes[reason] = classes.get(reason, 0) + 1
     return {"passed": positive if seed["expects_match"] else negative,
             "policy": policy,
+            "source_snapshot_review_sha256": (
+                source_review["review_sha256"] if source_review is not None else None),
+            "same_byte_baseline_path_count": len(required_paths),
+            "stale_baseline_path_count": len(stale_paths),
             "all_candidate_hits_supported": True,
             "all_current_hits_supported": True,
-            "baseline_paths_retained_in_order": retained == baseline_paths,
+            "baseline_paths_retained_in_order": retained == required_paths,
             "additional_path_classes": classes}
 
 
@@ -863,8 +1004,21 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
         or verified["status"] not in {"verified", "release_candidate"}
     ):
         raise RuntimeError("server verification returned a different candidate identity")
+    source_review = None
+    if getattr(arguments, "source_snapshot_review", None) is not None:
+        progress["phase"] = "source_snapshot_review"
+        source_review = read_snapshot_review(
+            arguments.source_snapshot_review,
+            arguments.source_snapshot_review_sha256,
+            checkpoint, verified["adapter_profile_id"])
+        require_live_snapshot(arguments.api_url, token, arguments.source_id, source_review)
+        progress["source_snapshot_review"] = {
+            "review_sha256": source_review["review_sha256"],
+            "source_watermark_sha256": source_review["source_watermark_sha256"],
+            "status_counts": source_review["status_counts"],
+        }
     progress["phase"] = "gold_suite"
-    gold_cases, gold_summary = load_gold_suite(arguments, checkpoint, verified)
+    gold_cases, gold_summary = load_gold_suite(arguments, checkpoint, verified, source_review)
     progress["gold_suite_summary"] = gold_summary
     intelligence = verify_intelligence(
         arguments.api_url, token, arguments.source_id, checkpoint["generation_seq"],
@@ -927,7 +1081,8 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
                  "current_chunk_ids": [hit["chunk_id"] for hit in current["results"]]},
             )
             query_coverage.append(coverage)
-        gates = search_query_gates(seed, current, storage, arguments.max_query_ms, coverage, checkpoint)
+        gates = search_query_gates(seed, current, storage, arguments.max_query_ms,
+                                   coverage, checkpoint, source_review)
         case_run_id = sha256_text(f"{kind}:{seed['id']}")
         gates["id"] = case_run_id
         quality_passed &= gates["quality_passed"]
@@ -949,6 +1104,8 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
         query_results.append(gates)
         progress.pop("pending_query")
     progress["phase"] = "candidate_search"
+    if source_review is not None:
+        require_live_snapshot(arguments.api_url, token, arguments.source_id, source_review)
     if not query_results or not (quality_passed and performance_passed and degradation_passed):
         atomic_private_json(arguments.output, {
             "status": "FAIL", "failed_gate": "candidate_search",
@@ -957,6 +1114,7 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             "query_results": query_results, "comparisons": comparisons,
             "query_seed_summary": progress["query_seed_summary"],
             "gold_suite_summary": gold_summary,
+            "source_snapshot_review": progress.get("source_snapshot_review"),
             "query_coverage": query_coverage,
             "checks": {"quality": quality_passed and bool(query_results),
                        "performance": performance_passed and bool(query_results),
@@ -1023,6 +1181,7 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             "query_results": query_results,
             "query_seed_summary": progress["query_seed_summary"],
             "gold_suite_summary": gold_summary,
+            "source_snapshot_review": progress.get("source_snapshot_review"),
             "query_coverage_sha256": sha256_text(json.dumps(query_coverage, sort_keys=True)),
             "intelligence": intelligence,
             "resource": {"free_bytes": free_bytes, "minimum_free_bytes": arguments.minimum_free_bytes},
@@ -1077,6 +1236,9 @@ def main() -> int:
     parser.add_argument("--max-query-ms", type=int, default=2000)
     parser.add_argument("--gold-suite", type=Path)
     parser.add_argument("--expected-gold-suite-sha256")
+    parser.add_argument("--source-snapshot-review", type=Path)
+    parser.add_argument("--source-snapshot-review-sha256")
+    parser.add_argument("--source-snapshot-gold-review", type=Path)
     arguments = parser.parse_args()
     if len(arguments.commit_sha) != 40 or any(c not in "0123456789abcdef" for c in arguments.commit_sha):
         parser.error("--commit-sha must be a full lowercase Git SHA")
@@ -1085,6 +1247,14 @@ def main() -> int:
     if arguments.phase == "verify" and (arguments.gold_suite is None or
                                         arguments.expected_gold_suite_sha256 is None):
         parser.error("verify requires --gold-suite and --expected-gold-suite-sha256")
+    if ((arguments.source_snapshot_review is None)
+            != (arguments.source_snapshot_review_sha256 is None)):
+        parser.error("source snapshot review requires its exact protected SHA-256")
+    if arguments.phase != "verify" and arguments.source_snapshot_review is not None:
+        parser.error("source snapshot review applies only to verification")
+    if ((arguments.source_snapshot_review is None)
+            != (arguments.source_snapshot_gold_review is None)):
+        parser.error("source snapshot review requires its frozen gold review")
     if arguments.phase == "build" and (arguments.maximum_build_bytes is None or
                                        arguments.maximum_build_bytes <= 0):
         parser.error("build requires a positive --maximum-build-bytes estimate")
