@@ -418,8 +418,38 @@ ALTER TABLE storage_v2_activation_set_evidence
             "regular ingest source registry drift",
         )
         self.assertEqual(self.source_state(ADMIN, digest, 1)["active_generation_id"], old_id)
+        # Model the production table/function owner. The synthetic bootstrap
+        # otherwise runs as a superuser and conceals 065's revoked receipt DML.
+        self.sql(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mainrag; "
+            "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO mainrag; "
+            "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO mainrag; "
+            "ALTER TABLE storage_v2_activation_set_evidence OWNER TO mainrag; "
+            "ALTER TABLE logical_source OWNER TO mainrag; "
+            "ALTER TABLE source_generation OWNER TO mainrag; "
+            "ALTER TABLE storage_v2_ingest_run OWNER TO mainrag; "
+            "ALTER TABLE storage_v2_active_ingest_receipt OWNER TO mainrag; "
+            "ALTER TABLE sources OWNER TO mainrag; "
+            "ALTER FUNCTION storage_v2_activate_regular_ingest("
+            "TEXT, BIGINT, BIGINT, BIGINT, TEXT, TEXT, TEXT, TEXT, TEXT) OWNER TO mainrag; "
+            "REVOKE INSERT, UPDATE, DELETE ON storage_v2_active_ingest_receipt FROM mainrag;"
+        )
+        self.assert_sql_fails(
+            "SET ROLE mainrag; " + self.admin(activate),
+            "permission denied for table storage_v2_active_ingest_receipt",
+        )
+        self.assertEqual(self.source_state(ADMIN, digest, 1)["active_generation_id"], old_id)
+        self.command(self.database,
+                     file=ROOT / "migrations/066_storage_v2_controlled_frontier_owner.sql")
+        self.command(self.database,
+                     file=ROOT / "migrations/067_storage_v2_active_ingest_receipt_owner.sql")
         receipt = json.loads(self.sql("SET ROLE mainrag; " + self.admin(activate)))
         self.assertEqual(receipt["status"], "ACTIVE_INGEST_COMMITTED")
+        self.assert_sql_fails(
+            "SET ROLE mainrag; UPDATE storage_v2_active_ingest_receipt "
+            "SET source_count=99 WHERE id=" + str(receipt["receipt_id"]),
+            "permission denied for table storage_v2_active_ingest_receipt",
+        )
         self.assertEqual(self.source_state(ADMIN, digest, 1)["active_generation_id"], new_id)
         self.assertEqual(self.search(ADMIN, digest)["total"], 2)
         self.assertEqual(self.intelligence(ADMIN, digest, "card")["source_count"], 2)
