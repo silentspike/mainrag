@@ -410,8 +410,12 @@ admits only hits with a matching verified segment for generations with that
 projection; older generations retain their previous retrieval path. Its query
 evidence checks immutable body text, a matching segment, current indexed hits,
 path recall and retained order. Boolean, phrase and exact ASTs retain their
-existing behavior. Install 069 after 068 and build fresh candidates under the
-accepted package.
+existing behavior. Install 069 after 068.
+Migration 070 moves the lexical-segment presence check into a source-authorized
+function with row security enabled. Install it immediately after 069 and before
+building fresh candidates or using named and active storage-v2 search. A direct
+segment-table scan inside the existing exact/active functions fails against
+the forced RLS policy.
 `schema.sql` is a historical bootstrap and intentionally does not apply these
 administrator-only repairs. Do not run the API with an administrator account.
 
@@ -590,8 +594,9 @@ immutable body digest and independently counts the literal term from that text;
 the count must equal the collision-checked posting frequency. Unsupported
 multi-component projections, mismatched bodies, and out-of-scope identities fail
 closed. Token boundaries and case folding follow the lexical profile's database
-locale. The proof endpoint supports single alphanumeric/underscore terms up to
-128 UTF-8 bytes and at most ten unique identities per retrieval path.
+locale. The proof endpoint supports one to eight plain
+alphanumeric/underscore terms up to 128 UTF-8 bytes and at most ten unique
+identities per retrieval path.
 
 Every legacy Top-10 path must remain in the candidate Top-10 in the same relative
 order, and the seed's expected path must be present. Every candidate hit must
