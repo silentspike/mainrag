@@ -210,12 +210,24 @@ SELECT id,'text',digest('foo_3d alpha','sha256'),'','foo_3d alpha',1,1
         self.assertEqual(self.exact_search(conjunction, source_id=19), before_conjunction)
         self.assertEqual(self.exact_search(
             {"type": "term", "value": "3d"}, source_id=19), before_term)
+        self.file(schema.ROOT / "migrations/072_storage_v2_segment_authorization_set.sql")
+        self.assertEqual(self.exact_search(conjunction, source_id=19), before_conjunction)
+        self.assertEqual(self.exact_search(
+            {"type": "term", "value": "3d"}, source_id=19), before_term)
         self.assertEqual(self.sql(self.admin(
             f"SELECT occurrence_id FROM storage_v2_source_segment_ranks("
             f"ARRAY[{occurrence},999999]::BIGINT[],'foo alpha')")), str(occurrence))
         self.assertEqual(self.sql(self.actor(schema.OTHER_ID,
             f"SELECT count(*) FROM storage_v2_source_segment_ranks("
             f"ARRAY[{occurrence}]::BIGINT[],'foo alpha')")), "0")
+        self.assertEqual(self.sql(
+            f"SET ROLE mainrag; SET app.user_id='{schema.OTHER_ID}'; "
+            f"SELECT count(*) FROM storage_v2_lexical_segment "
+            f"WHERE occurrence_id={occurrence}"), "0")
+        self.assertEqual(self.sql(
+            f"SET ROLE mainrag; SET app.user_id='{schema.ADMIN_ID}'; "
+            f"SELECT count(*) FROM storage_v2_lexical_segment "
+            f"WHERE occurrence_id={occurrence}"), "1")
         for signature in (
             "storage_v2_search_exact(bigint,text,jsonb,jsonb,bigint)",
             "storage_v2_search_active_unchecked(text,jsonb,jsonb,bigint,bigint,boolean)",
