@@ -119,6 +119,23 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         ensure!(schema.status.success(), "managed fixture schema installation failed: {}",
             String::from_utf8_lossy(&schema.stderr));
         let mut client = connect(&config).await?;
+        client.batch_execute(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles \
+             WHERE rolname='mainrag_v2_frontier_owner') THEN \
+             CREATE ROLE mainrag_v2_frontier_owner NOLOGIN INHERIT; END IF; END $$; \
+             GRANT mainrag TO mainrag_v2_frontier_owner; \
+             GRANT SELECT ON ALL TABLES IN SCHEMA public TO mainrag;"
+        ).await?;
+        let lexical = Command::new("psql")
+            .arg("-X").arg("--no-psqlrc")
+            .arg("--set=ON_ERROR_STOP=1")
+            .arg("--host=127.0.0.1").arg("--username=fixture")
+            .arg("--dbname").arg(&database)
+            .arg("--file").arg(project.join("migrations/068_storage_v2_lexical_segments.sql"))
+            .env("PGPASSWORD", "fixture_only")
+            .output()?;
+        ensure!(lexical.status.success(), "managed fixture lexical migration failed: {}",
+            String::from_utf8_lossy(&lexical.stderr));
         client.batch_execute(&format!(
             "CREATE TABLE users(id UUID PRIMARY KEY, is_admin BOOLEAN NOT NULL); \
              INSERT INTO users VALUES ('{PRINCIPAL}', TRUE); \
