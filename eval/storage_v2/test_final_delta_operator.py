@@ -109,7 +109,7 @@ class FinalDeltaOperatorTests(unittest.TestCase):
         }
         verification = {key: "PASS" for key in (
             "artifact_root", "authorization", "body_pack_integrity", "intelligence",
-            "intervals", "legacy_intelligence_export")}
+            "intervals", "legacy_intelligence_export", "lexical_segment_integrity")}
         artifact = {
             "checkpoint": {"source_id": 2, "generation_id": 23,
                            "generation_seq": 2,
