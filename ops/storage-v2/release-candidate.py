@@ -171,8 +171,11 @@ def reconstructed_source_state(api_url: str, token: str, checkpoint: dict[str, A
             or int(time.time()) - int(age.stdout.strip()) <= proof["generation_created_at_unix"] + 2:
         raise RuntimeError("API restart after the persisted build is not established")
     state = source_state(api_url, token, checkpoint["source_id"], checkpoint["generation_seq"])
-    if state["server_instance_id"] != checkpoint["server_instance_id"]:
-        raise RuntimeError("API instance changed after checkpoint reconstruction")
+    if (state.get("generation_id") != checkpoint["generation_id"]
+            or state.get("generation_seq") != checkpoint["generation_seq"]
+            or state.get("status") not in {"verified", "release_candidate"}
+            or state.get("active_generation_id") != checkpoint["active_generation_id"]):
+        raise RuntimeError("reconstructed generation or active pointer changed")
     return state
 
 
