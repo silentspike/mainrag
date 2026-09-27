@@ -156,6 +156,16 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             .output()?;
         ensure!(lexical_rls.status.success(), "managed fixture lexical RLS migration failed: {}",
             String::from_utf8_lossy(&lexical_rls.stderr));
+        let lexical_batches = Command::new("psql")
+            .arg("-X").arg("--no-psqlrc")
+            .arg("--set=ON_ERROR_STOP=1")
+            .arg("--host=127.0.0.1").arg("--username=fixture")
+            .arg("--dbname").arg(&database)
+            .arg("--file").arg(project.join("migrations/077_storage_v2_batched_lexical_segments.sql"))
+            .env("PGPASSWORD", "fixture_only")
+            .output()?;
+        ensure!(lexical_batches.status.success(), "managed fixture lexical batch migration failed: {}",
+            String::from_utf8_lossy(&lexical_batches.stderr));
         client.batch_execute(&format!(
             "CREATE TABLE users(id UUID PRIMARY KEY, is_admin BOOLEAN NOT NULL); \
              INSERT INTO users VALUES ('{PRINCIPAL}', TRUE); \
