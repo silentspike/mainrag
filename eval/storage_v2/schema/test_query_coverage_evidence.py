@@ -550,6 +550,13 @@ SELECT id,'text',digest('alpha','sha256'),'','alpha','prefixonly',1,1
                                   f"WHERE occurrence_id={known_occurrence}"), "2")
         self.assertEqual(self.sql(f"SELECT count(*) FROM storage_v2_legacy_lexical_segment "
                                   f"WHERE occurrence_id={known_occurrence}"), "2")
+        self.file(schema.ROOT / "migrations/081_storage_v2_set_based_lexical_verification.sql")
+        verification_definition = self.sql(
+            "SELECT pg_get_functiondef("
+            "'storage_v2_verify_lexical_segments(bigint)'::regprocedure)")
+        self.assertIn("segment_values AS MATERIALIZED", verification_definition)
+        self.assertIn("segment_checks AS", verification_definition)
+        self.assertNotIn("LEFT JOIN LATERAL", verification_definition)
         self.sql(f"DELETE FROM chunks WHERE id={context_chunk}")
         self.assertEqual(self.sql(self.admin(rank_query)).splitlines(),
                          [str(context_occurrence), str(generated_occurrence)])
