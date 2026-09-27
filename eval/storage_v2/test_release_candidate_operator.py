@@ -641,6 +641,7 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
 
     def test_supported_coverage_is_bound_into_dual_read_and_qualification(self) -> None:
         seed, current, storage, proof, identity = self.coverage_fixture()
+        seed["id"] = "1" * 64
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             arguments = Namespace(checkpoint=directory / "checkpoint.json",
@@ -661,7 +662,7 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                     "evidence_id": "fixture-evidence", "artifact_sha256": "e" * 64}
             qualified = {**identity, "status": "release_candidate", "evidence_id": "fixture-qualified",
                          "active_generation_id": None}
-            positive = {"id": "1" * 64, "query": "reviewed positive query",
+            positive = {"id": seed["id"], "query": "reviewed positive query",
                         "expected_path_sha256": MODULE.sha256_text("fixture.txt"), "expects_match": True}
             negative = {"id": "2" * 64, "query": "reviewed negative query",
                         "expected_path_sha256": "0" * 64, "expects_match": False}
@@ -686,10 +687,19 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
             self.assertEqual(len(comparisons), 3)
             self.assertEqual([item["fixture"]["kind"] for item in comparisons],
                              ["automatic", "gold", "gold"])
+            self.assertEqual(len({item["fixture"]["id"] for item in comparisons}), 3)
+            self.assertEqual(comparisons[0]["fixture"]["id"],
+                             MODULE.sha256_text(f"automatic:{seed['id']}"))
+            self.assertEqual(comparisons[1]["fixture"]["id"],
+                             MODULE.sha256_text(f"gold:{positive['id']}"))
             self.assertEqual(comparisons[0]["fixture"]["coverage_evidence_sha256"],
                              MODULE.sha256_text(json.dumps(proof, sort_keys=True)))
             self.assertEqual(dual_request["query_set_sha256"], MODULE.query_set_sha256(comparisons))
             manifest = calls[10].args[4]["manifest"]
+            self.assertEqual(
+                [item["id"] for item in manifest["query_results"]],
+                [item["fixture"]["id"] for item in comparisons],
+            )
             evidence_id = calls[10].args[4]["evidence_id"]
             self.assertEqual(uuid.UUID(evidence_id).version, 4)
             self.assertEqual(manifest["query_coverage_sha256"],
