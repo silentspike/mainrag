@@ -531,6 +531,10 @@ and named-generation reads, the applicable intelligence commands, latency and
 resource gates, records accepted dual-read evidence, and only then submits the
 qualification envelope. Raw checkpoints, seeds, result sets, and evidence stay
 outside Git with mode `0600`.
+The lexical projection check reconstructs every segment digest and FTS vector.
+For large generations its PostgreSQL statement has a 30-minute transaction-local
+deadline; the prior deadline is restored before subsequent verification queries.
+The integrity comparison and required zero-error counts are unchanged.
 
 Verification also requires a protected, mode-0600 gold-suite JSON file whose
 raw SHA-256 was reviewed and supplied explicitly. Schema
@@ -643,9 +647,12 @@ into the suite as `source_snapshot_review_sha256` and
 `source_snapshot_gold_review_sha256`. Pass both protected reviews to
 `release-candidate.py verify` with `--source-snapshot-review`,
 `--source-snapshot-review-sha256`, and `--source-snapshot-gold-review`. Verification
-requires the same live watermark before and after the query set. Only paths
-proved to have identical bytes retain the ordered legacy Top-10 requirement;
-changed or missing paths are classified separately. A positive gold expectation
+requires the same live watermark before and after the query set. The protected
+review is bounded at 64 MiB and each live watermark request at 10 minutes so
+large registered file sets can complete without dropping either identity
+check. Only paths proved to have identical bytes retain the ordered legacy
+Top-10 requirement; changed or missing paths are classified separately. A
+positive gold expectation
 pointing to a changed or missing legacy file still fails and must be reviewed
 and frozen before the run. Without this review the strict legacy comparison
 continues to apply. The review digest, watermark, per-query classification,

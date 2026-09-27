@@ -446,7 +446,7 @@ def read_snapshot_review(path: Path, expected_sha256: str, checkpoint: dict[str,
         raise RuntimeError("exact source snapshot review digest is required")
     metadata = path.lstat()
     if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077 \
-            or metadata.st_size > 32 * 1024 * 1024:
+        or metadata.st_size > 64 * 1024 * 1024:
         raise RuntimeError("source snapshot review must be a bounded private regular file")
     raw = path.read_bytes()
     if hashlib.sha256(raw).hexdigest() != expected_sha256:
@@ -494,7 +494,7 @@ def require_live_snapshot(api_url: str, token: str, source_id: int,
                           review: dict[str, Any]) -> None:
     live = request(api_url, token, "GET",
                    f"/api/v1/admin/sources/{source_id}/storage-v2-release-watermark",
-                   timeout_seconds=120)
+                   timeout_seconds=600)
     if (live.get("source_id") != source_id
             or live.get("source_watermark_sha256") != review["source_watermark_sha256"]
             or live.get("adapter_profile_id") != review["adapter_profile_id"]

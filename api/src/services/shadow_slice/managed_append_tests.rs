@@ -191,6 +191,35 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             3 * first_bytes.len() as u64,
             1,
         )?;
+        let transaction = client.transaction().await?;
+        transaction
+            .batch_execute(&format!(
+                "SET LOCAL app.user_id='{PRINCIPAL}'; SET LOCAL statement_timeout='10s'"
+            ))
+            .await?;
+        let verified = Box::pin(verify_release_candidate(
+            &transaction,
+            63,
+            &ReleaseCandidateVerifyInput {
+                generation_id: initial.generation_id,
+            },
+            &packs,
+            4096,
+        ))
+        .await?;
+        ensure!(
+            verified.lexical_segment_verification["invalid_count"] == 0,
+            "managed lexical projection differs"
+        );
+        let restored_timeout: String = transaction
+            .query_one("SHOW statement_timeout", &[])
+            .await?
+            .get(0);
+        ensure!(
+            restored_timeout == "10s",
+            "managed verification changed the caller's statement timeout"
+        );
+        transaction.rollback().await?;
         drop(client);
         let mut client = connect(&config).await?;
         let repeated = Box::pin(run(&mut client, &root, &packs)).await?;
