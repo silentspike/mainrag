@@ -25,6 +25,9 @@ from pathlib import Path
 from typing import Any
 
 load_token = runpy.run_path(str(Path(__file__).with_name("operator_token.py")))["load_token"]
+candidate_proof = runpy.run_path(
+    str(Path(__file__).with_name("candidate-aggregate-audit.py"))
+)["candidate_proof"]
 
 
 CHECKS = (
@@ -78,7 +81,8 @@ THIN_POOL_MAX_DATA_PERCENT = Decimal(75)
 THIN_POOL_MAX_METADATA_PERCENT = Decimal(70)
 
 
-def request(api_url: str, token: str, method: str, path: str, body: object | None = None) -> Any:
+def request(api_url: str, token: str, method: str, path: str,
+            body: object | None = None, *, timeout_seconds: float = 24 * 3600) -> Any:
     data = None if body is None else json.dumps(body, separators=(",", ":")).encode()
     call = urllib.request.Request(
         api_url.rstrip("/") + path,
@@ -87,7 +91,7 @@ def request(api_url: str, token: str, method: str, path: str, body: object | Non
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(call, timeout=24 * 3600) as response:
+        with urllib.request.urlopen(call, timeout=timeout_seconds) as response:
             return json.load(response)
     except urllib.error.HTTPError as error:
         # API error bodies can contain protected source or query details. The
@@ -118,7 +122,28 @@ def atomic_private_json(path: Path, value: object, *, replace: bool = True) -> N
 
 def source_state(api_url: str, token: str, source_id: int, generation: int) -> dict[str, Any]:
     query = urllib.parse.urlencode({"generation": generation, "include_test": "true"})
-    return request(api_url, token, "GET", f"/api/v1/sources/{source_id}/shadow-state?{query}")
+    return request(api_url, token, "GET", f"/api/v1/sources/{source_id}/shadow-state?{query}",
+                   timeout_seconds=5)
+
+
+def restarted_source_state(api_url: str, token: str, source_id: int,
+                           generation: int, previous_instance: str) -> dict[str, Any]:
+    """Wait for the authenticated API readback after an operator restart."""
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            state = source_state(api_url, token, source_id, generation)
+        except urllib.error.URLError as error:
+            if not isinstance(error.reason, (ConnectionRefusedError, TimeoutError)):
+                raise
+        except TimeoutError:
+            pass
+        else:
+            if state["server_instance_id"] != previous_instance:
+                return state
+        if time.monotonic() >= deadline:
+            raise RuntimeError("restarted API did not become ready with a new instance")
+        time.sleep(0.5)
 
 
 def publish_telemetry(value: object) -> None:
@@ -621,10 +646,14 @@ def search_query_gates(seed: dict[str, Any], current: dict[str, Any],
 def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage: dict[str, Any],
                          evidence: dict[str, Any], checkpoint: dict[str, Any]) -> dict[str, Any]:
     """Require complete legacy path recall and independent support for every new hit."""
-    failed = {"passed": False, "policy": "literal-coverage-non-inferiority-v1"}
     version = evidence.get("schema_version")
+    policy = ("simple-conjunction-non-inferiority-v1"
+              if version == "mainrag.storage-v2.query-coverage.v3"
+              else "literal-coverage-non-inferiority-v1")
+    failed = {"passed": False, "policy": policy}
     if version not in {"mainrag.storage-v2.query-coverage.v1",
-                       "mainrag.storage-v2.query-coverage.v2"} \
+                       "mainrag.storage-v2.query-coverage.v2",
+                       "mainrag.storage-v2.query-coverage.v3"} \
             or evidence.get("query_sha256") != sha256_text(seed["query"]) \
             or any(type(evidence.get(key)) is not int or evidence[key] <= 0
                    for key in ("source_id", "generation_id", "generation_seq")) \
@@ -663,11 +692,12 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
                     or type(row.get("reference_frequency")) is not int \
                     or type(row.get("posting_frequency")) is not int \
                     or not (
-                        row["reference_frequency"] > 0
-                        and row["posting_frequency"] == row["reference_frequency"]
-                        or version == "mainrag.storage-v2.query-coverage.v2"
-                        and row.get("fts_body_matches") is True
-                        and row.get("segment_matches") is True
+                        (row["reference_frequency"] > 0
+                         and row["posting_frequency"] == row["reference_frequency"])
+                        or (version in {"mainrag.storage-v2.query-coverage.v2",
+                                        "mainrag.storage-v2.query-coverage.v3"}
+                            and row.get("fts_body_matches") is True
+                            and row.get("segment_matches") is True)
                     ):
                 return failed
     current_paths = path_identity(current["results"])
@@ -700,7 +730,7 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
             reason = "ranking_expansion"
         classes[reason] = classes.get(reason, 0) + 1
     return {"passed": positive if seed["expects_match"] else negative,
-            "policy": "literal-coverage-non-inferiority-v1",
+            "policy": policy,
             "all_candidate_hits_supported": True,
             "all_current_hits_supported": True,
             "baseline_paths_retained_in_order": retained == current_paths,
@@ -770,9 +800,10 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
     if checkpoint["source_id"] != arguments.source_id or checkpoint["commit_sha"] != arguments.commit_sha:
         raise RuntimeError("checkpoint source or commit identity differs")
     progress["phase"] = "restart_state"
-    state = source_state(arguments.api_url, token, arguments.source_id, checkpoint["generation_seq"])
-    if state["server_instance_id"] == checkpoint["server_instance_id"]:
-        raise RuntimeError("API restart was not observed after candidate construction")
+    state = restarted_source_state(
+        arguments.api_url, token, arguments.source_id,
+        checkpoint["generation_seq"], checkpoint["server_instance_id"],
+    )
     progress["phase"] = "resource_before_resume"
     free_before_resume = shutil.disk_usage(arguments.pack_root).free
     progress["free_bytes_before_resume"] = free_before_resume
@@ -867,11 +898,14 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             current_by_path.setdefault(sha256_text(result["file_path"]), []).append(
                 f"legacy:{int(result['chunk_id'])}"
             )
-        # The body-backed literal proof supports a single lexical term. Other
-        # reviewed gold queries require exact ordered-path equality instead.
-        literal = bool(re.fullmatch(r"[\w]{1,128}", seed["query"])) and len(seed["query"].encode()) <= 128
+        # The source-backed proof supports bounded simple conjunctions.
+        # Boolean, phrase and exact queries keep ordered-path comparison.
+        simple = bool(re.fullmatch(r"\w+(?: \w+){0,7}", seed["query"])) \
+            and len(seed["query"].encode()) <= 128 \
+            and all(word.lower() not in {"and", "or", "not"}
+                    for word in seed["query"].split(" "))
         coverage = None
-        if kind == "automatic" or literal:
+        if kind == "automatic" or simple:
             coverage = request(
                 arguments.api_url, token, "POST",
                 f"/api/v1/admin/sources/{arguments.source_id}/storage-v2-candidate-query-evidence",
@@ -983,8 +1017,12 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             "restart": {"server_instance_changed": True, "generation_reused": True},
         },
     }
-    progress["phase"] = "qualification"
+    progress["phase"] = "manifest_contract"
     progress["qualification"] = qualification
+    failures, _ = candidate_proof(qualification["manifest"])
+    if failures:
+        raise RuntimeError("qualification manifest fails aggregate contract: " + ",".join(failures))
+    progress["phase"] = "qualification"
     progress["qualification_attempted"] = True
     # A lost response does not prove the server rejected or never received a POST.
     progress["qualification_outcome"] = "UNKNOWN"
