@@ -445,6 +445,8 @@ pub struct ShadowIngestMeasurements {
     pub fragments_created: u64,
     pub largest_item_bytes: u64,
     pub append_full_comparisons: u64,
+    pub lexical_segments_copied: u64,
+    pub lexical_segments_generated: u64,
 }
 
 impl ShadowIngestMeasurements {
@@ -528,6 +530,8 @@ impl ShadowIngestMeasurements {
                 "fragments_created": self.fragments_created,
                 "largest_item_bytes": self.largest_item_bytes,
                 "append_full_comparisons": self.append_full_comparisons,
+                "lexical_segments_copied": self.lexical_segments_copied,
+                "lexical_segments_generated": self.lexical_segments_generated,
             },
             "phase": phases,
             "source_io": {

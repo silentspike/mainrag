@@ -20,6 +20,7 @@ CHECKS = (
     "artifact_root", "authorization", "body_pack_integrity", "dual_read",
     "intelligence", "intervals", "legacy_intelligence_export",
     "resource_budget", "restart_resume", "search_quality",
+    "lexical_segment_integrity",
 )
 EXTERNAL_GATES = (
     "live_adapter_watermarks", "writer_and_maintenance_inventory",

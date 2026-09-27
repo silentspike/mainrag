@@ -120,3 +120,89 @@ SELECT id,'text',digest('alpha visible','sha256'),'','alpha visible',1,1 FROM fi
         self.assertEqual(result["candidate"], [])
         self.assertEqual(result["current"], [])
         self.assertEqual(result["legacy_paths"], [])
+
+    def test_y_source_backed_postgres_lexeme_keeps_chunk_order_without_legacy_reads(self) -> None:
+        # PostgreSQL splits underscores into lexemes while the original sparse
+        # posting tokenizer keeps them in one token. Both file versions are
+        # identical, so this is a projection gap rather than source drift.
+        self.sql("INSERT INTO sources(id,name,type,path) VALUES "
+                 "(19,'lexical-fixture','fixture','lexical-fixture')")
+        content = "foo_3d"
+        run = self.begin(19, "d1" * 32, "d2" * 32, commit_sha=COMMIT)
+        node, view, digest = self.make_projection(content)
+        self.stage(run, "lexeme.txt", content, node, view, digest)
+        self.complete_analysis(digest)
+        document = self.sql(self.admin(
+            "SELECT id FROM storage_v2_put_search_document("
+            f"'mainrag.lexical-simple.v1','node',{node},'{content}',ARRAY[]::TEXT[])"))
+        self.sql(self.admin(
+            f"SELECT storage_v2_bind_search_document({view},0,{document},1.0)"))
+        self.commit(run, 1)
+        generation = int(self.sql(
+            f"SELECT generation_id FROM storage_v2_ingest_run WHERE id={run}"))
+        self.sql(self.admin(
+            f"SELECT storage_v2_verify_generation({generation},'{'d3' * 32}')"))
+        occurrence, artifact = map(int, self.sql(
+            "SELECT id::TEXT||':'||artifact_version_id::TEXT "
+            "FROM occurrence WHERE source_id=19").split(":"))
+        legacy = int(self.sql("""
+WITH file AS (
+ INSERT INTO files(source_id,path,hash,content,content_text,
+                   size_original,size_compressed,last_modified)
+ VALUES(19,'/synthetic/lexeme.txt',digest('foo_3d','sha256'),'',
+        'foo_3d',6,0,now()) RETURNING id
+)
+INSERT INTO chunks(file_id,chunk_type,content_hash,content_compressed,
+                   content_text,start_line,end_line)
+SELECT id,'text',digest('foo_3d','sha256'),'','foo_3d',1,1
+  FROM file RETURNING id;
+"""))
+        self.assertEqual(self.exact_search(
+            {"type": "term", "value": "3d"}, source_id=19)["results"], [])
+        self.assertEqual(self.sql(
+            "SELECT storage_v2_literal_term_count('foo_3d','3d')"), "0")
+        self.file(schema.ROOT / "migrations/066_storage_v2_controlled_frontier_owner.sql")
+        self.file(schema.ROOT / "migrations/067_storage_v2_active_ingest_receipt_owner.sql")
+        self.file(schema.ROOT / "migrations/068_storage_v2_lexical_segments.sql")
+        # The inherited schema harness uses a dedicated fixture worker in
+        # place of the production runtime role and owns the base tables as
+        # the fixture user instead of mainrag.
+        self.sql("GRANT SELECT ON occurrence, artifact_version, source_generation, "
+                 "generation_item_version, "
+                 "storage_v2_search_view_document, storage_v2_search_document, "
+                 "files, chunks TO mainrag")
+        self.sql("GRANT EXECUTE ON FUNCTION "
+                 "storage_v2_copy_legacy_lexical_segments(BIGINT,BIGINT), "
+                 "storage_v2_put_lexical_segment(BIGINT,BIGINT,BIGINT,TEXT,TEXT,TEXT), "
+                 "storage_v2_verify_lexical_segments(BIGINT), "
+                 "storage_v2_source_segment_rank(BIGINT,TEXT) "
+                 "TO storage_v2_shadow_worker")
+        copy = (f"SELECT storage_v2_copy_legacy_lexical_segments({occurrence},{artifact})")
+        self.assertEqual(self.sql(self.admin(copy)), "1")
+        self.assertEqual(self.sql(self.admin(copy)), "1", "copy must be idempotent")
+        verification = json.loads(self.sql(self.admin(
+            f"SELECT storage_v2_verify_lexical_segments({generation})")))
+        self.assertEqual(verification["occurrence_count"], 1)
+        self.assertEqual(verification["segment_count"], 1)
+        self.assertEqual(verification["invalid_count"], 0)
+        result = self.exact_search({"type": "term", "value": "3d"}, source_id=19)
+        self.assertEqual([row["occurrence_id"] for row in result["results"]], [occurrence])
+        evidence = json.loads(self.sql(self.admin(
+            f"SELECT storage_v2_candidate_query_evidence(19,{generation},'{COMMIT}',"
+            f"'3d',ARRAY[{occurrence}]::BIGINT[],ARRAY[{legacy}]::BIGINT[])")))
+        self.assertEqual(evidence["schema_version"], "mainrag.storage-v2.query-coverage.v2")
+        self.assertEqual(evidence["candidate"][0]["reference_frequency"], 0)
+        self.assertTrue(evidence["candidate"][0]["fts_body_matches"])
+        self.assertTrue(evidence["candidate"][0]["segment_matches"])
+        self.assert_sql_fails(self.admin(
+            f"SELECT storage_v2_put_lexical_segment({occurrence},{artifact},"
+            "999,'injected','','text')"), "absent from immutable source text")
+        self.assert_sql_fails(
+            f"SET ROLE mainrag; SET app.user_id='{schema.ADMIN_ID}'; "
+            "INSERT INTO storage_v2_lexical_segment "
+            "(occurrence_id,source_id,artifact_version_id,segment_order,text_start,"
+            "text_length,text_sha256,context_prefix,chunk_type,fts_vector) "
+            f"VALUES({occurrence},19,{artifact},999,1,1,digest('x','sha256'),"
+            "'','text',to_tsvector('simple','x'))",
+            "permission denied",
+        )

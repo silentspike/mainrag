@@ -260,7 +260,8 @@ def finalize(plan: dict, baseline_audit: dict, receipt_set: dict,
                     or not isinstance(verified.get("checks"), dict) \
                     or set(verified["checks"].values()) != {"PASS"} \
                     or not {"artifact_root", "authorization", "body_pack_integrity",
-                            "intelligence", "intervals", "legacy_intelligence_export"}.issubset(
+                            "intelligence", "intervals", "legacy_intelligence_export",
+                            "lexical_segment_integrity"}.issubset(
                                 verified["checks"]):
                 raise RuntimeError("rebuilt final candidate qualification identity differs")
         else:
