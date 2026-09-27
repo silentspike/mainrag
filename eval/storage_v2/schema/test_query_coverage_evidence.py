@@ -127,7 +127,7 @@ SELECT id,'text',digest('alpha visible','sha256'),'','alpha visible',1,1 FROM fi
         # identical, so this is a projection gap rather than source drift.
         self.sql("INSERT INTO sources(id,name,type,path) VALUES "
                  "(19,'lexical-fixture','fixture','lexical-fixture')")
-        content = "foo_3d"
+        content = "foo_3d alpha"
         run = self.begin(19, "d1" * 32, "d2" * 32, commit_sha=COMMIT)
         node, view, digest = self.make_projection(content)
         self.stage(run, "lexeme.txt", content, node, view, digest)
@@ -149,12 +149,12 @@ SELECT id,'text',digest('alpha visible','sha256'),'','alpha visible',1,1 FROM fi
 WITH file AS (
  INSERT INTO files(source_id,path,hash,content,content_text,
                    size_original,size_compressed,last_modified)
- VALUES(19,'/synthetic/lexeme.txt',digest('foo_3d','sha256'),'',
-        'foo_3d',6,0,now()) RETURNING id
+ VALUES(19,'/synthetic/lexeme.txt',digest('foo_3d alpha','sha256'),'',
+        'foo_3d alpha',12,0,now()) RETURNING id
 )
 INSERT INTO chunks(file_id,chunk_type,content_hash,content_compressed,
                    content_text,start_line,end_line)
-SELECT id,'text',digest('foo_3d','sha256'),'','foo_3d',1,1
+SELECT id,'text',digest('foo_3d alpha','sha256'),'','foo_3d alpha',1,1
   FROM file RETURNING id;
 """))
         self.assertEqual(self.exact_search(
@@ -194,6 +194,32 @@ SELECT id,'text',digest('foo_3d','sha256'),'','foo_3d',1,1
         self.assertEqual(evidence["candidate"][0]["reference_frequency"], 0)
         self.assertTrue(evidence["candidate"][0]["fts_body_matches"])
         self.assertTrue(evidence["candidate"][0]["segment_matches"])
+        self.file(schema.ROOT / "migrations/069_storage_v2_conjunctive_lexical_parity.sql")
+        conjunction = {"type": "and", "children": [
+            {"type": "term", "value": "foo"}, {"type": "term", "value": "alpha"}]}
+        self.assertEqual([row["occurrence_id"] for row in
+                          self.exact_search(conjunction, source_id=19)["results"]], [occurrence])
+        legacy_score = float(self.sql(
+            f"SELECT ts_rank_cd(fts_vector,websearch_to_tsquery('simple','foo alpha')) "
+            f"FROM chunks WHERE id={legacy}"))
+        segment_score = float(self.sql(self.admin(
+            f"SELECT score FROM storage_v2_source_segment_rank({occurrence},'foo alpha')")))
+        self.assertAlmostEqual(segment_score, legacy_score, places=6)
+        multiple = json.loads(self.sql(self.admin(
+            f"SELECT storage_v2_candidate_query_evidence(19,{generation},'{COMMIT}',"
+            f"'foo alpha',ARRAY[{occurrence}]::BIGINT[],ARRAY[{legacy}]::BIGINT[])")))
+        self.assertEqual(multiple["schema_version"], "mainrag.storage-v2.query-coverage.v3")
+        self.assertTrue(multiple["candidate"][0]["fts_body_matches"])
+        self.assertTrue(multiple["candidate"][0]["segment_matches"])
+        self.assertEqual(self.sql("SELECT storage_v2_simple_and_query("
+                                  "'{\"type\":\"or\",\"children\":["
+                                  "{\"type\":\"term\",\"value\":\"foo\"},"
+                                  "{\"type\":\"term\",\"value\":\"alpha\"}]}'::jsonb) "
+                                  "IS NULL"), "t")
+        self.assert_sql_fails(self.admin(
+            f"SELECT storage_v2_candidate_query_evidence(19,{generation},'{COMMIT}',"
+            "'foo OR alpha',ARRAY[]::BIGINT[],ARRAY[]::BIGINT[])"),
+            "simple query")
         self.assert_sql_fails(self.admin(
             f"SELECT storage_v2_put_lexical_segment({occurrence},{artifact},"
             "999,'injected','','text')"), "absent from immutable source text")
