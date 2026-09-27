@@ -345,3 +345,72 @@ RETURNING id;
         self.assertTrue(boundary_evidence["candidate"][0]["body_text_matches"])
         self.assertTrue(boundary_evidence["candidate"][0]["fts_body_matches"])
         self.assertTrue(boundary_evidence["candidate"][0]["segment_matches"])
+
+        # The installed legacy vector also indexes context_prefix at weight B.
+        # The body-only rank vector from 074 drops a valid two-term hit.
+        self.file(schema.ROOT / "migrations/025_fts_context_prefix.sql")
+        self.sql("INSERT INTO sources(id,name,type,path) VALUES "
+                 "(20,'context-fixture','fixture','context-fixture')")
+        context_body = "prefixonly alpha"
+        context_run = self.begin(20, "f1" * 32, "f2" * 32, commit_sha=COMMIT)
+        context_node, context_view, context_digest = self.make_projection(context_body)
+        self.stage(context_run, "context.txt", context_body, context_node,
+                   context_view, context_digest)
+        self.complete_analysis(context_digest)
+        context_document = self.sql(self.admin(
+            "SELECT id FROM storage_v2_put_search_document("
+            f"'mainrag.lexical-simple.v1','node',{context_node},"
+            f"'{context_body}',ARRAY[]::TEXT[])"))
+        self.sql(self.admin(
+            f"SELECT storage_v2_bind_search_document({context_view},0,"
+            f"{context_document},1.0)"))
+        self.commit(context_run, 1)
+        context_generation = int(self.sql(
+            f"SELECT generation_id FROM storage_v2_ingest_run WHERE id={context_run}"))
+        self.sql(self.admin(
+            f"SELECT storage_v2_verify_generation({context_generation},'{'f3' * 32}')"))
+        context_occurrence, context_artifact = map(int, self.sql(
+            "SELECT id::TEXT||':'||artifact_version_id::TEXT "
+            "FROM occurrence WHERE source_id=20").split(":"))
+        context_chunk = int(self.sql("""
+WITH file AS (
+ INSERT INTO files(source_id,path,hash,content,content_text,
+                   size_original,size_compressed,last_modified)
+ VALUES(20,'/synthetic/context.txt',digest('prefixonly alpha','sha256'),'',
+        'prefixonly alpha',16,0,now()) RETURNING id
+)
+INSERT INTO chunks(file_id,chunk_type,content_hash,content_compressed,
+                   content_text,context_prefix,start_line,end_line)
+SELECT id,'text',digest('alpha','sha256'),'','alpha','prefixonly',1,1
+  FROM file RETURNING id;
+"""))
+        self.assertEqual(self.sql(
+            f"SELECT fts_vector @@ websearch_to_tsquery('simple',"
+            f"'prefixonly alpha') FROM chunks WHERE id={context_chunk}"), "t")
+        self.assertEqual(self.sql(self.admin(
+            f"SELECT storage_v2_copy_legacy_lexical_segments("
+            f"{context_occurrence},{context_artifact})")), "1")
+        context_ast = {"type": "and", "children": [
+            {"type": "term", "value": "prefixonly"},
+            {"type": "term", "value": "alpha"}]}
+        self.assertEqual(self.exact_search(context_ast, source_id=20)["results"], [])
+        self.file(schema.ROOT / "migrations/075_storage_v2_installed_chunk_projection_parity.sql")
+        self.assertEqual(self.sql(
+            "SELECT count(*) FROM pg_attribute WHERE attrelid="
+            "'storage_v2_lexical_segment'::REGCLASS "
+            "AND attname='rank_vector' AND NOT attisdropped"), "0")
+        self.assertEqual([row["occurrence_id"] for row in
+                          self.exact_search(context_ast, source_id=20)["results"]],
+                         [context_occurrence])
+        self.assertEqual(json.loads(self.sql(self.admin(
+            f"SELECT storage_v2_verify_lexical_segments("
+            f"{context_generation})")))["invalid_count"], 0)
+        context_evidence = json.loads(self.sql(self.admin(
+            f"SELECT storage_v2_candidate_query_evidence(20,{context_generation},"
+            f"'{COMMIT}','prefixonly alpha',ARRAY[{context_occurrence}]::BIGINT[],"
+            f"ARRAY[{context_chunk}]::BIGINT[])")))
+        self.assertEqual(context_evidence["schema_version"],
+                         "mainrag.storage-v2.query-coverage.v4")
+        self.assertFalse(context_evidence["candidate"][0]["fts_body_matches"])
+        self.assertTrue(context_evidence["candidate"][0]["segment_matches"])
+        self.assertTrue(context_evidence["candidate"][0]["legacy_segment_matches"])

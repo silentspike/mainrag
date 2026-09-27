@@ -485,6 +485,29 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
         self.assertTrue(MODULE.query_coverage_gates(
             seed, current, storage, proof, checkpoint)["passed"])
 
+    def test_copied_legacy_context_projection_has_separate_proof(self) -> None:
+        seed, current, storage, proof, checkpoint = self.coverage_fixture()
+        seed["query"] = "prefixonly alpha"
+        proof["query_sha256"] = MODULE.sha256_text(seed["query"])
+        proof["schema_version"] = "mainrag.storage-v2.query-coverage.v4"
+        for hit in proof["candidate"]:
+            hit["legacy_segment_matches"] = False
+        proof["candidate"][0].update(reference_frequency=0, posting_frequency=0,
+                                     fts_body_matches=False, segment_matches=True,
+                                     legacy_segment_matches=True)
+        result = MODULE.query_coverage_gates(seed, current, storage, proof, checkpoint)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["policy"], "simple-conjunction-non-inferiority-v2")
+        for field in ("legacy_segment_matches", "segment_matches", "body_text_matches"):
+            invalid = copy.deepcopy(proof)
+            invalid["candidate"][0][field] = False
+            self.assertFalse(MODULE.query_coverage_gates(
+                seed, current, storage, invalid, checkpoint)["passed"])
+        invalid = copy.deepcopy(proof)
+        del invalid["candidate"][0]["legacy_segment_matches"]
+        self.assertFalse(MODULE.query_coverage_gates(
+            seed, current, storage, invalid, checkpoint)["passed"])
+
     def test_restart_waits_for_authenticated_readback(self) -> None:
         unavailable = urllib.error.URLError(ConnectionRefusedError())
         with patch.object(MODULE, "source_state", side_effect=[
