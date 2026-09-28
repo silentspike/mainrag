@@ -479,8 +479,8 @@ def read_snapshot_review(path: Path, expected_sha256: str, checkpoint: dict[str,
     elif cut is not None:
         raise RuntimeError("source review has an unselected filesystem cut")
     paths = review.get("paths")
-    if not isinstance(paths, dict) or not paths:
-        raise RuntimeError("source snapshot review path set is empty")
+    if not isinstance(paths, dict):
+        raise RuntimeError("source snapshot review path set is invalid")
     counts: dict[str, int] = {}
     for path_sha, row in paths.items():
         if not isinstance(path_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", path_sha) \
