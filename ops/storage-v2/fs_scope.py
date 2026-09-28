@@ -9,13 +9,15 @@ import json
 import re
 
 
-def scope_profile(sha256: str) -> str:
-    return f"mainrag.fs-release-candidate.v3.scope-{sha256}.fragment-1048576-newline-65536"
+def scope_profile(sha256: str, cut: bool = False) -> str:
+    version = "v4.btrfs-cut-v1" if cut else "v3"
+    return f"mainrag.fs-release-candidate.{version}.scope-{sha256}.fragment-1048576-newline-65536"
 
 
 def scope_matcher(proof: object, profile: str):
     if proof is None:
-        if profile.startswith("mainrag.fs-release-candidate.v3."):
+        if profile.startswith("mainrag.fs-release-candidate.v3.") or (
+                profile.startswith("mainrag.fs-release-candidate.v4.") and profile != scope_profile("unfiltered", True)):
             raise RuntimeError("configured filesystem scope proof is missing")
         return lambda relative: True
     if (not isinstance(proof, dict) or proof.get("format") != "mainrag.fs-scope.v1"
@@ -30,7 +32,7 @@ def scope_matcher(proof: object, profile: str):
     payload = json.dumps([proof["patterns"], proof["byte_regexes"]],
                          ensure_ascii=False, separators=(",", ":")).encode()
     digest = hashlib.sha256(b"mainrag.fs-scope.v1\0" + payload).hexdigest()
-    if proof.get("sha256") != digest or profile != scope_profile(digest):
+    if proof.get("sha256") != digest or profile not in {scope_profile(digest), scope_profile(digest, True)}:
         raise RuntimeError("filesystem scope profile binding differs")
     matchers = []
     for expression in proof["byte_regexes"]:
@@ -53,6 +55,14 @@ def registered_scope_matcher(config: object, observation: dict):
     if config is not None and not isinstance(config, dict):
         raise RuntimeError("registered filesystem config is invalid")
     patterns = (config or {}).get("file_patterns")
+    consistency = (config or {}).get("filesystem_consistency")
+    cut = observation.get("filesystem_cut")
+    if consistency not in {None, "btrfs-cut-v1"}:
+        raise RuntimeError("registered filesystem consistency is unsupported")
+    if (consistency == "btrfs-cut-v1") != (cut is not None) or (
+            (consistency == "btrfs-cut-v1") != observation["adapter_profile_id"].startswith(
+                "mainrag.fs-release-candidate.v4.btrfs-cut-v1.")):
+        raise RuntimeError("filesystem consistency differs from registration")
     proof = observation.get("filesystem_scope")
     if patterns is not None:
         if (not isinstance(patterns, list) or not patterns

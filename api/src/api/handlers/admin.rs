@@ -15,6 +15,11 @@ use crate::plugins;
 use crate::services::index::{embedding_document_text, embedding_storage_model_name};
 use crate::AppState;
 
+#[cfg(feature = "storage-v2-retrieval")]
+mod fs_cut;
+#[cfg(feature = "storage-v2-retrieval")]
+pub use fs_cut::{admin_capture_filesystem_cut, admin_configure_filesystem_cut};
+
 #[derive(Debug, Serialize)]
 pub struct SourceResponse {
     pub id: i64,
@@ -331,6 +336,8 @@ pub async fn admin_candidate_query_evidence(
 ) -> Result<Json<serde_json::Value>> {
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
+    let pack_root = state.config.storage_v2_pack_root.clone();
+    let io_buffer_bytes = state.config.storage_v2_pack_io_buffer_bytes;
     state
         .rls_client
         .with_rls(user_id, true, move |transaction| {
@@ -339,6 +346,8 @@ pub async fn admin_candidate_query_evidence(
                     &**transaction,
                     source_id,
                     &request,
+                    &pack_root,
+                    io_buffer_bytes,
                 )
                 .await
                 .map_err(|error| {
@@ -853,6 +862,7 @@ async fn run_active_ingest(
 
     let pack_root = state.config.storage_v2_pack_root.clone();
     let io_buffer_bytes = state.config.storage_v2_pack_io_buffer_bytes;
+    fs_cut::capture_before_active_ingest(state, user_id, source_id, manifest.clone()).await?;
     let prepared = state
         .rls_client
         .with_rls(user_id, true, move |transaction| {

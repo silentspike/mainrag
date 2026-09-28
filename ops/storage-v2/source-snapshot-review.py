@@ -24,6 +24,7 @@ import urllib.request
 
 load_token = runpy.run_path(str(Path(__file__).with_name("operator_token.py")))["load_token"]
 registered_scope_matcher = runpy.run_path(str(Path(__file__).with_name("fs_scope.py")))["registered_scope_matcher"]
+cut_read_root = runpy.run_path(str(Path(__file__).with_name("fs_cut.py")))["read_root"]
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -168,6 +169,8 @@ def capture(database: str, api_url: str, token: str, source_id: int,
         root, git_head = git_checkout(registration, git_cache_dir)
     else:
         root = Path(registration["source_path"]).resolve(strict=True)
+        if before.get("filesystem_cut") is not None:
+            root = cut_read_root(Path(registration["source_path"]), before)
     if not root.is_dir():
         raise RuntimeError("registered source root is not a directory")
     paths = {}
@@ -185,6 +188,9 @@ def capture(database: str, api_url: str, token: str, source_id: int,
     after = observation(api_url, token, source_id)
     if before != after:
         raise RuntimeError("source adapter watermark changed during drift review")
+    if before.get("filesystem_cut") is not None and cut_read_root(
+            Path(registration["source_path"]), after) != root:
+        raise RuntimeError("source cut changed during drift review")
     if git_head is not None and git_checkout(registration, git_cache_dir) != (root, git_head):
         raise RuntimeError("git checkout changed during drift review")
     statuses = Counter(item["status"] for item in paths.values())
@@ -193,6 +199,7 @@ def capture(database: str, api_url: str, token: str, source_id: int,
         "source_id": source_id,
         "source_type": registration["source_type"],
         **({"filesystem_scope": before["filesystem_scope"]} if before.get("filesystem_scope") is not None else {}),
+        **({"filesystem_cut": before["filesystem_cut"]} if before.get("filesystem_cut") is not None else {}),
         **({"git_head": git_head} if git_head is not None else {}),
         "source_root_sha256": hashlib.sha256(registration["source_path"].encode()).hexdigest(),
         "source_config_sha256": hashlib.sha256(canonical(registration["config"])).hexdigest(),

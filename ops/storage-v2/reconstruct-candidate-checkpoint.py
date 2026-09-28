@@ -121,6 +121,10 @@ def reconstruct(args: argparse.Namespace) -> dict:
             or observed.get("adapter_profile_id") != witness["adapter_profile_id"] \
             or observed.get("item_count") != generation["item_count"]:
         raise RuntimeError("adapter observation differs from the persisted build witness")
+    cut = witness.get("filesystem_cut")
+    if cut is not None and not operator["cut_contract"]["same_source_manifest"](
+            cut, observed.get("filesystem_cut")):
+        raise RuntimeError("observed cut differs from the original full source manifest")
     state = operator["source_state"](
         args.api_url, token, args.source_id, generation["generation_seq"])
     if state.get("active_generation_id") != generation["active_generation_id"]:
@@ -156,7 +160,8 @@ def reconstruct(args: argparse.Namespace) -> dict:
         "pack_capacity_before_build": {"thin_pool": thin_pool},
         "pack_free_bytes_after_build": shutil.disk_usage(args.pack_root).free,
         "resource_gate_after_build": "RECONSTRUCTED_CURRENT_RESERVE",
-        "build": {"fixture_sha256": witness["fixture_sha256"]},
+        "build": {"fixture_sha256": witness["fixture_sha256"],
+                  **({"filesystem_cut": cut} if cut is not None else {})},
         "captured_at_unix": int(time.time()),
     }
 
