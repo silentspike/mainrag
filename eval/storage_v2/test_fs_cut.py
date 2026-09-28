@@ -26,6 +26,64 @@ def watermark(root, profile, fixture):
 
 
 class CutTests(unittest.TestCase):
+    def test_snapshot_permission_scope_is_exact_and_only_selected_files_get_read_access(self):
+        import types
+        patterns = ["*.jsonl"]; regexes = [r"(?-u)^.*\.jsonl$"]
+        payload = json.dumps([patterns,regexes],separators=(",", ":")).encode()
+        proof = {"format":"mainrag.fs-scope.v1","patterns":patterns,"byte_regexes":regexes,
+                 "sha256":hashlib.sha256(b"mainrag.fs-scope.v1\0"+payload).hexdigest()}
+        matcher = PRODUCER["access_matcher"](proof)
+        self.assertTrue(matcher("nested/private.jsonl"))
+        self.assertFalse(matcher("credentials.json"))
+        self.assertFalse(matcher("nested/private.jsonl\n"))
+        for bad in ({**proof,"sha256":"a"*64},{**proof,"extra":True}):
+            with self.assertRaises(RuntimeError):PRODUCER["access_matcher"](bad)
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);nested=root/"private";nested.mkdir(mode=0o700)
+            selected=nested/"history.jsonl";selected.write_bytes(b"fixture\n");selected.chmod(0o600)
+            excluded=nested/"credentials.json";excluded.write_bytes(b"excluded");excluded.chmod(0o600)
+            (nested/"linked.jsonl").symlink_to(excluded)
+            commands=[]
+            binary_meta=types.SimpleNamespace(st_mode=0o100755,st_uid=0)
+            original_stat=Path.stat
+            def metadata(path,*args,**kwargs):
+                return binary_meta if str(path)=="/usr/bin/setfacl" else original_stat(path,*args,**kwargs)
+            with patch.object(Path,"stat",metadata), \
+                    patch.dict(PRODUCER["grant_snapshot_access"].__globals__,{
+                        "trusted_directory":lambda *_:None,
+                        "command":lambda binary,*args:commands.append(args)}):
+                PRODUCER["grant_snapshot_access"](root,1234,matcher)
+                file_commands=[cmd for cmd in commands if cmd[1]=="u:1234:r--"]
+                self.assertEqual([str(p) for cmd in file_commands for p in cmd[3:]],[str(selected)])
+                self.assertEqual(selected.read_bytes(),b"fixture\n")
+                self.assertEqual(selected.stat().st_mode&0o777,0o600)
+                self.assertEqual(excluded.stat().st_mode&0o777,0o600)
+                os.link(selected,nested/"alias.jsonl")
+                with self.assertRaisesRegex(RuntimeError,"hard-link"):
+                    PRODUCER["grant_snapshot_access"](root,1234,matcher)
+
+    def test_container_snapshot_preserves_pinned_boundary_and_rejects_unsafe_container(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent=Path(temporary)
+            root,registry,view,history,descriptor,observation=self.fixture(parent)
+            proof=observation["filesystem_cut"]["cut"]
+            published=registry/"views"/proof["cut_id"]
+            staged=published.with_suffix(".fixture-owned")
+            published.rename(staged);published.mkdir(mode=0o750)
+            staged.rename(published/"snapshot")
+            descriptor=registry/"history"/f"{proof['cut_id']}-{proof['source_root_sha256']}.json"
+            value=json.loads(descriptor.read_text());value["snapshot_root"]=str(published/"snapshot")
+            value["read_root"]=str(published/"snapshot/sessions")
+            raw=PRODUCER["canonical"](value);descriptor.write_bytes(raw)
+            proof["descriptor_sha256"]=hashlib.sha256(raw).hexdigest()
+            with patch.dict(CUT["read_root"].__globals__,{"inspect_kernel":lambda *_:None}):
+                selected=CUT["read_root"](root,observation,registry,_owner=os.getuid())
+                self.assertEqual(selected,published/"snapshot/sessions")
+                self.assertEqual((selected/"live.jsonl").read_bytes(),b"first\n")
+                published.chmod(0o777)
+                with self.assertRaisesRegex(RuntimeError,"authority"):
+                    CUT["read_root"](root,observation,registry,_owner=os.getuid())
+
     def test_privileged_inspection_uses_only_opaque_bound_arguments(self):
         import types
         proof = {"source_root_sha256": "a" * 64, "cut_id": str(uuid.uuid4()),
