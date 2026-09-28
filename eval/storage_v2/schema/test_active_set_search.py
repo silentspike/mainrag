@@ -203,6 +203,20 @@ INSERT INTO storage_v2_release_candidate_evidence(
         ordinary = self.search(ADMIN, digest)
         reader = self.search(READER, digest)
         benchmark = self.search(ADMIN, digest, include_test=True)
+        # Rehearse the inlined binding used before migration 091. The active
+        # wrapper must preserve the entire result and per-user source scope.
+        signature="storage_v2_search_active_unchecked(text,jsonb,jsonb,bigint,bigint,boolean)"
+        definition=self.sql(f"SELECT pg_get_functiondef('{signature}'::REGPROCEDURE)")
+        self.sql(definition.replace("    scoped_binding AS MATERIALIZED (","    scoped_binding AS ("))
+        before=[self.search(ADMIN,digest),self.search(READER,digest),
+                self.search(ADMIN,digest,include_test=True),self.search(ADMIN,digest,source=1)]
+        metadata_sql=f"SELECT proowner::TEXT||':'||COALESCE(proacl::TEXT,'') FROM pg_proc WHERE oid='{signature}'::REGPROCEDURE"
+        authority=self.sql(metadata_sql)
+        self.command(self.database,file=ROOT/"migrations/091_storage_v2_materialized_corpus_bindings.sql")
+        self.assertEqual([self.search(ADMIN,digest),self.search(READER,digest),
+                          self.search(ADMIN,digest,include_test=True),self.search(ADMIN,digest,source=1)],before)
+        self.assertEqual(self.sql(metadata_sql),authority)
+        self.assertEqual(self.sql(f"SELECT 'jit=off'=ANY(proconfig) FROM pg_proc WHERE oid='{signature}'::REGPROCEDURE"),"t")
         self.assertEqual(ordinary["total"], 2)
         self.assertEqual({hit["source_id"] for hit in ordinary["results"]}, {1, 2})
         self.assertEqual({hit["generation_seq"] for hit in ordinary["results"]}, {1})

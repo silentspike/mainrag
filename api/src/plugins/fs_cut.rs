@@ -192,14 +192,22 @@ fn inspect_snapshot(root: &Path, digest: &str) -> Result<(uuid::Uuid, uuid::Uuid
         fs::metadata(root)?.uid() == 0,
         "snapshot property authority is unsafe"
     );
+    let identity_root = if root.file_name().and_then(|s| s.to_str()) == Some("snapshot") {
+        root.parent().context("cut container is absent")?
+    } else {
+        root
+    };
     let cut_id = uuid::Uuid::parse_str(
-        root.file_name()
+        identity_root
+            .file_name()
             .and_then(|s| s.to_str())
             .context("cut inspection identity is absent")?,
     )?;
     let registry = registry_root();
     ensure!(
-        !cut_id.is_nil() && root == registry.join("views").join(cut_id.to_string()),
+        !cut_id.is_nil()
+            && identity_root == registry.join("views").join(cut_id.to_string())
+            && (root == identity_root || root == identity_root.join("snapshot")),
         "cut inspection root differs from its registry"
     );
     let helper = trusted_helper()?;
@@ -262,11 +270,18 @@ impl ReadCut {
         let relative = root
             .strip_prefix(&value.origin_subvolume)
             .context("cut origin does not contain the registered root")?;
+        let published = registry.join("views").join(value.cut_id.to_string());
+        trusted_directory(
+            value
+                .snapshot_root
+                .parent()
+                .context("cut container is absent")?,
+            owner,
+        )?;
         ensure!(
             !relative.as_os_str().is_empty()
-                && value.snapshot_root.parent() == Some(registry.join("views").as_path())
-                && value.snapshot_root.file_name().and_then(|s| s.to_str())
-                    == Some(value.cut_id.to_string().as_str())
+                && (value.snapshot_root == published
+                    || value.snapshot_root == published.join("snapshot"))
                 && value.read_root == value.snapshot_root.join(relative)
                 && value.read_root.canonicalize()? == value.read_root
                 && value.read_root.is_dir(),
@@ -376,12 +391,21 @@ mod tests {
     }
 
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, serde_json::Value) {
+        fixture_layout(false)
+    }
+
+    fn fixture_layout(container: bool) -> (tempfile::TempDir, PathBuf, PathBuf, serde_json::Value) {
         let directory = tempfile::tempdir().unwrap();
         let origin = directory.path().join("origin");
         let root = origin.join("sessions");
         let registry = directory.path().join("registry");
         let cut_id = uuid::Uuid::new_v4();
-        let snapshot = registry.join("views").join(cut_id.to_string());
+        let published = registry.join("views").join(cut_id.to_string());
+        let snapshot = if container {
+            published.join("snapshot")
+        } else {
+            published
+        };
         for path in [&root, &snapshot.join("sessions"), &registry.join("history")] {
             fs::create_dir_all(path).unwrap();
         }
@@ -422,31 +446,33 @@ mod tests {
 
     #[test]
     fn selected_cut_preserves_original_identity_and_bytes_after_live_append() {
-        let (_directory, root, registry, value) = fixture();
-        let selected = select(&root, &registry, &value).unwrap();
-        fs::write(root.join("session.jsonl"), b"first\nnew live tail\n").unwrap();
-        assert_eq!(
-            fs::read(selected.read_root.join("session.jsonl")).unwrap(),
-            b"first\n"
-        );
-        assert_eq!(
-            selected.proof.source_root_sha256,
-            root_digest(&root).unwrap()
-        );
-        assert_eq!(
-            selected.descriptor.parent(),
-            Some(registry.join("history").as_path())
-        );
-        let history = fs::read(&selected.descriptor).unwrap();
-        fs::write(
-            registry.join(format!(
-                "current-{}.json",
-                selected.proof.source_root_sha256
-            )),
-            b"later selection",
-        )
-        .unwrap();
-        assert_eq!(fs::read(selected.descriptor).unwrap(), history);
+        for container in [false, true] {
+            let (_directory, root, registry, value) = fixture_layout(container);
+            let selected = select(&root, &registry, &value).unwrap();
+            fs::write(root.join("session.jsonl"), b"first\nnew live tail\n").unwrap();
+            assert_eq!(
+                fs::read(selected.read_root.join("session.jsonl")).unwrap(),
+                b"first\n"
+            );
+            assert_eq!(
+                selected.proof.source_root_sha256,
+                root_digest(&root).unwrap()
+            );
+            assert_eq!(
+                selected.descriptor.parent(),
+                Some(registry.join("history").as_path())
+            );
+            let history = fs::read(&selected.descriptor).unwrap();
+            fs::write(
+                registry.join(format!(
+                    "current-{}.json",
+                    selected.proof.source_root_sha256
+                )),
+                b"later selection",
+            )
+            .unwrap();
+            assert_eq!(fs::read(selected.descriptor).unwrap(), history);
+        }
     }
 
     #[test]
