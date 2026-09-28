@@ -6,6 +6,28 @@ application, source-local generation allocation, immutable artifacts,
 half-open membership intervals, atomic activation and requalification, direct
 mutation rejection, cross-source rejection, and RLS isolation.
 
+Migration 095 completes qualification of retained generations. A comparison
+identity may have several immutable artifact versions; identical retries return
+the original row, while changed comparison results append a separate UUID.
+Historical UUIDs, build commits, query digests and qualification references remain
+unchanged. Cross-identity UUID reuse and direct artifact updates/deletes fail.
+
+Copied chunk tokenization can differ from whole-document tokenization. The rank
+gate therefore accepts an exact immutable copied slice and its frozen vector,
+with source, artifact, byte-range and authorization checks. Its copied-projection
+proof no longer reads legacy files/chunks and remains usable after their removal;
+it does not claim a whole-body FTS match. Overflow posting probes retain every
+scoped document and visit them in primary-key order. API latency still requires
+measurement against the unchanged acceptance threshold.
+
+The focused PostgreSQL gate covers these changes together with the existing
+complete query envelopes, rare/overflow term paths, migration replay, RLS,
+copied/generated provenance and immutable-source corruption controls:
+
+```bash
+python3 -m unittest eval.storage_v2.schema.test_query_coverage_evidence.QueryCoverageTests.test_y_source_backed_postgres_lexeme_keeps_chunk_order_without_legacy_reads
+```
+
 Migration 055 adds the pack reader-registration/switch commit fence. Run:
 
 ```bash
