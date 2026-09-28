@@ -895,3 +895,36 @@ retained. Reuse the protected checkpoint/witness after interruption; an existing
 attempt record prevents an automatic second write. `source-batch.py` retains live
 observations independently of its completed-item result and keeps draining the
 owned phase when an observation is missing or invalid.
+
+### Source-backed expectations and bounded rank projection
+
+Migration 086 follows 085 and changes the rank function without changing its
+signature or immutable data. Rank the matching compatibility segments first,
+then validate the best row's immutable document once per occurrence. The body
+predicate is shared by all segments of that occurrence, so the selected score,
+tier and tie order are retained. Evaluate compatibility projection presence
+once per requested occurrence before scanning generated segments. Authorization
+and the existing forced lexical RLS policy remain required.
+
+An automatic query can still name a changed source file when no unchanged
+legacy result exists. Such an expectation keeps its original query and path.
+It passes only when the candidate's complete body hash equals the independently
+frozen current source-file hash, differs from the legacy hash, and has both a
+body FTS match and matching verified segment. Missing files, excluded files,
+context-only hits, fragment-only hashes and mismatched source hashes fail.
+Every unchanged baseline path must still be retained in order. Reviewed gold
+positives still require unchanged source bytes; their expectations are never
+rebound. The aggregate validates the additional digest-bound source-body proof.
+
+The independent Git review reads a trusted clean cache as its existing owner,
+with optional index writes and filesystem-monitor commands disabled. It retains
+Git's ownership check and verifies the registered origin, branch and commit.
+It rejects a checkout owned by a different account than its cache, or writable
+by another account. It does not change global Git trust configuration.
+
+For an operator/SQL-only package, preserve the installed binary's original build
+identity and bind the new schema/operator head separately. A new Rust release
+build is unnecessary when Rust inputs and the executable are unchanged. Capture
+the previous function definition, owner and grants, retain failed trials, execute
+a transactional rollback/readback, and requalify preserved generations with the
+same frozen gold and unchanged latency ceiling before admitting further runs.

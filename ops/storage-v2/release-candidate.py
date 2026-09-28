@@ -927,9 +927,33 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
     retained = list(dict.fromkeys(path for path in storage_paths if path in set(required_paths)))
     expected_review = (source_review["paths"].get(seed["expected_path_sha256"])
                        if source_review is not None else None)
+    # An automatic seed may name a changed file whose old query still matches
+    # its current bytes. Do not rebind that path or accept a candidate hash as
+    # its own source proof: require the independently frozen complete-file hash
+    # and a body/segment match. Fragment-only and context-only matches fail.
+    expected_source_body = None
+    if isinstance(expected_review, dict) and expected_review.get("status") == "changed_bytes":
+        observed = expected_review.get("observed_sha256")
+        legacy_hash = expected_review.get("legacy_sha256")
+        if (isinstance(observed, str) and re.fullmatch(r"[0-9a-f]{64}", observed)
+                and isinstance(legacy_hash, str) and re.fullmatch(r"[0-9a-f]{64}", legacy_hash)
+                and observed != legacy_hash
+                and any(row["path_sha256"] == seed["expected_path_sha256"]
+                        and row["body_sha256"] == observed
+                        and row.get("fts_body_matches") is True
+                        and row.get("segment_matches") is True for row in candidate)):
+            expected_source_body = {
+                "schema_version": "mainrag.storage-v2.expected-source-body.v1",
+                "path_sha256": seed["expected_path_sha256"],
+                "observed_sha256": observed, "legacy_sha256": legacy_hash,
+                "body_sha256": observed, "source_status": "changed_bytes",
+                "query_body_match": True,
+                "source_snapshot_review_sha256": source_review["review_sha256"],
+            }
     positive = (expected_review is None
                 or (isinstance(expected_review, dict)
-                    and expected_review.get("status") == "same_bytes")) \
+                    and expected_review.get("status") == "same_bytes")
+                or expected_source_body is not None) \
                and (seed["expected_path_sha256"] in storage_paths
                 and retained == required_paths)
     negative = not current["results"] and not storage["results"]
@@ -952,6 +976,7 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
             "all_candidate_hits_supported": True,
             "all_current_hits_supported": True,
             "baseline_paths_retained_in_order": retained == required_paths,
+            **({"expected_source_body": expected_source_body} if expected_source_body else {}),
             "additional_path_classes": classes}
 
 

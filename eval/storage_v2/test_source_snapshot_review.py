@@ -100,6 +100,24 @@ class SourceSnapshotReviewTests(unittest.TestCase):
                     MODULE.capture("fixture", "http://fixture.invalid", "token", 7, cache)
                 git("remote", "set-url", "origin", registration["source_path"])
                 original = MODULE.git_checkout(registration, cache)
+                owner = root.stat().st_uid
+                def owned_read(command, **kwargs):
+                    self.assertEqual(command[:6], ["sudo", "-n", "-u", f"#{owner}", "--", "git"])
+                    self.assertIn("--no-optional-locks", command)
+                    self.assertIn("core.fsmonitor=false", command)
+                    if command[-1] == "--show-toplevel": value = str(root)
+                    elif command[-1] == "origin": value = registration["source_path"]
+                    elif command[-1] == "HEAD": value = "main"
+                    elif command[-1] == "HEAD^{commit}": value = original[1]
+                    else: value = ""
+                    return subprocess.CompletedProcess(command, 0, value + "\n", "")
+                with patch.object(MODULE.os, "geteuid", return_value=owner+1), \
+                        patch.object(MODULE.subprocess, "run", side_effect=owned_read):
+                    self.assertEqual(MODULE.git_checkout(registration, cache), original)
+                root.chmod(0o775)
+                with self.assertRaisesRegex(RuntimeError, "ownership"):
+                    MODULE.git_checkout(registration, cache)
+                root.chmod(0o755)
                 with patch.object(MODULE, "git_checkout", side_effect=[original, (root, "b" * 40)]):
                     with self.assertRaisesRegex(RuntimeError, "checkout changed"):
                         MODULE.capture("fixture", "http://fixture.invalid", "token", 7, cache)
