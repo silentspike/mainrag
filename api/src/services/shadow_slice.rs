@@ -665,6 +665,8 @@ pub struct ReleaseWatermarkObservation {
     pub item_count: usize,
     pub input_bytes: u64,
     pub application_read_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filesystem_scope: Option<plugins::fs_scope::FilesystemScopeProof>,
 }
 
 /// Observe the same release-adapter watermark used by candidate construction
@@ -674,7 +676,30 @@ pub async fn observe_release_watermark(
     source_type: &str,
     source_path: &Path,
 ) -> Result<ReleaseWatermarkObservation> {
-    observe_release_watermark_with_prefix(source_id, source_type, source_path, None, true).await
+    observe_release_watermark_configured(
+        source_id,
+        source_type,
+        source_path,
+        &serde_json::Value::Null,
+    )
+    .await
+}
+
+pub async fn observe_release_watermark_configured(
+    source_id: i64,
+    source_type: &str,
+    source_path: &Path,
+    config: &serde_json::Value,
+) -> Result<ReleaseWatermarkObservation> {
+    observe_configured_watermark_with_prefix(
+        source_id,
+        source_type,
+        source_path,
+        config,
+        None,
+        true,
+    )
+    .await
 }
 
 /// Observe a managed append source against a persisted verified prefix. The
@@ -686,21 +711,40 @@ pub async fn observe_release_watermark_with_prefix(
     trusted_prefix: Option<&plugins::managed_append::TrustedPrefix>,
     full_comparison: bool,
 ) -> Result<ReleaseWatermarkObservation> {
+    observe_configured_watermark_with_prefix(
+        source_id,
+        source_type,
+        source_path,
+        &serde_json::Value::Null,
+        trusted_prefix,
+        full_comparison,
+    )
+    .await
+}
+
+async fn observe_configured_watermark_with_prefix(
+    source_id: i64,
+    source_type: &str,
+    source_path: &Path,
+    config: &serde_json::Value,
+    trusted_prefix: Option<&plugins::managed_append::TrustedPrefix>,
+    full_comparison: bool,
+) -> Result<ReleaseWatermarkObservation> {
     if source_id <= 0 {
         bail!("release watermark requires a registered positive source id");
     }
     let source_path = source_path
         .to_str()
         .context("release source path is not UTF-8")?;
-    let adapter_profile = release_adapter_profile(source_type)?;
+    let adapter_profile = configured_release_adapter_profile(source_type, config)?;
     let (observed, managed_identities) = if source_type == "managed_append" {
         let snapshot =
             plugins::managed_append::read_snapshot(source_path, trusted_prefix, full_comparison)
                 .await?;
         (snapshot.observed, Some(snapshot.identities))
     } else {
-        let plugin =
-            plugins::get_plugin(source_type).context("release source adapter is unavailable")?;
+        let plugin = plugins::get_configured_plugin(source_type, config)?
+            .context("release source adapter is unavailable")?;
         (
             plugin.sync_for_storage_v2_observed(source_path).await?,
             None,
@@ -756,6 +800,11 @@ pub async fn observe_release_watermark_with_prefix(
         item_count: files.len(),
         input_bytes,
         application_read_bytes,
+        filesystem_scope: if source_type == "fs" {
+            plugins::fs_scope::FilesystemScope::from_config(config)?.proof
+        } else {
+            None
+        },
     })
 }
 
@@ -786,10 +835,13 @@ where
         .ok_or_else(|| anyhow::anyhow!("fixture source path is not UTF-8"))?;
     let source = client
         .query_one(
-            "SELECT type, path, is_test FROM sources WHERE id = $1",
+            "SELECT type, path, is_test, config FROM sources WHERE id = $1 FOR SHARE",
             &[&source_id],
         )
         .await?;
+    let source_config = source
+        .get::<_, Option<serde_json::Value>>("config")
+        .unwrap_or(serde_json::Value::Null);
     let is_test = source.get::<_, bool>("is_test");
     if source.get::<_, String>("type") != source_type
         || source.get::<_, String>("path") != source_path
@@ -814,7 +866,9 @@ where
             "mainrag.managed-append-fixture.v2.manifest".to_string()
         }
         SliceMode::PublicFixture => FIXTURE_ADAPTER_PROFILE.to_string(),
-        SliceMode::ReleaseCandidate => release_adapter_profile(source_type)?,
+        SliceMode::ReleaseCandidate => {
+            configured_release_adapter_profile(source_type, &source_config)?
+        }
     };
     let predecessor = client
         .query_opt(
@@ -871,7 +925,7 @@ where
             || frontier.appends_since_full + 1
                 >= crate::services::generation_ingest::DEFAULT_FULL_COMPARE_EVERY
     });
-    let plugin = plugins::get_plugin(source_type)
+    let plugin = plugins::get_configured_plugin(source_type, &source_config)?
         .ok_or_else(|| anyhow::anyhow!("source adapter is unavailable"))?;
     let (observed_sync, managed_identity) = if source_type == "managed_append" {
         let snapshot = plugins::managed_append::read_snapshot(
@@ -1658,6 +1712,23 @@ where
     }
 
     let stabilization_started = Instant::now();
+    if mode == SliceMode::ReleaseCandidate {
+        let registry = client
+            .query_one(
+                "SELECT type, path, config FROM sources WHERE id=$1",
+                &[&source_id],
+            )
+            .await?;
+        let current_config = registry
+            .get::<_, Option<serde_json::Value>>("config")
+            .unwrap_or(serde_json::Value::Null);
+        if registry.get::<_, String>("type") != source_type
+            || registry.get::<_, String>("path") != source_path
+            || configured_release_adapter_profile(source_type, &current_config)? != adapter_profile
+        {
+            bail!("registered source scope changed before sealing");
+        }
+    }
     let (final_observed_sync, final_managed_identities) = if source_type == "managed_append" {
         let snapshot = plugins::managed_append::read_snapshot(
             source_path,
@@ -2034,6 +2105,16 @@ fn release_source_watermark(
         digest.update(component.as_bytes());
     }
     hex::encode(digest.finalize())
+}
+
+fn configured_release_adapter_profile(
+    source_type: &str,
+    config: &serde_json::Value,
+) -> Result<String> {
+    if source_type == "fs" {
+        return Ok(plugins::fs_scope::FilesystemScope::from_config(config)?.release_profile());
+    }
+    release_adapter_profile(source_type)
 }
 
 fn release_adapter_profile(source_type: &str) -> Result<String> {
@@ -2846,6 +2927,84 @@ mod managed_append_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn configured_fs_scope_binds_watermark_and_preserves_ignore_rules() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-fs-scope-{}", Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(directory.0.join("nested")).unwrap();
+        std::fs::write(
+            directory.0.join("nested/session.jsonl"),
+            b"{\"event\":\"first\"}\n",
+        )
+        .unwrap();
+        std::fs::write(directory.0.join("private.json"), b"private bytes").unwrap();
+        std::fs::write(directory.0.join("ignored.jsonl"), b"ignored bytes\n").unwrap();
+        std::fs::write(directory.0.join(".ignore"), "ignored.jsonl\n").unwrap();
+        let config = serde_json::json!({"file_patterns": ["*.jsonl"]});
+        let first = observe_release_watermark_configured(7, "fs", &directory.0, &config)
+            .await
+            .unwrap();
+        assert_eq!(first.item_count, 1);
+        assert!(first.filesystem_scope.is_some());
+        std::fs::write(directory.0.join("private.json"), b"different private bytes").unwrap();
+        std::fs::write(
+            directory.0.join("ignored.jsonl"),
+            b"different ignored bytes\n",
+        )
+        .unwrap();
+        let unchanged = observe_release_watermark_configured(7, "fs", &directory.0, &config)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.source_watermark_sha256,
+            unchanged.source_watermark_sha256
+        );
+        assert_eq!(
+            first.application_read_bytes,
+            unchanged.application_read_bytes
+        );
+        let legacy = plugins::get_configured_plugin("fs", &config)
+            .unwrap()
+            .unwrap()
+            .sync_observed(directory.0.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(legacy.result.files.len(), 1);
+        assert_eq!(legacy.result.files[0].path, "nested/session.jsonl");
+        let unfiltered = observe_release_watermark(7, "fs", &directory.0)
+            .await
+            .unwrap();
+        assert_eq!(unfiltered.item_count, 2);
+        assert!(unfiltered.filesystem_scope.is_none());
+        assert_ne!(first.adapter_profile_id, unfiltered.adapter_profile_id);
+        std::fs::write(
+            directory.0.join("nested/session.jsonl"),
+            b"{\"event\":\"second\"}\n",
+        )
+        .unwrap();
+        let advanced = observe_release_watermark_configured(7, "fs", &directory.0, &config)
+            .await
+            .unwrap();
+        assert_ne!(
+            first.source_watermark_sha256,
+            advanced.source_watermark_sha256
+        );
+        let same_bytes_new_scope = observe_release_watermark_configured(
+            7,
+            "fs",
+            &directory.0,
+            &serde_json::json!({"file_patterns": ["nested/*.jsonl"]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(advanced.input_bytes, same_bytes_new_scope.input_bytes);
+        assert_ne!(
+            advanced.source_watermark_sha256,
+            same_bytes_new_scope.source_watermark_sha256
+        );
+    }
 
     fn complete_candidate_state() -> serde_json::Value {
         serde_json::json!({

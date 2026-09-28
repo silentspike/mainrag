@@ -24,6 +24,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+scope_matcher = runpy.run_path(str(Path(__file__).with_name("fs_scope.py")))["scope_matcher"]
 load_token = runpy.run_path(str(Path(__file__).with_name("operator_token.py")))["load_token"]
 candidate_proof = runpy.run_path(
     str(Path(__file__).with_name("candidate-aggregate-audit.py"))
@@ -469,6 +470,7 @@ def read_snapshot_review(path: Path, expected_sha256: str, checkpoint: dict[str,
             not isinstance(review.get("git_head"), str) or not re.fullmatch(
                 r"[0-9a-f]{40}|[0-9a-f]{64}", review["git_head"])):
         raise RuntimeError("source snapshot review Git commit identity differs")
+    scope_matcher(review.get("filesystem_scope"), adapter_profile_id)
     paths = review.get("paths")
     if not isinstance(paths, dict) or not paths:
         raise RuntimeError("source snapshot review path set is empty")
@@ -476,18 +478,20 @@ def read_snapshot_review(path: Path, expected_sha256: str, checkpoint: dict[str,
     for path_sha, row in paths.items():
         if not isinstance(path_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", path_sha) \
                 or not isinstance(row, dict) or row.get("status") not in {
-                    "same_bytes", "changed_bytes", "source_file_missing"
+                    "same_bytes", "changed_bytes", "source_file_missing", "outside_configured_scope"
                 } or not isinstance(row.get("legacy_sha256"), str) \
                 or not re.fullmatch(r"[0-9a-f]{64}", row["legacy_sha256"]):
             raise RuntimeError("source snapshot review path identity differs")
         observed = row.get("observed_sha256")
-        if (row["status"] == "source_file_missing" and observed is not None) \
-                or (row["status"] != "source_file_missing"
+        if (row["status"] in {"source_file_missing", "outside_configured_scope"} and observed is not None) \
+                or (row["status"] not in {"source_file_missing", "outside_configured_scope"}
                     and (not isinstance(observed, str)
                          or not re.fullmatch(r"[0-9a-f]{64}", observed)
                          or (observed == row["legacy_sha256"])
                          != (row["status"] == "same_bytes"))):
             raise RuntimeError("source snapshot review byte classification differs")
+        if row["status"] == "outside_configured_scope" and review.get("filesystem_scope") is None:
+            raise RuntimeError("source scope classification has no bound filter")
         counts[row["status"]] = counts.get(row["status"], 0) + 1
     if review.get("status_counts") != counts:
         raise RuntimeError("source snapshot review counts differ")
@@ -753,7 +757,7 @@ def bind_automatic_expectation(seed: dict[str, Any], current: dict[str, Any],
         return seed, None
     original = seed["expected_path_sha256"]
     status = source_review["paths"].get(original, {}).get("status")
-    if status not in {"changed_bytes", "source_file_missing"}:
+    if status not in {"changed_bytes", "source_file_missing", "outside_configured_scope"}:
         return seed, None
     replacement = next((path for path in path_identity(current["results"])
                         if source_review["paths"].get(path, {}).get("status") == "same_bytes"), None)
@@ -918,7 +922,7 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
                           if source_review["paths"][path].get("status") == "same_bytes"]
         stale_paths = [path for path in baseline_paths
                        if source_review["paths"][path].get("status") in {
-                           "changed_bytes", "source_file_missing"}]
+                           "changed_bytes", "source_file_missing", "outside_configured_scope"}]
         if len(required_paths) + len(stale_paths) != len(baseline_paths):
             return failed
     else:
@@ -1089,6 +1093,9 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             "review_sha256": source_review["review_sha256"],
             "source_watermark_sha256": source_review["source_watermark_sha256"],
             "status_counts": source_review["status_counts"],
+            **({"filesystem_scope_sha256": source_review["filesystem_scope"]["sha256"],
+                "adapter_profile_id": source_review["adapter_profile_id"]}
+               if source_review.get("filesystem_scope") else {}),
         }
     progress["phase"] = "gold_suite"
     gold_cases, gold_summary = load_gold_suite(arguments, checkpoint, verified, source_review)

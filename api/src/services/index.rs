@@ -285,7 +285,7 @@ impl IndexService {
         // Get source info
         let source = client
             .query_opt(
-                "SELECT id, name, type, path FROM sources WHERE id = $1",
+                "SELECT id, name, type, path, config FROM sources WHERE id = $1",
                 &[&source_id],
             )
             .await?
@@ -294,6 +294,9 @@ impl IndexService {
         let source_name: String = source.get("name");
         let source_type: String = source.get("type");
         let source_path: String = source.get("path");
+        let source_config = source
+            .get::<_, Option<serde_json::Value>>("config")
+            .unwrap_or(serde_json::Value::Null);
 
         info!(
             "Starting index for source {} ({}) at {}",
@@ -322,10 +325,19 @@ impl IndexService {
             .iter()
             .map(|row| (row.get::<_, String>("path"), row.get::<_, i64>("id")))
             .collect();
+        // Narrowing a registered filter is not a legacy cleanup authorization.
+        // Preserve historical rows outside the configured scope for the reviewed
+        // manifest-bound cleanup, rather than treating them as deleted files.
+        if source_type == "fs" {
+            let scope = plugins::fs_scope::FilesystemScope::from_config(&source_config)
+                .map_err(|error| AppError::BadRequest(error.to_string()))?;
+            existing_files.retain(|path, _| scope.includes(std::path::Path::new(path)));
+        }
         let initial_file_count = existing_files.len();
 
         // Use plugin to discover and fetch files
-        let plugin = plugins::get_plugin(&source_type)
+        let plugin = plugins::get_configured_plugin(&source_type, &source_config)
+            .map_err(|error| AppError::BadRequest(error.to_string()))?
             .ok_or_else(|| AppError::BadRequest(format!("Unknown source type: {}", source_type)))?;
 
         let observed = plugin

@@ -108,24 +108,28 @@ pub async fn admin_observe_release_watermark(
             Box::pin(async move {
                 let source = transaction
                     .query_opt(
-                        "SELECT type, path FROM sources WHERE id = $1",
+                        "SELECT type, path, config FROM sources WHERE id = $1",
                         &[&source_id],
                     )
                     .await?
                     .ok_or_else(|| AppError::NotFound(format!("Source {source_id} not found")))?;
                 let source_type: String = source.get("type");
                 let source_path: String = source.get("path");
-                let observation = crate::services::shadow_slice::observe_release_watermark(
-                    source_id,
-                    &source_type,
-                    std::path::Path::new(&source_path),
-                )
-                .await
-                .map_err(|error| {
-                    tracing::error!(error = %format!("{error:#}"),
+                let observation =
+                    crate::services::shadow_slice::observe_release_watermark_configured(
+                        source_id,
+                        &source_type,
+                        std::path::Path::new(&source_path),
+                        &source
+                            .get::<_, Option<serde_json::Value>>("config")
+                            .unwrap_or(serde_json::Value::Null),
+                    )
+                    .await
+                    .map_err(|error| {
+                        tracing::error!(error = %format!("{error:#}"),
                         "storage-v2 release watermark observation failed");
-                    AppError::Internal("release watermark observation failed".to_string())
-                })?;
+                        AppError::Internal("release watermark observation failed".to_string())
+                    })?;
                 Ok(Json(observation))
             })
         })
