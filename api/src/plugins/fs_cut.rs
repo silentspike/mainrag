@@ -145,61 +145,92 @@ fn descriptor_bytes(path: &Path, owner: u32) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn btrfs_command() -> Result<PathBuf> {
-    for candidate in ["/usr/sbin/btrfs", "/usr/bin/btrfs"] {
-        let path = Path::new(candidate);
-        if !path.exists() {
-            continue;
-        }
-        let resolved = path.canonicalize()?;
-        let meta = fs::metadata(&resolved)?;
-        ensure!(
-            meta.is_file() && meta.uid() == 0 && meta.mode() & 0o022 == 0,
-            "filesystem inspector authority is unsafe"
-        );
-        return Ok(resolved);
-    }
-    bail!("Btrfs source-cut inspector is unavailable")
+fn trusted_helper() -> Result<PathBuf> {
+    let helper = Path::new("/usr/libexec/mainrag/source-cut-capture");
+    trusted_directory(helper.parent().context("cut helper parent is absent")?, 0)?;
+    let meta = fs::symlink_metadata(helper)?;
+    ensure!(
+        meta.is_file()
+            && !meta.file_type().is_symlink()
+            && meta.uid() == 0
+            && meta.mode() & 0o022 == 0,
+        "source-cut helper authority is unsafe"
+    );
+    Ok(helper.to_path_buf())
 }
 
-fn inspect_snapshot(root: &Path) -> Result<(uuid::Uuid, uuid::Uuid)> {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KernelInspection {
+    status: String,
+    source_root_sha256: String,
+    cut_id: uuid::Uuid,
+    descriptor_sha256: String,
+    snapshot_uuid: uuid::Uuid,
+    origin_uuid: uuid::Uuid,
+    read_only: bool,
+}
+
+impl KernelInspection {
+    fn validate(&self, digest: &str, cut_id: uuid::Uuid, descriptor: &str) -> Result<()> {
+        ensure!(
+            self.status == "PASS"
+                && self.read_only
+                && self.source_root_sha256 == digest
+                && self.cut_id == cut_id
+                && self.descriptor_sha256 == descriptor
+                && !self.snapshot_uuid.is_nil()
+                && !self.origin_uuid.is_nil(),
+            "cut kernel identity differs from its pinned history"
+        );
+        Ok(())
+    }
+}
+
+fn inspect_snapshot(root: &Path, digest: &str) -> Result<(uuid::Uuid, uuid::Uuid)> {
     ensure!(
         fs::metadata(root)?.uid() == 0,
         "snapshot property authority is unsafe"
     );
-    let binary = btrfs_command()?;
-    let property = Command::new(&binary)
-        .args(["property", "get", "-ts"])
-        .arg(root)
-        .arg("ro")
+    let cut_id = uuid::Uuid::parse_str(
+        root.file_name()
+            .and_then(|s| s.to_str())
+            .context("cut inspection identity is absent")?,
+    )?;
+    let registry = registry_root();
+    ensure!(
+        !cut_id.is_nil() && root == registry.join("views").join(cut_id.to_string()),
+        "cut inspection root differs from its registry"
+    );
+    let helper = trusted_helper()?;
+    let result = Command::new("/usr/bin/sudo")
+        .arg("-n")
+        .arg(helper)
+        .args([
+            "--source-root-sha256",
+            digest,
+            "--inspect-cut-id",
+            &cut_id.to_string(),
+        ])
         .output()?;
     ensure!(
-        property.status.success() && property.stdout == b"ro=true\n",
-        "source cut is not a read-only subvolume"
+        result.status.success() && result.stdout.len() <= MAX_DESCRIPTOR_BYTES as usize,
+        "controlled cut kernel inspection failed"
     );
-    let result = Command::new(binary)
-        .args(["subvolume", "show"])
-        .arg(root)
-        .output()?;
-    ensure!(
-        result.status.success() && result.stdout.len() < MAX_DESCRIPTOR_BYTES as usize,
-        "source cut identity is unavailable"
-    );
-    let output = std::str::from_utf8(&result.stdout)?;
-    let field = |name: &str| -> Result<uuid::Uuid> {
-        let values = output
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix(name))
-            .collect::<Vec<_>>();
-        ensure!(values.len() == 1, "source cut identity is ambiguous");
-        Ok(uuid::Uuid::parse_str(values[0].trim())?)
-    };
-    Ok((field("UUID:")?, field("Parent UUID:")?))
+    let observed: KernelInspection = serde_json::from_slice(&result.stdout)?;
+    let history = registry.join("history");
+    trusted_directory(&history, 0)?;
+    let bytes = descriptor_bytes(&history.join(format!("{cut_id}-{digest}.json")), 0)?;
+    observed.validate(digest, cut_id, &hex::encode(Sha256::digest(bytes)))?;
+    Ok((observed.snapshot_uuid, observed.origin_uuid))
 }
 
 impl ReadCut {
     pub fn select(root: &Path) -> Result<Self> {
-        Self::select_with(root, &registry_root(), 0, inspect_snapshot)
+        let digest = root_digest(root)?;
+        Self::select_with(root, &registry_root(), 0, |snapshot| {
+            inspect_snapshot(snapshot, &digest)
+        })
     }
 
     fn select_with(
@@ -276,7 +307,7 @@ impl ReadCut {
             "pinned source-cut descriptor changed during the operation"
         );
         ensure!(
-            inspect_snapshot(&self.snapshot_root)?
+            inspect_snapshot(&self.snapshot_root, &self.proof.source_root_sha256)?
                 == (self.proof.snapshot_uuid, self.proof.origin_uuid),
             "selected source cut lost its immutable filesystem identity"
         );
@@ -288,15 +319,7 @@ impl ReadCut {
 /// No registered path or arbitrary command is passed as a privileged argument.
 #[cfg(feature = "storage-v2-retrieval")]
 pub async fn capture(root: &Path) -> Result<()> {
-    let helper = Path::new("/usr/libexec/mainrag/source-cut-capture");
-    let meta = fs::symlink_metadata(helper)?;
-    ensure!(
-        meta.is_file()
-            && !meta.file_type().is_symlink()
-            && meta.uid() == 0
-            && meta.mode() & 0o022 == 0,
-        "source-cut helper authority is unsafe"
-    );
+    let helper = trusted_helper()?;
     let output = tokio::process::Command::new("/usr/bin/sudo")
         .args(["-n"])
         .arg(helper)
@@ -318,6 +341,39 @@ pub async fn capture(root: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn privileged_kernel_observation_is_closed_and_bound_to_pinned_history() {
+        let digest = "a".repeat(64);
+        let descriptor = "b".repeat(64);
+        let cut_id = uuid::Uuid::new_v4();
+        let valid = serde_json::json!({"status":"PASS","read_only":true,
+            "source_root_sha256":digest,"cut_id":cut_id,"descriptor_sha256":descriptor,
+            "snapshot_uuid":uuid::Uuid::new_v4(),"origin_uuid":uuid::Uuid::new_v4()});
+        serde_json::from_value::<KernelInspection>(valid.clone())
+            .unwrap()
+            .validate(&digest, cut_id, &descriptor)
+            .unwrap();
+        for (field, value) in [
+            ("read_only", serde_json::json!(false)),
+            ("status", serde_json::json!("FAIL")),
+            ("source_root_sha256", serde_json::json!("c".repeat(64))),
+            ("descriptor_sha256", serde_json::json!("c".repeat(64))),
+            ("cut_id", serde_json::json!(uuid::Uuid::new_v4())),
+            ("snapshot_uuid", serde_json::json!(uuid::Uuid::nil())),
+            ("origin_uuid", serde_json::json!(uuid::Uuid::nil())),
+        ] {
+            let mut altered = valid.clone();
+            altered[field] = value;
+            assert!(serde_json::from_value::<KernelInspection>(altered)
+                .unwrap()
+                .validate(&digest, cut_id, &descriptor)
+                .is_err());
+        }
+        let mut altered = valid;
+        altered["arbitrary_path"] = serde_json::json!("fixture");
+        assert!(serde_json::from_value::<KernelInspection>(altered).is_err());
+    }
 
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, serde_json::Value) {
         let directory = tempfile::tempdir().unwrap();

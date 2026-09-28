@@ -124,6 +124,38 @@ def no_nested_subvolumes(root: Path):
             if stat.S_ISDIR(meta.st_mode) and meta.st_ino in {2,256}:
                 raise RuntimeError('nested source subvolume is not covered by this cut')
 
+def inspect_cut(digest: str,cut_id: str,policy_path=POLICY):
+    """Read actual kernel identity through the same fixed root allowlist."""
+    if os.geteuid()!=0:raise RuntimeError('source-cut inspection requires its privileged identity')
+    if str(uuid.UUID(cut_id))!=cut_id or uuid.UUID(cut_id).int==0:
+        raise RuntimeError('cut identity is invalid')
+    root,origin,registry,expected=validate_policy(private_read(policy_path),digest)
+    trusted_directory(registry)
+    marker=private_read(registry/'registry-owner.json')
+    if (set(marker)!={'format','owner','registry_root','nonce'}
+            or marker['format']!='mainrag.fs-cut-registry.v1'
+            or marker['owner']!='storage-v2-source-cut' or marker['registry_root']!=str(registry)
+            or uuid.UUID(marker['nonce']).int==0):
+        raise RuntimeError('cut registry ownership is not established')
+    value,raw=private_read(registry/'history'/f'{cut_id}-{digest}.json',with_bytes=True)
+    snapshot=registry/'views'/cut_id;view=snapshot/root.relative_to(origin)
+    trusted_directory(snapshot.parent)
+    keys={'format','cut_id','source_root_sha256','registered_root','origin_subvolume',
+          'snapshot_root','read_root','snapshot_uuid','origin_uuid','captured_at_unix'}
+    if (set(value)!=keys or value['format']!=FORMAT or value['cut_id']!=cut_id
+            or value['source_root_sha256']!=digest or value['registered_root']!=str(root)
+            or value['origin_subvolume']!=str(origin) or value['snapshot_root']!=str(snapshot)
+            or value['read_root']!=str(view) or value['origin_uuid']!=expected
+            or snapshot.stat().st_uid!=0 or view.resolve(strict=True)!=view or not view.is_dir()):
+        raise RuntimeError('cut inspection boundary differs')
+    binary=inspector();observed=identity(binary,snapshot)
+    if (observed!={'uuid':value['snapshot_uuid'],'parent_uuid':expected}
+            or command(binary,'property','get','-ts',snapshot,'ro')!='ro=true\n'):
+        raise RuntimeError('cut kernel identity is not immutable')
+    return {'status':'PASS','source_root_sha256':digest,'cut_id':cut_id,
+            'descriptor_sha256':hashlib.sha256(raw).hexdigest(),
+            'snapshot_uuid':observed['uuid'],'origin_uuid':expected,'read_only':True}
+
 def capture(digest: str,policy_path=POLICY):
     if os.geteuid()!=0:raise RuntimeError('source-cut producer requires its privileged identity')
     policy=private_read(policy_path)
@@ -189,9 +221,11 @@ def capture(digest: str,policy_path=POLICY):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source-root-sha256',required=True)
+    parser.add_argument('--inspect-cut-id')
     args=parser.parse_args()
     if not SHA256.fullmatch(args.source_root_sha256):parser.error('invalid registered-root digest')
-    try:result=capture(args.source_root_sha256)
+    try:result=(inspect_cut(args.source_root_sha256,args.inspect_cut_id)
+                if args.inspect_cut_id is not None else capture(args.source_root_sha256))
     except (OSError,ValueError,RuntimeError,subprocess.SubprocessError,KeyError) as error:
         # Keep private filesystem paths and command stderr out of API output.
         print(json.dumps({'status':'FAIL','error_type':type(error).__name__}),flush=True)
