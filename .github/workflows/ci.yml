@@ -44,10 +44,10 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Install the bundled MuPDF generators
+      - name: Install the native PDF build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y gperf unzip
+          sudo apt-get install --no-install-recommends -y gperf unzip libfontconfig1-dev
       - name: Verify the native structured PDF adapter
         shell: bash
         run: |
