@@ -220,7 +220,7 @@ def invoke(step_plan: dict, state_path: Path, source_state: dict,
     return True
 
 
-def run(args: argparse.Namespace) -> None:
+def run(args: argparse.Namespace) -> int:
     raw = private_file(args.plan)
     plan = json.loads(raw)
     validate_plan(plan)
@@ -285,11 +285,14 @@ def run(args: argparse.Namespace) -> None:
             else:
                 source_state["status"] = "passed"
                 write_state(args.state, state)
-        print(json.dumps({"status": "STOPPED" if stop_requested or stop_path.exists()
-            else "RUN_FINISHED",
-            "source_counts": {status: sum(source["status"] == status for source in state["sources"])
-                              for status in ("pending", "running", "passed", "failed",
-                                             "needs_reconciliation", "skipped")}}, sort_keys=True))
+        counts = {status: sum(source["status"] == status for source in state["sources"])
+                  for status in ("pending", "running", "passed", "failed",
+                                 "needs_reconciliation", "skipped")}
+        complete = counts["passed"] == len(state["sources"])
+        stopped = not complete and (stop_requested or stop_path.exists())
+        status = "PASS" if complete else "STOPPED" if stopped else "FAIL"
+        print(json.dumps({"status": status, "source_counts": counts}, sort_keys=True))
+        return 0 if complete else 2 if stopped else 1
 
 
 def reconcile(args: argparse.Namespace) -> None:
@@ -334,7 +337,7 @@ def reconcile(args: argparse.Namespace) -> None:
         raise RuntimeError("source phase is absent from the protected plan")
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("run", "stop", "status", "reconcile"))
     parser.add_argument("--plan", type=Path)
@@ -348,7 +351,7 @@ def main() -> None:
     if args.command == "run":
         if args.plan is None:
             parser.error("run requires --plan")
-        run(args)
+        return run(args)
     elif args.command == "stop":
         stop = args.state.with_suffix(args.state.suffix + ".stop")
         stop.touch(mode=0o600, exist_ok=True)
@@ -364,11 +367,12 @@ def main() -> None:
             "phase": next((step["name"] for step in source["steps"]
                            if step["status"] in {"running", "failed", "needs_reconciliation"}), None),
         } for source in state["sources"]]}, sort_keys=True))
+    return 0
 
 
 if __name__ == "__main__":
     try:
-        main()
+        raise SystemExit(main())
     except (OSError, RuntimeError, ValueError, KeyError) as error:
         print(json.dumps({"status": "BLOCKED", "reason": str(error)}), file=sys.stderr)
         raise SystemExit(1) from error
