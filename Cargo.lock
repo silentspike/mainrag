@@ -2640,6 +2640,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "git2",
+ "globset",
  "governor",
  "hex",
  "hmac 0.12.1",

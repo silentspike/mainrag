@@ -123,6 +123,17 @@ class CandidateAggregateAuditTests(unittest.TestCase):
         inventory = self.inventory(reviewed, source(2, benchmark=True))
         good, _ = AUDIT.audit(inventory, "e" * 64)
         self.assertTrue(good["persisted_candidate_set_complete"])
+        snapshot = manifest["source_snapshot_review"]
+        snapshot["status_counts"]["outside_configured_scope"] = 1
+        invalid_scope, _ = AUDIT.audit(inventory, "e" * 64)
+        self.assertEqual(invalid_scope["persisted_gate_blockers"], {"source_snapshot_scope_invalid": 1})
+        snapshot.update(filesystem_scope_sha256="6" * 64, adapter_profile_id=
+            "mainrag.fs-release-candidate.v3.scope-" + "6" * 64 + ".fragment-1048576-newline-65536")
+        mismatched_scope, _ = AUDIT.audit(inventory, "e" * 64)
+        self.assertEqual(mismatched_scope["persisted_gate_blockers"], {"source_snapshot_scope_profile_mismatch": 1})
+        candidate["adapter_profile_id"] = snapshot["adapter_profile_id"]
+        valid_scope, _ = AUDIT.audit(inventory, "e" * 64)
+        self.assertTrue(valid_scope["persisted_candidate_set_complete"])
         query = manifest["query_results"][0]
         query.update(expected_in_current=True, expected_in_storage_v2=True)
         query["automatic_expectation_binding"] = {

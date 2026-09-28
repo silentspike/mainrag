@@ -69,7 +69,9 @@ const BINARY_SIGNATURES: &[&[u8]] = &[
     b"%PDF",             // PDF
 ];
 
-pub struct FilesystemPlugin;
+pub struct FilesystemPlugin {
+    scope: super::fs_scope::FilesystemScope,
+}
 
 impl Default for FilesystemPlugin {
     fn default() -> Self {
@@ -79,7 +81,13 @@ impl Default for FilesystemPlugin {
 
 impl FilesystemPlugin {
     pub fn new() -> Self {
-        Self
+        Self::with_config(&serde_json::Value::Null).expect("unfiltered filesystem scope")
+    }
+
+    pub fn with_config(config: &serde_json::Value) -> anyhow::Result<Self> {
+        Ok(Self {
+            scope: super::fs_scope::FilesystemScope::from_config(config)?,
+        })
     }
 }
 
@@ -316,6 +324,12 @@ impl FilesystemPlugin {
         );
 
         for path in paths {
+            let relative = path.strip_prefix(root_path)?;
+            // Do not read excluded files. WalkBuilder's ignore and traversal
+            // failures remain authoritative; a glob never overrides them.
+            if !self.scope.includes(relative) {
+                continue;
+            }
             // Extension check
             let ext = match path.extension().and_then(|e| e.to_str()) {
                 Some(e) => e.to_lowercase(),
