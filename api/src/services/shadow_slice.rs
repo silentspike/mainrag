@@ -14,10 +14,10 @@ use std::time::Instant;
 use tokio_postgres::GenericClient;
 use uuid::Uuid;
 
-use crate::db::{content_body, content_graph, generation_ingest};
+use crate::db::{content_body, generation_ingest};
 use crate::plugins;
 use crate::services::chunker::character::CharacterChunker;
-use crate::services::chunker::Chunker;
+use crate::services::chunker::{Chunk, Chunker};
 use crate::services::content_store::{
     BodyCodec, BodyIdentity, DictionaryIdentity, PackBuilder, PackEntry, PackReader,
 };
@@ -626,6 +626,7 @@ where
         io_buffer_bytes,
         commit_sha,
         SliceMode::PublicFixture,
+        None,
     )
     .await
 }
@@ -653,6 +654,35 @@ where
         io_buffer_bytes,
         commit_sha,
         SliceMode::ReleaseCandidate,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_release_candidate_build_with_progress<C>(
+    client: &C,
+    source_id: i64,
+    source_type: &str,
+    source_path: &Path,
+    pack_root: &Path,
+    io_buffer_bytes: usize,
+    commit_sha: &str,
+    progress: Option<&super::build_progress::BuildProgressRecorder>,
+) -> Result<ShadowSliceResult>
+where
+    C: GenericClient + Sync,
+{
+    run_storage_v2_slice(
+        client,
+        source_id,
+        source_type,
+        source_path,
+        pack_root,
+        io_buffer_bytes,
+        commit_sha,
+        SliceMode::ReleaseCandidate,
+        progress,
     )
     .await
 }
@@ -819,6 +849,7 @@ async fn run_storage_v2_slice<C>(
     io_buffer_bytes: usize,
     commit_sha: &str,
     mode: SliceMode,
+    progress: Option<&super::build_progress::BuildProgressRecorder>,
 ) -> Result<ShadowSliceResult>
 where
     C: GenericClient + Sync,
@@ -972,6 +1003,9 @@ where
     } else {
         canonical_fixture_hash(&mut files).await?
     };
+    if let Some(progress) = progress {
+        progress.phase("content_store", Some(files.len()), None)?;
+    }
     measurements.input_bytes = input_bytes;
     measurements.fragments_created = u64::try_from(
         files
@@ -1025,6 +1059,9 @@ where
         false,
     )
     .await?;
+    if let Some(progress) = progress {
+        progress.phase("content_store", None, Some((run.id, run.generation_id)))?;
+    }
     measurements.record_stage(ShadowIngestStage::DatabaseStage, begin_started.elapsed());
     if run.status == "sealed" {
         let reuse_lookup_started = Instant::now();
@@ -1106,6 +1143,10 @@ where
             reuse_lookup_started.elapsed(),
         );
         measurements.record_total(total_started.elapsed());
+        if let Some(progress) = progress {
+            progress.advance(files.len(), &measurements, true)?;
+            progress.phase("transaction_pending", None, None)?;
+        }
         return Ok(ShadowSliceResult {
             run_id: run.id,
             source_id,
@@ -1350,6 +1391,13 @@ where
             SliceMode::ReleaseCandidate => "backend-not-applicable",
         }
     });
+    if let Some(progress) = progress {
+        progress.phase("staging", None, None)?;
+    }
+    let mut staged_items = copied_keys.len();
+    if let Some(progress) = progress {
+        progress.advance(staged_items, &measurements, true)?;
+    }
     const ANALYSIS_PREFETCH_ITEMS: usize = 1024;
     for (file_batch, body_batch) in files
         .chunks(ANALYSIS_PREFETCH_ITEMS)
@@ -1395,40 +1443,6 @@ where
             let item_key = &file.item_key;
             let language = &file.language;
             let bytes = file.load_verified_bytes().await?;
-            let projection_started = Instant::now();
-            let node_domain = match mode {
-                SliceMode::PublicFixture => "fixture",
-                SliceMode::ReleaseCandidate => "source",
-            };
-            let node =
-                content_graph::put_leaf_node(client, node_domain, "artifact", body.id).await?;
-            let roles = vec!["content".to_string()];
-            let kinds = vec!["node".to_string()];
-            let component_ids = vec![node.id];
-            let starts = vec![0_i64];
-            let ends = vec![body.logical_length];
-            let view = content_graph::put_retrieval_view(
-                client,
-                "artifact",
-                match mode {
-                    SliceMode::PublicFixture => FIXTURE_VIEW_PROFILE,
-                    SliceMode::ReleaseCandidate => RELEASE_VIEW_PROFILE,
-                },
-                language.as_deref().unwrap_or("text"),
-                "whole-bytes-v1",
-                0,
-                &roles,
-                &kinds,
-                &component_ids,
-                &starts,
-                &ends,
-            )
-            .await?;
-            measurements.record_stage(
-                ShadowIngestStage::StructuralProjection,
-                projection_started.elapsed(),
-            );
-
             let text = std::str::from_utf8(bytes.as_ref())
                 .context("fixture adapter produced non-UTF-8 text")?;
             let analysis_started = Instant::now();
@@ -1514,55 +1528,47 @@ where
                 "sha256": hex::encode(&body.digest),
             });
             let expected_content_hash = hex::encode(&body.digest);
-            let staged = generation_ingest::stage_shadow_item(
+            let identifiers = search_exact_identifiers(text);
+            let staged = generation_ingest::stage_shadow_document(
                 client,
-                &generation_ingest::StageItem {
+                &generation_ingest::StageDocument {
                     run_id: run.id,
                     item_key,
-                    item_kind: "document",
                     witness_type: match mode {
                         SliceMode::PublicFixture => "public-fixture-item",
                         SliceMode::ReleaseCandidate => "release-candidate-item",
                     },
                     witness: &item_witness,
                     adapter_profile_id: &adapter_profile,
-                    content_root_node_id: Some(node.id),
-                    raw_body_id: None,
+                    body_id: body.id,
+                    node_domain: match mode {
+                        SliceMode::PublicFixture => "fixture",
+                        SliceMode::ReleaseCandidate => "source",
+                    },
+                    view_profile: match mode {
+                        SliceMode::PublicFixture => FIXTURE_VIEW_PROFILE,
+                        SliceMode::ReleaseCandidate => RELEASE_VIEW_PROFILE,
+                    },
+                    language: language.as_deref().unwrap_or("text"),
                     expected_content_hash: &expected_content_hash,
                     byte_length: body.logical_length,
                     content_identity_sha256: content_digest,
                     analysis_profile_id: GENERIC_ANALYSIS_PROFILE,
-                    view_id: view.id,
                     source_path: path,
                     locator: &locator,
                     parser_pass_count,
+                    search_profile: match mode {
+                        SliceMode::PublicFixture => FIXTURE_SEARCH_PROFILE,
+                        SliceMode::ReleaseCandidate => RELEASE_SEARCH_PROFILE,
+                    },
+                    text,
+                    identifiers: &identifiers,
+                    score_profile,
+                    score_evidence: &score_evidence,
+                    score_stages: &score_stages,
                 },
             )
             .await?;
-            measurements.db_staging_round_trips += 1;
-            let identifiers = search_exact_identifiers(text);
-            let _document_id: i64 = client
-                .query_one(
-                    "WITH document AS MATERIALIZED ( \
-                    SELECT id FROM storage_v2_put_search_document($1, 'node', $2, $3, $4) \
-                 ), binding AS MATERIALIZED ( \
-                    SELECT storage_v2_bind_search_document($5, 0, document.id, 1.0) \
-                      FROM document \
-                 ) \
-                 SELECT document.id FROM document CROSS JOIN binding",
-                    &[
-                        &match mode {
-                            SliceMode::PublicFixture => FIXTURE_SEARCH_PROFILE,
-                            SliceMode::ReleaseCandidate => RELEASE_SEARCH_PROFILE,
-                        },
-                        &node.id,
-                        &text,
-                        &identifiers,
-                        &view.id,
-                    ],
-                )
-                .await?
-                .get(0);
             measurements.db_staging_round_trips += 1;
             if mode == SliceMode::ReleaseCandidate {
                 let copied: i64 = client
@@ -1580,9 +1586,12 @@ where
                         .context("lexical segment copy count overflow")?;
                 } else if !text.is_empty() {
                     let chunks = CharacterChunker::default().chunk(text, language.as_deref());
-                    let complete =
-                        !chunks.is_empty() && chunks.iter().all(|chunk| text.contains(&chunk.text));
+                    let complete = !chunks.is_empty()
+                        && chunks.iter().all(|chunk| {
+                            text.get(chunk.start_byte..chunk.end_byte) == Some(chunk.text.as_str())
+                        });
                     if complete {
+                        let character_starts = lexical_first_character_positions(text, &chunks)?;
                         for (batch_index, batch) in chunks.chunks(256).enumerate() {
                             let start = batch_index
                                 .checked_mul(256)
@@ -1602,20 +1611,36 @@ where
                                 .iter()
                                 .map(|chunk| chunk.chunk_type.to_string())
                                 .collect::<Vec<_>>();
-                            let staged_count: i64 = client
-                                .query_one(
-                                    "SELECT storage_v2_put_lexical_segments($1,$2,$3,$4,$5,$6)",
-                                    &[
-                                        &staged.occurrence_id,
-                                        &staged.artifact_version_id,
-                                        &orders,
-                                        &texts,
-                                        &prefixes,
-                                        &types,
-                                    ],
-                                )
-                                .await?
-                                .get(0);
+                            let starts = &character_starts[start..start + batch.len()];
+                            let max_length = batch
+                                .iter()
+                                .map(|chunk| chunk.text.chars().count() as i64)
+                                .max()
+                                .unwrap_or(0);
+                            let window_bound = starts.iter().max().unwrap_or(&1)
+                                - starts.iter().min().unwrap_or(&1)
+                                + max_length;
+                            let staged_count: i64 = if window_bound <= 8388608 {
+                                client.query_one(
+                                    "SELECT storage_v2_put_lexical_segments_at($1,$2,$3,$4,$5,$6,$7)",
+                                    &[&staged.occurrence_id,&staged.artifact_version_id,&orders,&texts,&prefixes,&types,&starts],
+                                ).await?.get(0)
+                            } else {
+                                client
+                                    .query_one(
+                                        "SELECT storage_v2_put_lexical_segments($1,$2,$3,$4,$5,$6)",
+                                        &[
+                                            &staged.occurrence_id,
+                                            &staged.artifact_version_id,
+                                            &orders,
+                                            &texts,
+                                            &prefixes,
+                                            &types,
+                                        ],
+                                    )
+                                    .await?
+                                    .get(0)
+                            };
                             measurements.lexical_segment_batch_calls += 1;
                             measurements.db_staging_round_trips += 1;
                             if staged_count != i64::try_from(batch.len())? {
@@ -1653,65 +1678,60 @@ where
                     }
                 }
             }
-            for card in cards {
-                let generic = json!({
-                    "name": card.name,
-                    "qualified_name": card.qualified_name,
-                    "symbol_kind": card.symbol_kind,
-                    "language": card.language,
-                });
-                let structure = serde_json::to_value(&card.structure)?;
-                let span = serde_json::to_value(&card.source_span)?;
-                let output_sha = normalized_output_sha256(&card)?;
-                let output_sha_bytes: &[u8] = &output_sha;
-                let domain = serde_json::to_value(&card.domain)?;
-                let provenance = serde_json::to_value(&card.field_provenance)?;
-                let _symbol_occurrence_id: i64 = client
-                    .query_one(
-                        "SELECT id FROM storage_v2_put_structural_card_bundle( \
-                     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
+            // A bounded card group retains the scalar writer's validation and
+            // collision checks, while requiring one round trip for up to 64 cards.
+            for card_batch in cards.chunks(64) {
+                let values = card_batch.iter().map(|card| -> Result<serde_json::Value> {
+                    Ok(json!({
+                        "symbol_key": &card.symbol_key, "language": &card.language,
+                        "symbol_kind": &card.symbol_kind, "qualified_name": &card.qualified_name,
+                        "signature": &card.signature, "documentation": &card.documentation,
+                        "visibility": &card.visibility, "structure": &card.structure,
+                        "source_span": &card.source_span,
+                        "analysis_profile_id": &card.analysis_profile_id,
+                        "output_sha256": hex::encode(normalized_output_sha256(card)?),
+                        "generic": {"name": &card.name, "qualified_name": &card.qualified_name,
+                                    "symbol_kind": &card.symbol_kind, "language": &card.language},
+                        "domain": &card.domain, "provenance": &card.field_provenance,
+                    }))
+                }).collect::<Result<Vec<_>>>()?;
+                let grouped = serde_json::Value::Array(values);
+                let rows = client
+                    .query(
+                        "SELECT bundle.id FROM jsonb_array_elements($4::JSONB) card \
+                     CROSS JOIN LATERAL storage_v2_put_structural_card_bundle( \
+                       $1,$2,$3,card->>'symbol_key',card->>'language', \
+                       card->>'symbol_kind',card->>'qualified_name',card->>'signature', \
+                       card->>'documentation',card->>'visibility',card->'structure', \
+                       card->'source_span',card->>'analysis_profile_id', \
+                       decode(card->>'output_sha256','hex'),card->'generic', \
+                       card->'domain',card->'provenance') bundle",
                         &[
                             &source_id,
                             &staged.artifact_version_id,
                             &staged.occurrence_id,
-                            &card.symbol_key,
-                            &card.language,
-                            &card.symbol_kind,
-                            &card.qualified_name,
-                            &card.signature,
-                            &card.documentation,
-                            &card.visibility,
-                            &structure,
-                            &span,
-                            &card.analysis_profile_id,
-                            &output_sha_bytes,
-                            &generic,
-                            &domain,
-                            &provenance,
+                            &grouped,
                         ],
                     )
-                    .await?
-                    .get(0);
+                    .await?;
+                if rows.len() != card_batch.len() {
+                    bail!("structural card group was not staged completely");
+                }
+                measurements.structural_card_batch_calls += 1;
                 measurements.db_staging_round_trips += 1;
             }
-            client
-                .execute(
-                    "SELECT storage_v2_put_occurrence_score_component( \
-                    $1, stage, $2, 'unavailable', NULL, $3) \
-                   FROM unnest($4::TEXT[]) AS stage",
-                    &[
-                        &staged.occurrence_id,
-                        &score_profile,
-                        &score_evidence,
-                        &score_stages,
-                    ],
-                )
-                .await?;
-            measurements.db_staging_round_trips += 1;
             measurements.record_stage(ShadowIngestStage::DatabaseStage, database_started.elapsed());
+            staged_items += 1;
+            if let Some(progress) = progress {
+                progress.advance(staged_items, &measurements, false)?;
+            }
         }
     }
 
+    if let Some(progress) = progress {
+        progress.advance(staged_items, &measurements, true)?;
+        progress.phase("final_watermark", None, None)?;
+    }
     let stabilization_started = Instant::now();
     if mode == SliceMode::ReleaseCandidate {
         let registry = client
@@ -1788,6 +1808,9 @@ where
         stabilization_started.elapsed(),
     );
 
+    if let Some(progress) = progress {
+        progress.phase("membership_and_seal", None, None)?;
+    }
     let commit_started = Instant::now();
     let root: String = client
         .query_one("SELECT storage_v2_shadow_generation_root($1)", &[&run.id])
@@ -1944,6 +1967,9 @@ where
             .await?
             .get::<_, i64>(0),
     )?;
+    if let Some(progress) = progress {
+        progress.phase("transaction_pending", None, None)?;
+    }
     Ok(ShadowSliceResult {
         run_id: run.id,
         source_id,
@@ -1961,6 +1987,36 @@ where
         active_generation_after,
         telemetry: measurements.to_telemetry_json(),
     })
+}
+
+/// Preserve the established first-match locator, including repeated text. Byte
+/// searches are followed by one shared UTF-8 walk, not one prefix count per chunk.
+fn lexical_first_character_positions(text: &str, chunks: &[Chunk]) -> Result<Vec<i64>> {
+    let mut positions = chunks
+        .iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            text.find(&chunk.text)
+                .map(|offset| (offset, index))
+                .context("lexical text is absent from source")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    positions.sort_unstable();
+    let mut output = vec![0; chunks.len()];
+    let mut next = 0;
+    for (character, (offset, _)) in text.char_indices().enumerate() {
+        while next < positions.len() && positions[next].0 == offset {
+            output[positions[next].1] = i64::try_from(character + 1)?;
+            next += 1;
+        }
+        if next == positions.len() {
+            break;
+        }
+    }
+    if output.contains(&0) {
+        bail!("lexical first-match offset is not a character boundary");
+    }
+    Ok(output)
 }
 
 fn source_read_bytes(files: &[SliceFile]) -> Result<u64> {
@@ -2927,6 +2983,29 @@ mod managed_append_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lexical_first_positions_preserve_repeated_unicode_identity() {
+        let chunks = CharacterChunker::new(crate::services::chunker::ChunkerConfig {
+            max_chars: Some(3),
+            overlap_chars: Some(0),
+            ..Default::default()
+        })
+        .chunk("é🙂xé🙂x", None);
+        assert_eq!(
+            lexical_first_character_positions("é🙂xé🙂x", &chunks).unwrap(),
+            vec![1, 1]
+        );
+        let unique = CharacterChunker::new(crate::services::chunker::ChunkerConfig {
+            max_chars: Some(3),
+            overlap_chars: Some(0),
+            ..Default::default()
+        })
+        .chunk("é🙂x甲Ωz", None);
+        assert_eq!(
+            lexical_first_character_positions("é🙂x甲Ωz", &unique).unwrap(),
+            vec![1, 4]
+        );
+    }
     use super::*;
 
     #[tokio::test]
