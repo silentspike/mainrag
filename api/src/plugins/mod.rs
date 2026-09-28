@@ -70,6 +70,7 @@ pub struct RawFileRange {
 /// Plugin trait for source handling
 #[async_trait]
 pub trait SourcePlugin: Send + Sync {
+    #[cfg(feature = "storage-v2-shadow-ingest")]
     fn filesystem_cut(&self) -> Option<fs_cut::CutProof> {
         None
     }

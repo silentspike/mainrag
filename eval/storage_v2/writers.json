@@ -4,6 +4,7 @@
   "limitations": "This inventory does not prove that unknown external writers do not exist and performs no service action.",
   "writers": [
     {"path":"api/src/api/handlers/admin.rs","class":"api-entrypoint","reason":"Creates, updates, synchronizes, backfills, and deletes source state."},
+    {"path":"api/src/api/handlers/admin/fs_cut.rs","class":"api-entrypoint","reason":"Changes only the explicitly selected filesystem consistency contract through an administrator source/configuration compare-and-swap; captures an allowlisted immutable source cut."},
     {"path":"api/src/api/handlers/watch.rs","class":"api-entrypoint","reason":"Accepts incremental watch updates."},
     {"path":"api/src/main.rs","class":"runtime-supervisor","reason":"Starts repository-managed background writer services."},
     {"path":"api/src/services/index.rs","class":"runtime-writer","reason":"Writes files, chunks, embeddings, and outbox records."},
