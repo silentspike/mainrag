@@ -3537,6 +3537,63 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn pdf_final_watermark_scan_counts_actual_adapter_reads() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test.pdf");
+        let source_path = fixture.to_str().unwrap();
+        let source_bytes = std::fs::metadata(&fixture).unwrap().len();
+        let plugin = plugins::get_plugin("pdf").unwrap();
+        let initial = plugin
+            .sync_for_storage_v2_observed(source_path)
+            .await
+            .unwrap();
+        let final_scan = plugin
+            .sync_for_storage_v2_observed(source_path)
+            .await
+            .unwrap();
+        assert_eq!(initial.application_read_bytes, Some(source_bytes));
+        assert_eq!(final_scan.application_read_bytes, Some(source_bytes));
+
+        let mut files = initial
+            .result
+            .files
+            .into_iter()
+            .map(SliceFile::from)
+            .collect::<Vec<_>>();
+        let mut final_files = final_scan
+            .result
+            .files
+            .into_iter()
+            .map(SliceFile::from)
+            .collect::<Vec<_>>();
+        assert!(!files.is_empty());
+        assert_eq!(
+            canonical_fixture_hash(&mut files).await.unwrap(),
+            canonical_fixture_hash(&mut final_files).await.unwrap()
+        );
+
+        let mut measurements = ShadowIngestMeasurements::default();
+        measurements.adapter_source_read_bytes = initial.application_read_bytes;
+        record_final_source_reads(
+            &mut measurements,
+            final_scan.application_read_bytes,
+            &files,
+            &final_files,
+        )
+        .unwrap();
+        let telemetry = measurements.to_telemetry_json();
+        assert_eq!(
+            telemetry["source_io"]["adapter_read_bytes"],
+            2 * source_bytes
+        );
+        assert_eq!(telemetry["source_io"]["application_read_bytes"], 0);
+        assert_eq!(
+            telemetry["source_io"]["total_content_read_bytes"],
+            2 * source_bytes
+        );
+        assert_eq!(telemetry["source_io"]["content_read_coverage"], "COMPLETE");
+    }
+
     #[test]
     fn fragment_item_keys_keep_structural_identities_distinct() {
         let first = SliceFile::from(plugins::RawFile {
