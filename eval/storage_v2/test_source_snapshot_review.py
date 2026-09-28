@@ -19,6 +19,49 @@ SPEC.loader.exec_module(MODULE)
 
 
 class SourceSnapshotReviewTests(unittest.TestCase):
+    def test_registered_filter_is_profile_bound_and_excluded_files_are_not_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "session.jsonl").write_bytes(b"{}\n")
+            proof = {"format": "mainrag.fs-scope.v1", "patterns": ["*.jsonl"],
+                     "byte_regexes": [r"(?-u)^.*\.jsonl$"]}
+            payload = MODULE.json.dumps([proof["patterns"], proof["byte_regexes"]],
+                                        separators=(",", ":")).encode()
+            proof["sha256"] = hashlib.sha256(b"mainrag.fs-scope.v1\0" + payload).hexdigest()
+            profile = (f"mainrag.fs-release-candidate.v3.scope-{proof['sha256']}"
+                       ".fragment-1048576-newline-65536")
+            observation = {"source_id": 7, "source_watermark_sha256": "a" * 64,
+                           "adapter_profile_id": profile, "item_count": 1,
+                           "filesystem_scope": proof}
+            includes = MODULE.registered_scope_matcher({"file_patterns": ["*.jsonl"]}, observation)
+            self.assertTrue(includes("nested/naïve\nconversation.jsonl"))
+            self.assertFalse(includes("session.jsonl\n"))
+            registration = {"source_id": 7, "source_type": "fs", "source_path": str(root),
+                            "config": '{"file_patterns":["*.jsonl"]}', "files": [
+                {"path": "session.jsonl", "hash": hashlib.sha256(b"{}\n").hexdigest()},
+                {"path": "private.json", "hash": "b" * 64}]}
+            real_open = MODULE.os.open
+            def guarded_open(path, *args, **kwargs):
+                self.assertNotEqual(Path(path).name, "private.json")
+                return real_open(path, *args, **kwargs)
+            with patch.object(MODULE, "legacy_registration", return_value=registration), \
+                    patch.object(MODULE, "observation", return_value=observation), \
+                    patch.object(MODULE.os, "open", side_effect=guarded_open):
+                review = MODULE.capture("fixture", "http://fixture.invalid", "token", 7)
+            self.assertEqual(review["status_counts"], {"same_bytes": 1, "outside_configured_scope": 1})
+            self.assertEqual(review["filesystem_scope"], proof)
+            for bad in [{**observation, "adapter_profile_id": "old-unfiltered-adapter"},
+                        {**observation, "filesystem_scope": None}]:
+                with patch.object(MODULE, "legacy_registration", return_value=registration), \
+                        patch.object(MODULE, "observation", return_value=bad):
+                    with self.assertRaises(RuntimeError):
+                        MODULE.capture("fixture", "http://fixture.invalid", "token", 7)
+            registration["files"][1]["path"] = "../private.json"
+            with patch.object(MODULE, "legacy_registration", return_value=registration), \
+                    patch.object(MODULE, "observation", return_value=observation):
+                with self.assertRaisesRegex(RuntimeError, "outside the registered source"):
+                    MODULE.capture("fixture", "http://fixture.invalid", "token", 7)
+
     def test_git_review_uses_exact_clean_origin_and_rejects_checkout_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cache = Path(temporary) / "cache"

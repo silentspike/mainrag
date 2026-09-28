@@ -55,7 +55,7 @@ def candidate_proof(manifest: object) -> tuple[list[str], dict | None]:
                 or not digest_identity(snapshot.get("source_watermark_sha256"))
                 or not isinstance(counts, dict)
                 or not counts
-                or any(key not in {"same_bytes", "changed_bytes", "source_file_missing"}
+                or any(key not in {"same_bytes", "changed_bytes", "source_file_missing", "outside_configured_scope"}
                        or type(value) is not int or value < 0
                        for key, value in counts.items())
                 or not isinstance(gold, dict)
@@ -63,6 +63,12 @@ def candidate_proof(manifest: object) -> tuple[list[str], dict | None]:
                 != snapshot.get("review_sha256")
                 or not digest_identity(gold.get("source_snapshot_gold_review_sha256"))):
             failures.append("source_snapshot_review_invalid")
+        if isinstance(snapshot, dict) and (snapshot.get("filesystem_scope_sha256") is not None
+                or isinstance(counts, dict) and counts.get("outside_configured_scope", 0) > 0):
+            digest = snapshot.get("filesystem_scope_sha256")
+            if (not digest_identity(digest) or snapshot.get("adapter_profile_id") !=
+                    f"mainrag.fs-release-candidate.v3.scope-{digest}.fragment-1048576-newline-65536"):
+                failures.append("source_snapshot_scope_invalid")
     elif isinstance(gold, dict) and gold.get("source_snapshot_review_sha256") is not None:
         failures.append("source_snapshot_review_invalid")
     automatic = manifest.get("query_seed_summary")
@@ -97,7 +103,9 @@ def candidate_proof(manifest: object) -> tuple[list[str], dict | None]:
                 not isinstance(binding, dict) or not isinstance(snapshot, dict)
                 or binding.get("policy") != "unchanged-legacy-positive-before-candidate-read-v1"
                 or binding.get("source_snapshot_review_sha256") != snapshot.get("review_sha256")
-                or binding.get("original_source_status") not in {"changed_bytes", "source_file_missing"}
+                or binding.get("original_source_status") not in {"changed_bytes", "source_file_missing", "outside_configured_scope"}
+                or (binding.get("original_source_status") == "outside_configured_scope"
+                    and not digest_identity(snapshot.get("filesystem_scope_sha256")))
                 or not digest_identity(binding.get("original_expected_path_sha256"))
                 or not digest_identity(binding.get("expected_path_sha256"))
                 or binding["original_expected_path_sha256"] == binding["expected_path_sha256"]
@@ -296,6 +304,9 @@ def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
             if isinstance(snapshot, dict) and snapshot.get(
                     "source_watermark_sha256") != candidate.get("source_watermark_sha256"):
                 failures.append("source_snapshot_watermark_mismatch")
+            if isinstance(snapshot, dict) and snapshot.get("filesystem_scope_sha256") is not None \
+                    and snapshot.get("adapter_profile_id") != candidate.get("adapter_profile_id"):
+                failures.append("source_snapshot_scope_profile_mismatch")
             source_expected = expected_by_source.get(source["source_id"])
             if expected_by_source:
                 commit_matches = source_expected == (

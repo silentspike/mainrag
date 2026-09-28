@@ -105,6 +105,11 @@ jobs:
         run: |
           cargo test -p mainrag-api --features storage-v2-retrieval --lib services::shadow_slice::tests::final_watermark_scan_counts_both_adapter_and_deferred_reads -- --exact --nocapture | tee final-source-reads-tests.log
           python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("final-source-reads-tests.log").read_text(), "Expected the final source read accounting regression to execute"'
+      - name: Verify registered filesystem selection and release watermark binding
+        shell: bash
+        run: |
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib fs_scope -- --nocapture | tee fs-scope-tests.log
+          python3 -c 'from pathlib import Path; assert "2 passed; 0 failed; 0 ignored;" in Path("fs-scope-tests.log").read_text(), "Expected both filesystem scope regressions to execute"'
       - name: Verify Git cache safety and bounded transport cleanup
         shell: bash
         run: |

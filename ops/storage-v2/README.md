@@ -645,7 +645,7 @@ separate. Query seeds are not removed or replaced to make this policy pass.
 
 For a filesystem or Git source whose legacy rows refer to changed or removed source
 files, capture `source-snapshot-review.py` before freezing the gold suite. The
-review hashes every registered legacy file against the current source root and
+review hashes each in-scope registered legacy file against the current source root and
 checks the read-only release-adapter watermark before and after that scan. It
 stores only path/content hashes and byte states in a protected file. Freeze a
 private gold review whose cases match the suite, then bind both review hashes
@@ -657,7 +657,22 @@ requires the same live watermark before and after the query set. The protected
 review is bounded at 64 MiB and each live watermark request at 10 minutes so
 large registered file sets can complete without dropping either identity
 check. Only paths proved to have identical bytes retain the ordered legacy
-Top-10 requirement; changed or missing paths are classified separately. A
+Top-10 requirement; changed or missing paths are classified separately.
+
+Registered filesystem `file_patterns` are positive, case-sensitive globset
+patterns evaluated against relative paths; `*` spans directories, so `*.jsonl`
+includes nested JSONL files. Selection is applied before content reads and keeps
+existing ignore rules and fail-closed traversal checks. Absent filters retain
+the previous v2 profile. A configured filter binds its canonical patterns and
+compiled byte expressions into a v3 adapter profile and therefore the watermark.
+The source review checks the compiled matcher against the registered config;
+an older adapter that ignores a configured filter cannot produce this review.
+Historical rows outside the filter receive `outside_configured_scope`, without
+opening their source files. Ordered recall still applies to every same-byte
+in-scope baseline path, and reviewed positive gold expectations must remain
+in scope. This classification never authorizes deleting legacy rows: the legacy
+sync retains excluded history for the separately reviewed cleanup manifest.
+
 Git review also verifies the registered origin, clean supported branch and
 exact checkout commit before and after the scan. It reads the adapter's cache,
 not the registered URL as a filesystem path, and never fetches on its own.

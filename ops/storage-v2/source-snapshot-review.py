@@ -23,6 +23,7 @@ import urllib.request
 
 
 load_token = runpy.run_path(str(Path(__file__).with_name("operator_token.py")))["load_token"]
+registered_scope_matcher = runpy.run_path(str(Path(__file__).with_name("fs_scope.py")))["registered_scope_matcher"]
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -113,10 +114,12 @@ def git_checkout(registration: dict, cache_dir: Path) -> tuple[Path, str]:
     return root, head
 
 
-def file_status(root: Path, relative: str, legacy_hash: str) -> tuple[str, str | None]:
+def file_status(root: Path, relative: str, legacy_hash: str, includes=lambda relative: True) -> tuple[str, str | None]:
     if (not relative or relative.startswith("/") or "\\" in relative
             or any(part in {"", ".", ".."} for part in relative.split("/"))):
         raise RuntimeError("legacy file path is outside the registered source")
+    if not includes(relative):
+        return "outside_configured_scope", None
     path = root.joinpath(*relative.split("/"))
     if not path.parent.resolve(strict=False).is_relative_to(root):
         raise RuntimeError("legacy file parent escapes the registered source")
@@ -150,6 +153,9 @@ def capture(database: str, api_url: str, token: str, source_id: int,
     before = observation(api_url, token, source_id)
     registration = legacy_registration(database, source_id)
     git_head = None
+    includes = lambda relative: True
+    if registration["source_type"] == "fs":
+        includes = registered_scope_matcher(registration["config"], before)
     if registration["source_type"] == "git":
         root, git_head = git_checkout(registration, git_cache_dir)
     else:
@@ -165,7 +171,7 @@ def capture(database: str, api_url: str, token: str, source_id: int,
         path_hash = hashlib.sha256(relative.encode()).hexdigest()
         if path_hash in paths:
             raise RuntimeError("legacy file path identity is duplicated")
-        status, observed_hash = file_status(root, relative, legacy_hash)
+        status, observed_hash = file_status(root, relative, legacy_hash, includes)
         paths[path_hash] = {"status": status, "legacy_sha256": legacy_hash,
                             "observed_sha256": observed_hash}
     after = observation(api_url, token, source_id)
@@ -178,6 +184,7 @@ def capture(database: str, api_url: str, token: str, source_id: int,
         "schema_version": "mainrag.storage-v2.source-snapshot-review.v1",
         "source_id": source_id,
         "source_type": registration["source_type"],
+        **({"filesystem_scope": before["filesystem_scope"]} if before.get("filesystem_scope") is not None else {}),
         **({"git_head": git_head} if git_head is not None else {}),
         "source_root_sha256": hashlib.sha256(registration["source_path"].encode()).hexdigest(),
         "source_config_sha256": hashlib.sha256(canonical(registration["config"])).hexdigest(),
