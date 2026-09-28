@@ -114,8 +114,12 @@ def read_root(registered_root: Path, observation: dict,
             or control["registered_root"] != root):
         raise RuntimeError("pinned cut descriptor identity differs")
     origin = Path(control["origin_subvolume"])
-    snapshot = registry / "views" / proof["cut_id"]
+    published = registry / "views" / proof["cut_id"]
+    snapshot = Path(control["snapshot_root"])
+    if snapshot not in {published, published / "snapshot"}:
+        raise RuntimeError("cut snapshot location differs")
     PRODUCER["trusted_directory"](registry / "views", _owner)
+    PRODUCER["trusted_directory"](snapshot.parent, _owner)
     if not registered_root.is_relative_to(origin) or registered_root == origin:
         raise RuntimeError("cut origin does not contain the registered root")
     selected = snapshot / registered_root.relative_to(origin)
