@@ -12,6 +12,7 @@ import stat
 import sys
 import tempfile
 import uuid
+import runpy
 from collections import Counter
 from pathlib import Path
 
@@ -30,10 +31,25 @@ EXTERNAL_GATES = (
 )
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+cut_contract = runpy.run_path(str(Path(__file__).with_name("fs_cut.py")))
 
 
 def digest_identity(value: object) -> bool:
     return isinstance(value, str) and SHA256.fullmatch(value) is not None
+
+
+def complete_file_proof_valid(value: object) -> bool:
+    return (isinstance(value, dict)
+            and value.get("schema_version") == "mainrag.storage-v2.complete-source-file.v1"
+            and value.get("all_fragments_verified") is True
+            and all(digest_identity(value.get(key)) for key in (
+                "path_sha256", "body_sha256", "item_manifest_sha256"))
+            and isinstance(value.get("commit_sha"), str) and COMMIT.fullmatch(value["commit_sha"]) is not None
+            and all(type(value.get(key)) is int and value[key] > 0 for key in (
+                "source_id", "generation_id", "generation_seq", "fragment_count"))
+            and type(value.get("logical_bytes")) is int and value["logical_bytes"] >= 0
+            and type(value.get("byte_start")) is int and value["byte_start"] == 0
+            and type(value.get("byte_end")) is int and value["byte_end"] == value["logical_bytes"])
 
 
 def candidate_proof(manifest: object) -> tuple[list[str], dict | None]:
@@ -66,9 +82,24 @@ def candidate_proof(manifest: object) -> tuple[list[str], dict | None]:
         if isinstance(snapshot, dict) and (snapshot.get("filesystem_scope_sha256") is not None
                 or isinstance(counts, dict) and counts.get("outside_configured_scope", 0) > 0):
             digest = snapshot.get("filesystem_scope_sha256")
+            version = "v4.btrfs-cut-v1" if snapshot.get("filesystem_cut") is not None else "v3"
             if (not digest_identity(digest) or snapshot.get("adapter_profile_id") !=
-                    f"mainrag.fs-release-candidate.v3.scope-{digest}.fragment-1048576-newline-65536"):
+                    f"mainrag.fs-release-candidate.{version}.scope-{digest}.fragment-1048576-newline-65536"):
                 failures.append("source_snapshot_scope_invalid")
+        if isinstance(snapshot, dict):
+            cut = snapshot.get("filesystem_cut")
+            profile = snapshot.get("adapter_profile_id", "")
+            if cut is not None or profile.startswith(cut_contract["CUT_PROFILE"]):
+                try:
+                    cut_contract["require_manifest"](cut, snapshot.get("source_root_sha256"),
+                        profile, snapshot.get("item_count"))
+                    if not cut_contract["same_source_manifest"](cut, snapshot.get("build_filesystem_cut")):
+                        raise RuntimeError("original build cut manifest differs")
+                    scope = snapshot.get("filesystem_scope_sha256") or "unfiltered"
+                    if profile != f"{cut_contract['CUT_PROFILE']}scope-{scope}.fragment-1048576-newline-65536":
+                        raise RuntimeError("cut scope profile binding differs")
+                except (RuntimeError, TypeError, KeyError):
+                    failures.append("source_snapshot_cut_invalid")
     elif isinstance(gold, dict) and gold.get("source_snapshot_review_sha256") is not None:
         failures.append("source_snapshot_review_invalid")
     automatic = manifest.get("query_seed_summary")
@@ -134,7 +165,8 @@ def candidate_proof(manifest: object) -> tuple[list[str], dict | None]:
             source_body = coverage.get("expected_source_body") if isinstance(coverage, dict) else None
             if source_body is not None and (
                 not isinstance(source_body, dict)
-                or source_body.get("schema_version") != "mainrag.storage-v2.expected-source-body.v1"
+                or source_body.get("schema_version") not in {
+                    "mainrag.storage-v2.expected-source-body.v1", "mainrag.storage-v2.expected-source-body.v2"}
                 or source_body.get("source_status") != "changed_bytes"
                 or source_body.get("query_body_match") is not True
                 or snapshot is None
@@ -147,6 +179,13 @@ def candidate_proof(manifest: object) -> tuple[list[str], dict | None]:
             ):
                 failures.append("expected_source_body_proof_invalid")
                 break
+            if isinstance(source_body, dict) and source_body.get("schema_version") == "mainrag.storage-v2.expected-source-body.v2":
+                complete = source_body.get("complete_source_file")
+                if (not complete_file_proof_valid(complete)
+                        or complete["path_sha256"] != source_body.get("path_sha256")
+                        or complete["body_sha256"] != source_body.get("observed_sha256")):
+                    failures.append("expected_source_file_proof_invalid")
+                    break
             seen.add(query["id"])
     if any(not digest_identity(manifest.get(key)) for key in (
         "server_verification_sha256", "dual_read_artifact_sha256",
@@ -323,6 +362,22 @@ def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
             if isinstance(snapshot, dict) and snapshot.get("filesystem_scope_sha256") is not None \
                     and snapshot.get("adapter_profile_id") != candidate.get("adapter_profile_id"):
                 failures.append("source_snapshot_scope_profile_mismatch")
+            if isinstance(snapshot, dict) and snapshot.get("filesystem_cut") is not None:
+                if (snapshot.get("adapter_profile_id") != candidate.get("adapter_profile_id")
+                        or snapshot.get("build_filesystem_cut") != candidate.get("filesystem_cut")):
+                    failures.append("source_snapshot_build_cut_mismatch")
+            candidate_manifest=candidate.get("qualification_manifest")
+            query_rows=candidate_manifest.get("query_results") if isinstance(candidate_manifest,dict) else None
+            for query in query_rows if isinstance(query_rows,list) else []:
+                coverage = query.get("coverage") if isinstance(query,dict) else None
+                body = coverage.get("expected_source_body") if isinstance(coverage,dict) else None
+                body = body if isinstance(body,dict) else {}
+                complete = body.get("complete_source_file")
+                if complete is not None and (not complete_file_proof_valid(complete) or any(
+                        complete.get(key) != identity for key, identity in (
+                            ("source_id", source["source_id"]), ("generation_id", candidate["generation_id"]),
+                            ("generation_seq", candidate["generation_seq"]), ("commit_sha", candidate["commit_sha"])))):
+                    failures.append("source_file_proof_generation_mismatch")
             source_expected = expected_by_source.get(source["source_id"])
             if expected_by_source:
                 commit_matches = source_expected == (

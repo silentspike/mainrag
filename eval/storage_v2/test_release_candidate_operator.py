@@ -679,6 +679,33 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
             seed, current, {**storage, "results": storage["results"][1:]},
             {**proof, "candidate": proof["candidate"][1:]}, checkpoint, review)["passed"])
 
+    def test_fragmented_changed_file_requires_a_complete_generation_bound_byte_proof(self) -> None:
+        seed, current, storage, proof, checkpoint = self.coverage_fixture()
+        proof["schema_version"] = "mainrag.storage-v2.query-coverage.v4"
+        for hit in proof["candidate"]:
+            hit.update(body_sha256="e" * 64, fts_body_matches=True,
+                       segment_matches=True, legacy_segment_matches=False)
+        checkpoint["source_watermark_sha256"] = "c" * 64
+        path = seed["expected_path_sha256"]
+        review = {"source_id": checkpoint["source_id"], "source_watermark_sha256": "c" * 64,
+                  "review_sha256": "d" * 64, "paths": {path: {
+                      "status": "changed_bytes", "legacy_sha256": "a" * 64, "observed_sha256": "b" * 64}}}
+        self.assertFalse(MODULE.query_coverage_gates(seed, current, storage, proof, checkpoint, review)["passed"])
+        complete = {"schema_version": "mainrag.storage-v2.complete-source-file.v1",
+                    **{key: checkpoint[key] for key in ("source_id", "generation_id", "generation_seq", "commit_sha")},
+                    "path_sha256": path, "body_sha256": "b" * 64, "item_manifest_sha256": "f" * 64,
+                    "fragment_count": 2, "logical_bytes": 4097, "byte_start": 0, "byte_end": 4097,
+                    "all_fragments_verified": True}
+        proof["complete_source_file"] = complete
+        accepted = MODULE.query_coverage_gates(seed, current, storage, proof, checkpoint, review)
+        self.assertTrue(accepted["passed"])
+        self.assertEqual(accepted["expected_source_body"]["schema_version"], "mainrag.storage-v2.expected-source-body.v2")
+        for key, wrong in (("body_sha256", "e" * 64), ("generation_id", 999),
+                           ("path_sha256", "e" * 64), ("byte_start", 1), ("byte_end", 4096),
+                           ("fragment_count", 0), ("all_fragments_verified", False)):
+            bad = copy.deepcopy(proof); bad["complete_source_file"][key] = wrong
+            self.assertFalse(MODULE.query_coverage_gates(seed, current, storage, bad, checkpoint, review)["passed"])
+
     def test_restart_waits_for_authenticated_readback(self) -> None:
         unavailable = urllib.error.URLError(ConnectionRefusedError())
         with patch.object(MODULE, "source_state", side_effect=[

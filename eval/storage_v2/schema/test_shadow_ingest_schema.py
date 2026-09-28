@@ -996,6 +996,49 @@ SELECT storage_v2_verify_generation({generation_id}, '{'31' * 32}');
             "a visible membership without the named generation run item must fail closed",
         )
 
+    def test_filesystem_cut_qualification_binds_original_build_and_current_full_manifest(self) -> None:
+        import copy
+        self.file(ROOT / "migrations/090_storage_v2_filesystem_cut_qualification.sql")
+        self.sql("INSERT INTO sources(id,name,type,path) VALUES (50,'cut-fixture','fixture','synthetic-cut')")
+        profile = "mainrag.fs-release-candidate.v4.btrfs-cut-v1.scope-unfiltered.fragment-1048576-newline-65536"
+        fixture = "a" * 64; watermark = "b" * 64; commit = "c" * 40
+        original = {"cut": {"format":"mainrag.fs-read-cut.v1", "cut_id":str(uuid.uuid4()),
+                    "snapshot_uuid":str(uuid.uuid4()), "origin_uuid":str(uuid.uuid4()),
+                    "source_root_sha256":"d" * 64, "descriptor_sha256":"e" * 64, "captured_at_unix":1},
+                    "fixture_sha256":fixture, "item_count":0, "input_bytes":0}
+        witness = json.dumps({"fixture_sha256":fixture, "commit_sha":commit, "filesystem_cut":original})
+        run = int(self.sql(self.admin("SELECT (storage_v2_begin_shadow_ingest("
+            f"50,'{'f'*64}','{watermark}','{profile}','release-candidate-build','{witness}'::JSONB,FALSE)).id")))
+        self.commit(run,0)
+        generation = int(self.sql(f"SELECT generation_id FROM storage_v2_ingest_run WHERE id={run}"))
+        self.sql(self.admin(f"SELECT storage_v2_verify_generation({generation},'{'1'*64}')"))
+        dual = str(uuid.uuid4())
+        self.sql(self.admin("SELECT storage_v2_record_dual_read_evidence("
+            f"'{dual}',50,{generation},'{commit}','{fixture}','{'2'*64}',"
+            "'{\"status\":\"PASS\",\"unexplained_count\":0,\"comparisons\":[]}'::JSONB)"))
+        current = copy.deepcopy(original); current["cut"].update(cut_id=str(uuid.uuid4()),
+            snapshot_uuid=str(uuid.uuid4()),descriptor_sha256="3"*64,captured_at_unix=2)
+        checks = {key:"PASS" for key in ("artifact_root","authorization","body_pack_integrity","dual_read",
+            "intelligence","intervals","legacy_intelligence_export","resource_budget","restart_resume","search_quality")}
+        manifest = {"status":"PASS","checks":checks,"source_snapshot_review":{
+            "filesystem_cut":current,"build_filesystem_cut":original,"source_root_sha256":"d"*64,
+            "adapter_profile_id":profile,"source_watermark_sha256":watermark,"item_count":0}}
+        def qualify(value):
+            encoded=json.dumps(value)
+            return self.admin("SELECT (storage_v2_qualify_release_candidate("
+                f"'{str(uuid.uuid4())}',50,{generation},'{commit}','{watermark}','{profile}',"
+                f"'fixture-analysis-v1','fixture-search-v1','{encoded}'::JSONB)).id")
+        for field, wrong in (("fixture_sha256","4"*64),("input_bytes",1),("item_count",1)):
+            bad=copy.deepcopy(manifest);bad["source_snapshot_review"]["filesystem_cut"][field]=wrong
+            self.assert_sql_fails(qualify(bad),"filesystem cut qualification differs")
+        for branch in ("filesystem_cut","build_filesystem_cut"):
+            bad=copy.deepcopy(manifest);bad["source_snapshot_review"][branch]["cut"]["source_root_sha256"]="4"*64
+            self.assert_sql_fails(qualify(bad),"filesystem cut qualification differs")
+        self.assertTrue(self.sql(qualify(manifest)))
+        self.assertEqual(self.sql(f"SELECT witness->'filesystem_cut'='{json.dumps(original)}'::JSONB FROM source_generation WHERE id={generation}"),"t")
+        self.assertEqual(self.sql("SELECT count(*) FROM logical_source WHERE active_generation_id IS NOT NULL"),"0")
+        self.file(ROOT / "migrations/090_storage_v2_filesystem_cut_qualification.sql")
+
     def test_release_candidate_requires_complete_evidence_and_keeps_pointer_null(self) -> None:
         node_id, view_id, digest_hex = self.make_projection("candidate evidence")
         watermark = "41" * 32
@@ -1134,6 +1177,15 @@ SELECT storage_v2_verify_generation({generation_id}, '{'31' * 32}');
         self.assertEqual(self.sql(f"SELECT id FROM storage_v2_release_candidate_evidence WHERE generation_id={generation_id}"),fresh_id)
         self.assertEqual(self.sql("SELECT count(*) FROM logical_source WHERE active_generation_id IS NOT NULL"),"0")
         self.file(ROOT / "migrations/088_storage_v2_candidate_requalification.sql")
+
+        self.file(ROOT / "migrations/090_storage_v2_filesystem_cut_qualification.sql")
+        self.assertEqual(self.sql(self.admin(qualify)),fresh_id)
+        invented_cut=json.dumps({"status":"PASS","checks":checks,
+            "source_snapshot_review":{"filesystem_cut":{"fixture_sha256":"a"*64}}})
+        self.assert_sql_fails(self.admin(qualify.replace(fresh_manifest,invented_cut)),
+                              "filesystem cut has no selected adapter profile")
+        self.assertEqual(self.sql("SELECT count(*) FROM storage_v2_release_candidate_evidence_history"),"1")
+        self.file(ROOT / "migrations/090_storage_v2_filesystem_cut_qualification.sql")
 
         replacement_node_id, replacement_view_id, replacement_digest = (
             self.make_projection("replacement candidate evidence")

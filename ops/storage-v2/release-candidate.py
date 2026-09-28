@@ -25,11 +25,14 @@ from pathlib import Path
 from typing import Any
 
 scope_matcher = runpy.run_path(str(Path(__file__).with_name("fs_scope.py")))["scope_matcher"]
+cut_contract = runpy.run_path(str(Path(__file__).with_name("fs_cut.py")))
 load_token = runpy.run_path(str(Path(__file__).with_name("operator_token.py")))["load_token"]
 monitored_build = runpy.run_path(str(Path(__file__).with_name("build_progress.py")))["monitored_build"]
 candidate_proof = runpy.run_path(
     str(Path(__file__).with_name("candidate-aggregate-audit.py"))
 )["candidate_proof"]
+complete_file_proof_valid = runpy.run_path(
+    str(Path(__file__).with_name("candidate-aggregate-audit.py")))["complete_file_proof_valid"]
 
 
 CHECKS = (
@@ -467,6 +470,14 @@ def read_snapshot_review(path: Path, expected_sha256: str, checkpoint: dict[str,
                 r"[0-9a-f]{40}|[0-9a-f]{64}", review["git_head"])):
         raise RuntimeError("source snapshot review Git commit identity differs")
     scope_matcher(review.get("filesystem_scope"), adapter_profile_id)
+    cut = review.get("filesystem_cut")
+    if adapter_profile_id.startswith(cut_contract["CUT_PROFILE"]):
+        cut_contract["require_manifest"](cut, review["source_root_sha256"],
+                                          adapter_profile_id, review["item_count"])
+        if not cut_contract["same_source_manifest"](cut, checkpoint.get("build", {}).get("filesystem_cut")):
+            raise RuntimeError("source review differs from the original full build manifest")
+    elif cut is not None:
+        raise RuntimeError("source review has an unselected filesystem cut")
     paths = review.get("paths")
     if not isinstance(paths, dict) or not paths:
         raise RuntimeError("source snapshot review path set is empty")
@@ -503,7 +514,8 @@ def require_live_snapshot(api_url: str, token: str, source_id: int,
     if (live.get("source_id") != source_id
             or live.get("source_watermark_sha256") != review["source_watermark_sha256"]
             or live.get("adapter_profile_id") != review["adapter_profile_id"]
-            or live.get("item_count") != review["item_count"]):
+            or live.get("item_count") != review["item_count"]
+            or live.get("filesystem_cut") != review.get("filesystem_cut")):
         raise RuntimeError("live source adapter differs from frozen snapshot review")
 
 
@@ -930,7 +942,8 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
     # An automatic seed may name a changed file whose old query still matches
     # its current bytes. Do not rebind that path or accept a candidate hash as
     # its own source proof: require the independently frozen complete-file hash
-    # and a body/segment match. Fragment-only and context-only matches fail.
+    # and a body/segment match. Fragment matches require a separately verified,
+    # complete ordered byte digest; context-only matches still fail.
     expected_source_body = None
     if isinstance(expected_review, dict) and expected_review.get("status") == "changed_bytes":
         observed = expected_review.get("observed_sha256")
@@ -948,6 +961,23 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
                 "observed_sha256": observed, "legacy_sha256": legacy_hash,
                 "body_sha256": observed, "source_status": "changed_bytes",
                 "query_body_match": True,
+                "source_snapshot_review_sha256": source_review["review_sha256"],
+            }
+        complete = evidence.get("complete_source_file")
+        if (expected_source_body is None and complete_file_proof_valid(complete)
+                and all(complete.get(key) == checkpoint[key] for key in (
+                    "source_id", "generation_id", "generation_seq", "commit_sha"))
+                and complete["path_sha256"] == seed["expected_path_sha256"]
+                and complete["body_sha256"] == observed and observed != legacy_hash
+                and any(row["path_sha256"] == seed["expected_path_sha256"]
+                        and row.get("fts_body_matches") is True
+                        and row.get("segment_matches") is True for row in candidate)):
+            expected_source_body = {
+                "schema_version": "mainrag.storage-v2.expected-source-body.v2",
+                "path_sha256": seed["expected_path_sha256"],
+                "observed_sha256": observed, "legacy_sha256": legacy_hash,
+                "body_sha256": observed, "source_status": "changed_bytes",
+                "query_body_match": True, "complete_source_file": complete,
                 "source_snapshot_review_sha256": source_review["review_sha256"],
             }
     positive = (expected_review is None
@@ -1117,6 +1147,12 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             **({"filesystem_scope_sha256": source_review["filesystem_scope"]["sha256"],
                 "adapter_profile_id": source_review["adapter_profile_id"]}
                if source_review.get("filesystem_scope") else {}),
+            **({"filesystem_cut": source_review["filesystem_cut"],
+                "build_filesystem_cut": checkpoint["build"]["filesystem_cut"],
+                "source_root_sha256": source_review["source_root_sha256"],
+                "adapter_profile_id": source_review["adapter_profile_id"],
+                "item_count": source_review["item_count"]}
+               if source_review.get("filesystem_cut") else {}),
         }
     progress["phase"] = "gold_suite"
     gold_cases, gold_summary = load_gold_suite(arguments, checkpoint, verified, source_review)
@@ -1176,14 +1212,30 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
                     for word in seed["query"].split(" "))
         coverage = None
         if kind == "automatic" or simple:
+            file_cache = progress.setdefault("complete_source_files", {})
+            path_sha = seed["expected_path_sha256"]
+            path_review = source_review["paths"].get(path_sha) if source_review else None
+            complete_required = (isinstance(path_review, dict) and path_review.get("status") == "changed_bytes"
+                and path_sha in path_identity(storage["results"]) and path_sha not in file_cache)
             coverage = request(
                 arguments.api_url, token, "POST",
                 f"/api/v1/admin/sources/{arguments.source_id}/storage-v2-candidate-query-evidence",
                 {"generation_id": checkpoint["generation_id"], "commit_sha": arguments.commit_sha,
                  "query": seed["query"],
                  "candidate_occurrence_ids": [hit["chunk_id"] for hit in storage["results"]],
-                 "current_chunk_ids": [hit["chunk_id"] for hit in current["results"]]},
+                 "current_chunk_ids": [hit["chunk_id"] for hit in current["results"]],
+                 **({"complete_source_path_sha256": path_sha} if complete_required else {})},
             )
+            if complete_required:
+                complete = coverage.get("complete_source_file")
+                if not complete_file_proof_valid(complete) or any(
+                        complete.get(key) != checkpoint[key] for key in (
+                            "source_id", "generation_id", "generation_seq", "commit_sha")) \
+                        or complete["path_sha256"] != path_sha:
+                    raise RuntimeError("complete source file proof identity differs")
+                file_cache[path_sha] = complete
+            elif path_sha in file_cache:
+                coverage["complete_source_file"] = file_cache[path_sha]
             query_coverage.append(coverage)
         gates = search_query_gates(seed, current, storage, arguments.max_query_ms,
                                    coverage, checkpoint, source_review)
