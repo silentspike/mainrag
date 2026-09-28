@@ -149,6 +149,28 @@ class CandidateAggregateAuditTests(unittest.TestCase):
         unbound, _ = AUDIT.audit(inventory, "e" * 64)
         self.assertEqual(unbound["persisted_gate_blockers"], {"automatic_expectation_binding_invalid": 1})
         del query["automatic_expectation_binding"]
+        body = {
+            "schema_version": "mainrag.storage-v2.expected-source-body.v1",
+            "path_sha256": "4" * 64, "observed_sha256": "7" * 64,
+            "legacy_sha256": "8" * 64, "body_sha256": "7" * 64,
+            "source_status": "changed_bytes", "query_body_match": True,
+            "source_snapshot_review_sha256": "1" * 64,
+        }
+        query["coverage"]["expected_source_body"] = body
+        query["coverage"]["same_byte_baseline_path_count"] = 0
+        exact_source, _ = AUDIT.audit(inventory, "e" * 64)
+        self.assertTrue(exact_source["persisted_candidate_set_complete"])
+        for field, wrong in (("observed_sha256", "9" * 64), ("body_sha256", "9" * 64),
+                             ("legacy_sha256", "7" * 64), ("query_body_match", False),
+                             ("source_snapshot_review_sha256", "2" * 64),
+                             ("source_status", "source_file_missing")):
+            old = body[field]
+            body[field] = wrong
+            rejected, _ = AUDIT.audit(inventory, "e" * 64)
+            self.assertEqual(rejected["persisted_gate_blockers"], {"expected_source_body_proof_invalid": 1})
+            body[field] = old
+        del query["coverage"]["expected_source_body"]
+        query["coverage"]["same_byte_baseline_path_count"] = 1
         manifest["query_results"][0]["coverage"]["source_snapshot_review_sha256"] = "2" * 64
         bad, _ = AUDIT.audit(inventory, "e" * 64)
         self.assertEqual(bad["persisted_gate_blockers"],

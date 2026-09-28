@@ -131,6 +131,22 @@ def candidate_proof(manifest: object) -> tuple[list[str], dict | None]:
                                        "stale_baseline_path_count"))))):
                 failures.append("source_snapshot_query_contract_invalid")
                 break
+            source_body = coverage.get("expected_source_body") if isinstance(coverage, dict) else None
+            if source_body is not None and (
+                not isinstance(source_body, dict)
+                or source_body.get("schema_version") != "mainrag.storage-v2.expected-source-body.v1"
+                or source_body.get("source_status") != "changed_bytes"
+                or source_body.get("query_body_match") is not True
+                or snapshot is None
+                or source_body.get("source_snapshot_review_sha256") != snapshot.get("review_sha256")
+                or any(not digest_identity(source_body.get(key)) for key in (
+                    "path_sha256", "observed_sha256", "legacy_sha256", "body_sha256"))
+                or source_body.get("observed_sha256") == source_body.get("legacy_sha256")
+                or source_body.get("body_sha256") != source_body.get("observed_sha256")
+                or query.get("expected_in_storage_v2") is not True
+            ):
+                failures.append("expected_source_body_proof_invalid")
+                break
             seen.add(query["id"])
     if any(not digest_identity(manifest.get(key)) for key in (
         "server_verification_sha256", "dual_read_artifact_sha256",
