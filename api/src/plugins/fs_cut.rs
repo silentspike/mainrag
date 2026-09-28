@@ -28,6 +28,7 @@ pub struct CutProof {
     pub captured_at_unix: u64,
 }
 
+#[cfg(feature = "storage-v2-shadow-ingest")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CutObservation {

@@ -237,6 +237,7 @@ impl SourcePlugin for FilesystemPlugin {
         "fs"
     }
 
+    #[cfg(feature = "storage-v2-shadow-ingest")]
     fn filesystem_cut(&self) -> Option<super::fs_cut::CutProof> {
         self.cut.lock().ok()?.as_ref().map(|cut| cut.proof.clone())
     }
