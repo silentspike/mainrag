@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import stat
 import subprocess
@@ -85,13 +86,14 @@ def identity(binary: Path,root: Path):
     return {'uuid':field('UUID:'),'parent_uuid':field('Parent UUID:')}
 
 def validate_policy(policy: object,digest: str):
-    if (not isinstance(policy,dict) or set(policy)!={'format','registry_root','reader_group','sources'}
-            or policy['format']!='mainrag.fs-cut-policy.v1' or not isinstance(policy['sources'],dict)
+    if (not isinstance(policy,dict) or set(policy)!={'format','registry_root','reader_group','reader_user','sources'}
+            or policy['format']!='mainrag.fs-cut-policy.v2' or not isinstance(policy['sources'],dict)
             or not SHA256.fullmatch(digest) or digest not in policy['sources']):
         raise RuntimeError('root is not authorized by the cut policy')
     selected=policy['sources'][digest]
-    if not isinstance(selected,dict) or set(selected)!={'registered_root','origin_subvolume','origin_uuid'}:
+    if not isinstance(selected,dict) or set(selected)!={'registered_root','origin_subvolume','origin_uuid','filesystem_scope'}:
         raise RuntimeError('source-cut policy identity is incomplete')
+    access_matcher(selected['filesystem_scope'])
     root=Path(selected['registered_root']);origin=Path(selected['origin_subvolume']);registry=Path(policy['registry_root'])
     if (not root.is_absolute() or root.resolve(strict=True)!=root or not root.is_dir()
             or not origin.is_absolute() or origin.resolve(strict=True)!=origin
@@ -106,6 +108,65 @@ def validate_policy(policy: object,digest: str):
     if uuid.UUID(expected).int==0:raise RuntimeError('cut origin identity is missing')
     return root,origin,registry,expected
 
+def access_matcher(proof):
+    """Use the closed, exact compiled registered matcher for snapshot access."""
+    if proof is None:return lambda relative:True
+    if (not isinstance(proof,dict) or set(proof)!={'format','patterns','byte_regexes','sha256'}
+            or proof['format']!='mainrag.fs-scope.v1'
+            or not isinstance(proof['patterns'],list) or not 1<=len(proof['patterns'])<=64
+            or any(not isinstance(p,str) or not p or len(p.encode())>512 for p in proof['patterns'])
+            or proof['patterns']!=sorted(set(proof['patterns']))
+            or not isinstance(proof['byte_regexes'],list) or len(proof['byte_regexes'])!=len(proof['patterns'])):
+        raise RuntimeError('snapshot reader scope is invalid')
+    payload=json.dumps([proof['patterns'],proof['byte_regexes']],ensure_ascii=False,separators=(',',':')).encode()
+    if proof['sha256']!=hashlib.sha256(b'mainrag.fs-scope.v1\0'+payload).hexdigest():
+        raise RuntimeError('snapshot reader scope hash differs')
+    matchers=[]
+    for expression in proof['byte_regexes']:
+        if (not isinstance(expression,str) or not expression.startswith('(?-u)^')
+                or not expression.endswith('$') or len(expression.encode())>16384):
+            raise RuntimeError('snapshot reader regex is invalid')
+        matchers.append(re.compile(expression.removeprefix('(?-u)').encode(),re.DOTALL))
+    return lambda relative:any(m.fullmatch(relative.encode()) for m in matchers)
+
+def grant_snapshot_access(view: Path,reader_uid: int,matches,snapshot_root: Path | None=None):
+    """Grant only read access inside an unpublished, root-private snapshot."""
+    if reader_uid==0:return
+    binary=Path('/usr/bin/setfacl').resolve(strict=True);meta=binary.stat()
+    trusted_directory(binary.parent)
+    if not stat.S_ISREG(meta.st_mode) or meta.st_uid or meta.st_mode&0o022:
+        raise RuntimeError('snapshot permission tool authority is unsafe')
+    directories=[];files=[]
+    def flush(paths,permissions):
+        if paths:
+            command(binary,'-m',f'u:{reader_uid}:{permissions}','--',*paths)
+            paths.clear()
+    def walk_error(error):raise error
+    boundary=snapshot_root or view
+    if not view.is_relative_to(boundary):raise RuntimeError('snapshot access boundary differs')
+    # Source parents can also be owner-private. Grant traversal of the copied
+    # ancestor chain only, without exposing sibling directory listings.
+    ancestors=[]
+    parent=view.parent
+    while parent.is_relative_to(boundary):
+        ancestors.append(parent)
+        if parent==boundary:break
+        parent=parent.parent
+    flush(ancestors,'--x')
+    for parent,dirs,names in os.walk(view,followlinks=False,onerror=walk_error):
+        directories.append(Path(parent))
+        if len(directories)==64:flush(directories,'r-x')
+        dirs[:]=[name for name in dirs if not (Path(parent)/name).is_symlink()]
+        for name in names:
+            path=Path(parent)/name;metadata=path.lstat()
+            if not stat.S_ISREG(metadata.st_mode) or not matches(str(path.relative_to(view))):continue
+            # Changing an inode ACL must not grant access through an unrelated
+            # hard-link alias elsewhere in the enclosing filesystem snapshot.
+            if metadata.st_nlink!=1:raise RuntimeError('selected snapshot item has a hard-link alias')
+            files.append(path)
+            if len(files)==64:flush(files,'r--')
+    flush(directories,'r-x');flush(files,'r--')
+
 def write_new(path: Path,raw: bytes,gid: int):
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o640)
     try:
@@ -113,6 +174,9 @@ def write_new(path: Path,raw: bytes,gid: int):
         with os.fdopen(fd,'wb',closefd=False) as output:
             output.write(raw);output.flush();os.fsync(fd)
     finally:os.close(fd)
+    directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:os.fsync(directory)
+    finally:os.close(directory)
 
 def no_nested_subvolumes(root: Path):
     # A nonrecursive snapshot represents a nested subvolume as an empty inode-2
@@ -138,7 +202,11 @@ def inspect_cut(digest: str,cut_id: str,policy_path=POLICY):
             or uuid.UUID(marker['nonce']).int==0):
         raise RuntimeError('cut registry ownership is not established')
     value,raw=private_read(registry/'history'/f'{cut_id}-{digest}.json',with_bytes=True)
-    snapshot=registry/'views'/cut_id;view=snapshot/root.relative_to(origin)
+    published=registry/'views'/cut_id
+    snapshot=Path(value.get('snapshot_root',''))
+    if snapshot not in {published,published/'snapshot'}:
+        raise RuntimeError('cut inspection location differs')
+    view=snapshot/root.relative_to(origin)
     trusted_directory(snapshot.parent)
     keys={'format','cut_id','source_root_sha256','registered_root','origin_subvolume',
           'snapshot_root','read_root','snapshot_uuid','origin_uuid','captured_at_unix'}
@@ -161,6 +229,8 @@ def capture(digest: str,policy_path=POLICY):
     policy=private_read(policy_path)
     root,origin,registry,expected=validate_policy(policy,digest)
     gid=grp.getgrnam(policy['reader_group']).gr_gid
+    reader_uid=pwd.getpwnam(policy['reader_user']).pw_uid
+    matches=access_matcher(policy['sources'][digest]['filesystem_scope'])
     trusted_directory(registry)
     marker=private_read(registry/'registry-owner.json')
     if (set(marker)!={'format','owner','registry_root','nonce'}
@@ -173,6 +243,11 @@ def capture(digest: str,policy_path=POLICY):
         path.mkdir(mode=0o750,exist_ok=True)
         trusted_directory(path)
         os.chown(path,0,gid);os.chmod(path,0o750)
+    pending=registry/'pending'
+    pending.mkdir(mode=0o700,exist_ok=True)
+    trusted_directory(pending)
+    if stat.S_IMODE(pending.stat().st_mode)!=0o700 or pending.stat().st_uid!=0:
+        raise RuntimeError('unpublished cut boundary is not root-private')
     if os.statvfs(registry).f_bavail*os.statvfs(registry).f_frsize<20*1024**3:
         raise RuntimeError('source-cut filesystem reserve is insufficient')
     lock=os.open(registry/'capture.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
@@ -183,20 +258,43 @@ def capture(digest: str,policy_path=POLICY):
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         binary=inspector()
         if identity(binary,origin)['uuid']!=expected:raise RuntimeError('registered cut origin changed')
-        cut_id=str(uuid.uuid4());snapshot=registry/'views'/cut_id
-        if snapshot.exists():raise RuntimeError('cut identity already exists')
+        cut_id=str(uuid.uuid4());published=registry/'views'/cut_id;private=pending/cut_id
+        snapshot=published/'snapshot';unpublished=private/'snapshot'
+        if published.exists() or private.exists():raise RuntimeError('cut identity already exists')
         # Every created cut is owned and retained, including failed captures.
         intent={'cut_id':cut_id,'source_root_sha256':digest,'status':'CAPTURE_PENDING',
+                'pending_snapshot_root':str(unpublished),'snapshot_root':str(snapshot),
+                'pending_container':str(private),'published_container':str(published),
+                'reader_uid':reader_uid,'filesystem_scope_sha256':(policy['sources'][digest]['filesystem_scope'] or {}).get('sha256'),
                 'owner':'storage-v2-source-cut','cleanup':'manifest-bound after durable body proof'}
         intent_path=registry/'history'/f'{cut_id}-{digest}-intent.json'
         write_new(intent_path,canonical(intent),gid)
-        command(binary,'subvolume','snapshot','-r',origin,snapshot)
-        view=snapshot/root.relative_to(origin)
+        private.mkdir(mode=0o700)
+        command(binary,'subvolume','snapshot','-r',origin,unpublished)
+        view=unpublished/root.relative_to(origin)
         if view.resolve(strict=True)!=view or not view.is_dir():raise RuntimeError('cut source boundary is redirected')
         no_nested_subvolumes(view)
-        observed=identity(binary,snapshot)
-        if observed['parent_uuid']!=expected or command(binary,'property','get','-ts',snapshot,'ro')!='ro=true\n':
+        observed=identity(binary,unpublished)
+        if observed['parent_uuid']!=expected or command(binary,'property','get','-ts',unpublished,'ro')!='ro=true\n':
             raise RuntimeError('cut lost its immutable origin identity')
+        if reader_uid!=0:
+            # The original source is never changed. The private staging parent
+            # prevents source owners or readers from modifying this copied tree
+            # while its permission metadata is prepared.
+            command(binary,'property','set','-ts',unpublished,'ro','false')
+            try:grant_snapshot_access(view,reader_uid,matches,unpublished)
+            finally:command(binary,'property','set','-ts',unpublished,'ro','true')
+        if command(binary,'property','get','-ts',unpublished,'ro')!='ro=true\n':
+            raise RuntimeError('prepared source cut is not immutable')
+        # Btrfs cannot move a read-only subvolume between parent directories.
+        # Move its ordinary root-private container instead, then publish access
+        # only after the nested subvolume has already been sealed.
+        os.rename(private,published)
+        os.chown(published,0,gid);os.chmod(published,0o750)
+        view=snapshot/root.relative_to(origin)
+        # Complete snapshot and permission metadata before publishing a current
+        # pointer. The durable intent owns both locations even after a crash.
+        command(binary,'filesystem','sync',registry)
         value={'format':FORMAT,'cut_id':cut_id,'source_root_sha256':digest,'registered_root':str(root),
                'origin_subvolume':str(origin),'snapshot_root':str(snapshot),'read_root':str(view),
                'snapshot_uuid':observed['uuid'],'origin_uuid':expected,'captured_at_unix':int(time.time())}
@@ -204,15 +302,15 @@ def capture(digest: str,policy_path=POLICY):
         if len(raw)>MAX_BYTES:raise RuntimeError('cut descriptor exceeds its bound')
         history=registry/'history'/f'{cut_id}-{digest}.json'
         write_new(history,raw,gid)
+        write_new(registry/'history'/f'{cut_id}-{digest}-published.json',canonical({
+            **intent,'status':'PUBLISHED','descriptor_sha256':hashlib.sha256(raw).hexdigest(),
+            'snapshot_uuid':observed['uuid'],'captured_at_unix':value['captured_at_unix']}),gid)
         temporary=registry/f'.current-{digest}-{cut_id}.tmp'
         write_new(temporary,raw,gid)
         os.replace(temporary,registry/f'current-{digest}.json')
         directory=os.open(registry,os.O_RDONLY|os.O_DIRECTORY)
         try:os.fsync(directory)
         finally:os.close(directory)
-        write_new(registry/'history'/f'{cut_id}-{digest}-published.json',canonical({
-            **intent,'status':'PUBLISHED','descriptor_sha256':hashlib.sha256(raw).hexdigest(),
-            'snapshot_uuid':observed['uuid'],'captured_at_unix':value['captured_at_unix']}),gid)
         return {'status':'PASS','cut_id':cut_id,'source_root_sha256':digest,
                 'descriptor_sha256':hashlib.sha256(raw).hexdigest(),'snapshot_uuid':observed['uuid'],
                 'origin_uuid':expected,'captured_at_unix':value['captured_at_unix']}
@@ -226,7 +324,7 @@ def main():
     if not SHA256.fullmatch(args.source_root_sha256):parser.error('invalid registered-root digest')
     try:result=(inspect_cut(args.source_root_sha256,args.inspect_cut_id)
                 if args.inspect_cut_id is not None else capture(args.source_root_sha256))
-    except (OSError,ValueError,RuntimeError,subprocess.SubprocessError,KeyError) as error:
+    except (OSError,ValueError,RuntimeError,subprocess.SubprocessError,KeyError,re.error) as error:
         # Keep private filesystem paths and command stderr out of API output.
         print(json.dumps({'status':'FAIL','error_type':type(error).__name__}),flush=True)
         return 1

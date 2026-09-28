@@ -912,6 +912,18 @@ restricted to the owned cut registry. A mutable current descriptor cannot redire
 ongoing read. Nonrecursive snapshots with nested source subvolumes are rejected.
 Nontext conversation files are rejected rather than silently omitted.
 
+The producer prepares reader permissions only in a root-private unpublished
+snapshot inside a private container. Its closed policy binds the reader identity and exact compiled file
+scope. It grants directory traversal and read access to selected regular files,
+rejects selected hard-link aliases, then seals the snapshot read-only before
+publishing the container. The snapshot keeps its original Btrfs parent identity;
+the reader also accepts historical flat snapshot descriptors. Original source
+permissions and bytes remain unchanged. Failed
+cuts retain their exact pending and published ownership paths for manifest
+cleanup. The policy uses `mainrag.fs-cut-policy.v2`; descriptor and source
+manifest formats remain unchanged. Snapshot metadata and ownership journals are
+synced before publishing the current descriptor.
+
 The administrative configuration transition uses root and configuration digest
 comparison, preserves every other configuration value, and rejects a profile
 change on an active source. Source review reads the same pinned cut independently.
@@ -934,6 +946,10 @@ Query matches are gathered once within authorized requested sources, with narrow
 rank tuples; immutable hit identities are hydrated only at the exact score and
 tie-key boundary. Corpus normalization, complete scoped evaluation, authorization,
 final total order and latency limits remain unchanged.
+
+Interactive exact and active reads materialize the shared narrow corpus binding
+once and disable JIT only inside those two functions. Full corpus normalization,
+query classes, authorization and complete result envelopes remain unchanged.
 
 Regular active ingest captures a fresh cut after checking the complete active
 set. Legacy incremental filesystem ingest cannot substitute for this contract.

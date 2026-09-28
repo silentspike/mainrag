@@ -754,6 +754,28 @@ SELECT node_id || ':' || id || ':' || encode(digest,'hex') FROM view_row;
         self.file(schema.ROOT / "migrations/089_storage_v2_fragment_rank_precision.sql")
         self.assertEqual(self.sql(metadata),authority)
 
+        # Interactive corpus bindings are shared across scoring branches. Keep
+        # every complete envelope, boundary tie and permission exact; only the
+        # two function-local JIT settings intentionally change configuration.
+        current_envelopes=[self.sql(request) for request in requests]
+        previous_metadata=json.loads(self.sql(metadata))
+        self.file(schema.ROOT / "migrations/091_storage_v2_materialized_corpus_bindings.sql")
+        self.assertEqual([self.sql(request) for request in requests],current_envelopes)
+        expected_metadata=[]
+        for row in previous_metadata:
+            if row["proname"] in {"storage_v2_search_exact","storage_v2_search_active_unchecked"}:
+                row["proconfig"]=[value for value in row["proconfig"] or []
+                                  if not value.startswith("jit=")]+["jit=off"]
+                definition=self.sql(f"SELECT pg_get_functiondef({row['oid']})")
+                self.assertEqual(definition.count("    scoped_binding AS MATERIALIZED ("),1)
+                self.assertNotIn("    scoped_binding AS (",definition)
+            expected_metadata.append(row)
+        self.assertEqual(json.loads(self.sql(metadata)),expected_metadata)
+        self.file(schema.ROOT / "migrations/091_storage_v2_materialized_corpus_bindings.sql")
+        self.assertEqual(json.loads(self.sql(metadata)),expected_metadata)
+        self.assert_sql_fails(self.actor(schema.OTHER_ID,requests[0].rsplit('; ',1)[1]),
+                              "authorized generation selector required")
+
         self.assertEqual(json.loads(self.sql(self.admin(verify_window)))["invalid_count"],0)
 
         # Corruption is injected only in a disposable fixture transaction.
