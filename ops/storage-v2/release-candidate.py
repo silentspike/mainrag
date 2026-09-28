@@ -455,7 +455,8 @@ def read_snapshot_review(path: Path, expected_sha256: str, checkpoint: dict[str,
     if not isinstance(review, dict) \
             or review.get("schema_version") != "mainrag.storage-v2.source-snapshot-review.v1" \
             or review.get("source_id") != checkpoint["source_id"] \
-            or review.get("source_type") != "fs" \
+            or review.get("source_type") not in {"fs", "git"} \
+            or (review["source_type"] == "git") != adapter_profile_id.startswith("mainrag.git-") \
             or review.get("source_watermark_sha256") != checkpoint["source_watermark_sha256"] \
             or review.get("adapter_profile_id") != adapter_profile_id \
             or type(review.get("item_count")) is not int or review["item_count"] < 0 \
@@ -464,6 +465,10 @@ def read_snapshot_review(path: Path, expected_sha256: str, checkpoint: dict[str,
                    or not re.fullmatch(r"[0-9a-f]{64}", review[key])
                    for key in ("source_root_sha256", "source_config_sha256")):
         raise RuntimeError("source snapshot review identity differs")
+    if review["source_type"] == "git" and (
+            not isinstance(review.get("git_head"), str) or not re.fullmatch(
+                r"[0-9a-f]{40}|[0-9a-f]{64}", review["git_head"])):
+        raise RuntimeError("source snapshot review Git commit identity differs")
     paths = review.get("paths")
     if not isinstance(paths, dict) or not paths:
         raise RuntimeError("source snapshot review path set is empty")
@@ -602,7 +607,7 @@ def load_gold_suite(arguments: argparse.Namespace, checkpoint: dict[str, Any],
         gold_review = json.loads(review_raw, object_pairs_hook=unique_keys)
         if (not isinstance(gold_review, dict)
                 or gold_review.get("source_id") != checkpoint["source_id"]
-                or gold_review.get("source_type") != "fs"
+                or gold_review.get("source_type") != source_review["source_type"]
                 or gold_review.get("source_class") != suite.get("source_class")
                 or gold_review.get("source_snapshot_review_sha256")
                 != source_review_sha256
@@ -734,6 +739,33 @@ def repeated_result_diagnostics(left: dict[str, Any], right: dict[str, Any]) -> 
             classification = "IDENTICAL_HITS_EQUAL_SCORE_TIE_PERMUTATION"
     return {"schema_version": "mainrag.storage-v2.repeated-result.v1",
             "classification": classification, "acceptance_effect": "NONE"}
+
+
+def bind_automatic_expectation(seed: dict[str, Any], current: dict[str, Any],
+                               source_review: dict[str, Any] | None
+                               ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Bind a stale automatic positive to unchanged legacy bytes before candidate reads.
+
+    Keep every query and case ID. Reviewed gold expectations are never rebound.
+    If no unchanged legacy result exists, retain the original failing expectation.
+    """
+    if source_review is None or not seed["expects_match"]:
+        return seed, None
+    original = seed["expected_path_sha256"]
+    status = source_review["paths"].get(original, {}).get("status")
+    if status not in {"changed_bytes", "source_file_missing"}:
+        return seed, None
+    replacement = next((path for path in path_identity(current["results"])
+                        if source_review["paths"].get(path, {}).get("status") == "same_bytes"), None)
+    if replacement is None:
+        return seed, None
+    return {**seed, "expected_path_sha256": replacement}, {
+        "policy": "unchanged-legacy-positive-before-candidate-read-v1",
+        "original_expected_path_sha256": original,
+        "original_source_status": status,
+        "expected_path_sha256": replacement,
+        "source_snapshot_review_sha256": source_review["review_sha256"],
+    }
 
 
 def search_query_gates(seed: dict[str, Any], current: dict[str, Any],
@@ -1083,6 +1115,9 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
         common = {"query": seed["query"], "source_id": arguments.source_id, "limit": 10}
         progress["phase"] = "search_current"
         current = request(arguments.api_url, token, "POST", "/api/v1/search/keyword", common)
+        expectation_binding = None
+        if kind == "automatic":
+            seed, expectation_binding = bind_automatic_expectation(seed, current, source_review)
         pending["current"] = ranked(current["results"])
         pending["current_path_sha256"] = path_identity(current["results"])
         pending["current_ms"] = current.get("took_ms")
@@ -1124,6 +1159,8 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             query_coverage.append(coverage)
         gates = search_query_gates(seed, current, storage, arguments.max_query_ms,
                                    coverage, checkpoint, source_review)
+        if expectation_binding is not None:
+            gates["automatic_expectation_binding"] = expectation_binding
         case_run_id = sha256_text(f"{kind}:{seed['id']}")
         gates["id"] = case_run_id
         quality_passed &= gates["quality_passed"]

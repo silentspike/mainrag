@@ -102,7 +102,7 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                   "expected_path_sha256": "0" * 64, "expects_match": False}]
         source_review = {"source_id": 1, "captured_at_unix": 10,
                          "review_sha256": "d" * 64,
-                         "paths": {"c" * 64: {"status": "same_bytes"}}}
+                         "source_type": "fs", "paths": {"c" * 64: {"status": "same_bytes"}}}
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             review = {"source_id": 1, "source_type": "fs",
@@ -126,6 +126,14 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                                                      source_review)
             self.assertEqual(loaded, cases)
             self.assertEqual(summary["source_snapshot_gold_review_sha256"], review_digest)
+            source_review["source_type"] = "git"
+            review["source_type"] = "git"
+            MODULE.atomic_private_json(review_path, review)
+            suite["source_snapshot_gold_review_sha256"] = MODULE.hashlib.sha256(
+                review_path.read_bytes()).hexdigest()
+            MODULE.atomic_private_json(suite_path, suite)
+            arguments.expected_gold_suite_sha256 = MODULE.hashlib.sha256(suite_path.read_bytes()).hexdigest()
+            self.assertEqual(MODULE.load_gold_suite(arguments, checkpoint, verified, source_review)[0], cases)
             source_review["paths"]["c" * 64]["status"] = "changed_bytes"
             with self.assertRaisesRegex(RuntimeError, "same-byte source path"):
                 MODULE.load_gold_suite(arguments, checkpoint, verified, source_review)
@@ -609,6 +617,17 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
         self.assertFalse(MODULE.query_coverage_gates(
             seed, current, storage, proof, checkpoint, stale_review)["passed"])
         stale_seed = {**seed, "expected_path_sha256": stale_sha}
+        rebound, binding = MODULE.bind_automatic_expectation(stale_seed, current, review)
+        self.assertEqual(rebound["query"], stale_seed["query"])
+        self.assertEqual(rebound["id"], stale_seed["id"])
+        self.assertEqual(binding["original_expected_path_sha256"], stale_sha)
+        self.assertEqual(binding["source_snapshot_review_sha256"], review["review_sha256"])
+        self.assertTrue(MODULE.query_coverage_gates(
+            rebound, current, storage, proof, checkpoint, review)["passed"])
+        unchanged, no_binding = MODULE.bind_automatic_expectation(
+            stale_seed, {"results": [stale]}, review)
+        self.assertEqual(unchanged, stale_seed)
+        self.assertIsNone(no_binding)
         self.assertFalse(MODULE.query_coverage_gates(
             stale_seed, current, storage, proof, checkpoint, review)["passed"])
         stale_review = copy.deepcopy(review)

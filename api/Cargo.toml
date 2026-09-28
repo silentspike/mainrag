@@ -26,6 +26,7 @@ storage-v2-retrieval = ["storage-v2-intelligence"]
 [dependencies]
 # Async Runtime
 tokio = { version = "1.42", features = ["full"] }
+libc = "0.2"
 
 # Web Framework
 axum = { version = "0.7", features = ["macros"] }

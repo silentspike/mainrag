@@ -136,7 +136,11 @@ them (`null` otherwise), without allocating a generation or changing a pointer.
 The Git adapter may advance its local repository cache during observation; it
 rejects a dirty cache, a mismatched origin, or non-fast-forward history rather
 than using stale checked-out content. Git transport and cache I/O are not
-measured, so its application read count remains `null`. The default PDF adapter
+measured, so its application read count remains `null`. Transport uses native
+Git with a ten-minute deadline, no automatic tag download for existing caches,
+and process-group cleanup on timeout or cancellation. Repository checks and
+safe fast-forward checkout run off the async runtime. A failed fetch leaves the
+checked-out commit unchanged; it is never accepted as a stale-source fallback. The default PDF adapter
 reads a bounded in-memory snapshot and reports the actual PDF bytes read; the
 optional MuPDF backend still reports `null`.
 `final-delta.py plan` compares
@@ -639,7 +643,7 @@ additional hit. This literal coverage policy does not establish phrase, Boolean,
 semantic, or general relevance quality; the broader benchmark gates remain
 separate. Query seeds are not removed or replaced to make this policy pass.
 
-For a filesystem source whose legacy rows refer to changed or removed source
+For a filesystem or Git source whose legacy rows refer to changed or removed source
 files, capture `source-snapshot-review.py` before freezing the gold suite. The
 review hashes every registered legacy file against the current source root and
 checks the read-only release-adapter watermark before and after that scan. It
@@ -654,6 +658,14 @@ review is bounded at 64 MiB and each live watermark request at 10 minutes so
 large registered file sets can complete without dropping either identity
 check. Only paths proved to have identical bytes retain the ordered legacy
 Top-10 requirement; changed or missing paths are classified separately. A
+Git review also verifies the registered origin, clean supported branch and
+exact checkout commit before and after the scan. It reads the adapter's cache,
+not the registered URL as a filesystem path, and never fetches on its own.
+Every automatic query still executes. If its original positive path is proved
+changed or missing, bind its expectation to the first unchanged path in the
+current legacy result before reading the candidate, and persist both hashes
+and the review digest. If no unchanged result exists, the original expectation
+still fails. This binding never changes a reviewed gold expectation. A
 positive gold expectation
 pointing to a changed or missing legacy file still fails and must be reviewed
 and frozen before the run. Without this review the strict legacy comparison
@@ -835,7 +847,10 @@ counts. `status --state STATE` reports phase progress. `stop --state STATE`
 requests a stop after the currently running source; `run --resume --plan PLAN
 --state STATE` clears that request and continues the same frozen plan. A
 failed source blocks later sources in its failure group while independent
-groups continue. A phase left running after a process crash requires explicit
+groups continue. The run exits zero only when every planned source passed;
+failures or reconciliation needs exit one, and a requested stop with unfinished
+sources exits two. A completed run is reported as `PASS` or `FAIL`, rather than
+an ambiguous completion status. A phase left running after a crash requires
 reconciliation; the operator does not retry a possible write automatically.
 `reconcile --plan PLAN --state STATE --source-id ID --step-name NAME --outcome
 passed|retry --evidence-file EVIDENCE` binds the decision to a private

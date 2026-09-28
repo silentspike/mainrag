@@ -92,6 +92,23 @@ def candidate_proof(manifest: object) -> tuple[list[str], dict | None]:
                 failures.append("query_result_gate_failed")
                 break
             coverage = query.get("coverage")
+            binding = query.get("automatic_expectation_binding")
+            if binding is not None and (
+                not isinstance(binding, dict) or not isinstance(snapshot, dict)
+                or binding.get("policy") != "unchanged-legacy-positive-before-candidate-read-v1"
+                or binding.get("source_snapshot_review_sha256") != snapshot.get("review_sha256")
+                or binding.get("original_source_status") not in {"changed_bytes", "source_file_missing"}
+                or not digest_identity(binding.get("original_expected_path_sha256"))
+                or not digest_identity(binding.get("expected_path_sha256"))
+                or binding["original_expected_path_sha256"] == binding["expected_path_sha256"]
+                or query.get("expected_in_current") is not True
+                or query.get("expected_in_storage_v2") is not True
+                or not isinstance(coverage, dict)
+                or type(coverage.get("same_byte_baseline_path_count")) is not int
+                or coverage["same_byte_baseline_path_count"] < 1
+            ):
+                failures.append("automatic_expectation_binding_invalid")
+                break
             if snapshot is not None and (
                 (coverage is None and query.get("same_path_order") is not True)
                 or (coverage is not None and (
