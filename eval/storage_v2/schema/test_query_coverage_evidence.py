@@ -825,6 +825,84 @@ SELECT node_id || ':' || id || ':' || encode(digest,'hex') FROM view_row;
         self.assert_sql_fails(self.actor(schema.OTHER_ID,requests[0].rsplit('; ',1)[1]),
                               "authorized generation selector required")
 
+        # Legacy indexing can cover only a prefix of a complete immutable
+        # file. Its old rank must stay exact, while a new conjunction in the
+        # unindexed suffix remains searchable and supported by query evidence.
+        self.sql("INSERT INTO sources(id,name,type,path) VALUES "
+                 "(22,'partial-projection-fixture','fixture','partial-projection')")
+        self.sql("GRANT EXECUTE ON FUNCTION "
+                 "storage_v2_materialize_legacy_chunk_ranks(BIGINT,BIGINT) "
+                 "TO storage_v2_shadow_worker")
+        partial_body = "legacy anchor novel conjunction"
+        partial_run = self.begin(22, "a1" * 32, "a2" * 32, commit_sha=COMMIT)
+        partial_node, partial_view, partial_digest = self.make_projection(partial_body)
+        self.stage(partial_run, "partial.txt", partial_body, partial_node,
+                   partial_view, partial_digest)
+        self.complete_analysis(partial_digest)
+        partial_document = self.sql(self.admin(
+            "SELECT id FROM storage_v2_put_search_document("
+            f"'mainrag.lexical-simple.v1','node',{partial_node},"
+            f"'{partial_body}',ARRAY[]::TEXT[])"))
+        self.sql(self.admin(f"SELECT storage_v2_bind_search_document("
+                            f"{partial_view},0,{partial_document},1.0)"))
+        self.commit(partial_run, 1)
+        partial_generation = int(self.sql(
+            f"SELECT generation_id FROM storage_v2_ingest_run WHERE id={partial_run}"))
+        self.sql(self.admin(f"SELECT storage_v2_verify_generation("
+                            f"{partial_generation},'{'a3' * 32}')"))
+        partial_occurrence, partial_artifact = map(int, self.sql(
+            "SELECT id::TEXT||':'||artifact_version_id::TEXT "
+            "FROM occurrence WHERE source_id=22").split(":"))
+        self.sql("WITH file AS (INSERT INTO files(source_id,path,hash,content,"
+                 "content_text,size_original,size_compressed,last_modified) VALUES "
+                 f"(22,'/synthetic/partial.txt',digest('{partial_body}','sha256'),'',"
+                 f"'{partial_body}',{len(partial_body)},0,now()) RETURNING id) "
+                 "INSERT INTO chunks(file_id,chunk_type,content_hash,content_compressed,"
+                 "content_text,start_line,end_line) SELECT id,'text',"
+                 "digest('legacy anchor','sha256'),'','legacy anchor',1,1 FROM file")
+        self.sql(self.admin(f"SELECT storage_v2_put_lexical_segment("
+                            f"{partial_occurrence},{partial_artifact},0,"
+                            f"'{partial_body}','','text'); "
+                            f"SELECT storage_v2_materialize_legacy_chunk_ranks("
+                            f"{partial_occurrence},{partial_artifact})"))
+        new_conjunction = {"type": "and", "children": [
+            {"type": "term", "value": "novel"},
+            {"type": "term", "value": "conjunction"}]}
+        self.assertEqual(self.exact_search(new_conjunction, source_id=22)["results"], [])
+        legacy_ast = {"type": "and", "children": [
+            {"type": "term", "value": "legacy"},
+            {"type": "term", "value": "anchor"}]}
+        partial_before = self.exact_search(legacy_ast, source_id=22)
+        partial_rows = self.sql("SELECT jsonb_agg(to_jsonb(projection)) "
+                               "FROM storage_v2_legacy_lexical_segment projection "
+                               f"WHERE occurrence_id={partial_occurrence}")
+        for _ in range(2):
+            self.file(schema.ROOT / "migrations/094_storage_v2_query_specific_projection_fallback.sql")
+            self.assertEqual([self.sql(request) for request in requests], current_envelopes)
+            self.assertEqual(self.sql(changed_metadata), authority)
+            self.assertEqual(self.exact_search(legacy_ast, source_id=22), partial_before)
+            added = self.exact_search(new_conjunction, source_id=22)
+            self.assertEqual([row["occurrence_id"] for row in added["results"]],
+                             [partial_occurrence])
+            self.assertLess(added["results"][0]["score"], 1000000.0)
+            for rank in ("storage_v2_source_segment_ranks",
+                         "storage_v2_source_segment_ranks_precise"):
+                request = (f"SELECT occurrence_id FROM {rank}("
+                           f"ARRAY[{partial_occurrence},{partial_occurrence},NULL]::BIGINT[],"
+                           "'novel conjunction')")
+                self.assertEqual(self.sql(self.admin(request)), str(partial_occurrence))
+                self.assertEqual(self.sql(self.actor(schema.OTHER_ID, request)), "")
+            proof = json.loads(self.sql(self.admin(
+                f"SELECT storage_v2_candidate_query_evidence(22,{partial_generation},"
+                f"'{COMMIT}','novel conjunction',ARRAY[{partial_occurrence}]::BIGINT[],"
+                "ARRAY[]::BIGINT[])")))
+            self.assertTrue(proof["candidate"][0]["fts_body_matches"])
+            self.assertTrue(proof["candidate"][0]["segment_matches"])
+            self.assertFalse(proof["candidate"][0]["legacy_segment_matches"])
+        self.assertEqual(self.sql("SELECT jsonb_agg(to_jsonb(projection)) "
+                                  "FROM storage_v2_legacy_lexical_segment projection "
+                                  f"WHERE occurrence_id={partial_occurrence}"), partial_rows)
+
         self.assertEqual(json.loads(self.sql(self.admin(verify_window)))["invalid_count"],0)
 
         # Corruption is injected only in a disposable fixture transaction.
