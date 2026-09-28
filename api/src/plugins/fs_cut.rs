@@ -3,7 +3,7 @@
 //! Registered roots and relative item identities remain unchanged. A privileged
 //! producer publishes the descriptor; ordinary API readers cannot redirect it.
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
