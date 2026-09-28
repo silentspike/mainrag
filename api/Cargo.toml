@@ -161,6 +161,7 @@ async-stream = "0.3"
 futures = "0.3"
 
 [dev-dependencies]
+tempfile = "3"
 # PDF Test Fixture Generation
 printpdf = "0.7"
 # Benchmarking

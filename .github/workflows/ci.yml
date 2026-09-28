@@ -109,7 +109,19 @@ jobs:
         shell: bash
         run: |
           cargo test -p mainrag-api --features storage-v2-retrieval --lib fs_scope -- --nocapture | tee fs-scope-tests.log
-          python3 -c 'from pathlib import Path; assert "2 passed; 0 failed; 0 ignored;" in Path("fs-scope-tests.log").read_text(), "Expected both filesystem scope regressions to execute"'
+          python3 -c 'from pathlib import Path; assert "3 passed; 0 failed; 0 ignored;" in Path("fs-scope-tests.log").read_text(), "Expected all filesystem scope regressions to execute"'
+      - name: Verify character boundaries and durable attempt progress
+        shell: bash
+        run: |
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib services::chunker::character::tests -- --nocapture | tee character-tests.log
+          python3 -c 'from pathlib import Path; assert "3 passed; 0 failed; 0 ignored;" in Path("character-tests.log").read_text(), "Expected all character chunker regressions to execute"'
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib services::build_progress::tests -- --nocapture | tee build-progress-tests.log
+          python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("build-progress-tests.log").read_text(), "Expected durable progress regression to execute"'
+      - name: Verify canonical segment positions for repeated Unicode text
+        shell: bash
+        run: |
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib services::shadow_slice::tests::lexical_first_positions_preserve_repeated_unicode_identity -- --exact --nocapture | tee lexical-position-tests.log
+          python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("lexical-position-tests.log").read_text(), "Expected first-position regression to execute"'
       - name: Verify Git cache safety and bounded transport cleanup
         shell: bash
         run: |
@@ -380,8 +392,9 @@ jobs:
               'eval.storage_v2.schema.test_content_schema',
               'eval.storage_v2.schema.test_pack_epoch_fence',
               'eval.storage_v2.schema.test_query_coverage_evidence.QueryCoverageTests.test_y_source_backed_postgres_lexeme_keeps_chunk_order_without_legacy_reads',
+              'eval.storage_v2.schema.benchmark_staging_projection_reuse.StagingProjectionBenchmark.test_projection_reuse_at_two_document_sizes',
           ])
-          assert suite.countTestCases() >= 31, 'Expected search, pack reader-fence, append frontier and lexical window regressions'
+          assert suite.countTestCases() >= 32, 'Expected search, pack reader-fence, append frontier and lexical window regressions'
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           raise SystemExit(0 if result.wasSuccessful() and not result.skipped else 1)
           PY

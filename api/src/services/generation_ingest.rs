@@ -448,10 +448,17 @@ pub struct ShadowIngestMeasurements {
     pub lexical_segments_copied: u64,
     pub lexical_segments_generated: u64,
     pub lexical_segment_batch_calls: u64,
+    pub structural_card_batch_calls: u64,
     pub db_staging_round_trips: u64,
 }
 
 impl ShadowIngestMeasurements {
+    pub fn database_staging_ms(&self) -> f64 {
+        self.stage_durations
+            .get(&ShadowIngestStage::DatabaseStage)
+            .map_or(0.0, |duration| duration.as_secs_f64() * 1000.0)
+    }
+
     pub fn record_stage(&mut self, stage: ShadowIngestStage, duration: Duration) {
         *self.stage_durations.entry(stage).or_default() += duration;
     }
@@ -535,6 +542,7 @@ impl ShadowIngestMeasurements {
                 "lexical_segments_copied": self.lexical_segments_copied,
                 "lexical_segments_generated": self.lexical_segments_generated,
                 "lexical_segment_batch_calls": self.lexical_segment_batch_calls,
+                "structural_card_batch_calls": self.structural_card_batch_calls,
                 "db_staging_round_trips": self.db_staging_round_trips,
             },
             "phase": phases,

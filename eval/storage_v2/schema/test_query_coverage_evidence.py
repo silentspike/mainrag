@@ -445,7 +445,10 @@ SELECT id,'text',digest('alpha','sha256'),'','alpha','prefixonly',1,1
                  "ARRAY['alpha visible','visible']::TEXT[],"
                  "ARRAY['','']::TEXT[],ARRAY['text','text']::TEXT[])")
         self.assertEqual(self.sql(self.admin(batch)), "2")
+        old_rows=self.sql(f"SELECT row_to_json(segment)::TEXT FROM storage_v2_lexical_segment segment WHERE occurrence_id={generated_occurrence} ORDER BY segment_order")
+        self.file(schema.ROOT / "migrations/083_storage_v2_staging_projection_reuse.sql")
         self.assertEqual(self.sql(self.admin(batch)), "2")
+        self.assertEqual(self.sql(f"SELECT row_to_json(segment)::TEXT FROM storage_v2_lexical_segment segment WHERE occurrence_id={generated_occurrence} ORDER BY segment_order"),old_rows)
         self.assertEqual(self.sql(f"SELECT count(*) FROM storage_v2_lexical_segment "
                                   f"WHERE occurrence_id={generated_occurrence}"), "2")
         self.assert_sql_fails(self.admin(batch.replace("'visible']", "'alpha']")),
@@ -460,6 +463,17 @@ SELECT id,'text',digest('alpha','sha256'),'','alpha','prefixonly',1,1
         self.assert_sql_fails(self.admin(batch.replace("ARRAY['alpha visible','visible']",
                                                        "ARRAY['alpha visible','missing']")),
                               "valid source-backed lexical segment group required")
+
+        self.sql("GRANT SELECT ON storage_v2_lexical_segment TO storage_v2_shadow_worker")
+        self.file(schema.ROOT / "migrations/085_storage_v2_positioned_lexical_segments.sql")
+        self.sql("GRANT EXECUTE ON FUNCTION storage_v2_put_lexical_segments_at(BIGINT,BIGINT,BIGINT[],TEXT[],TEXT[],TEXT[],BIGINT[]) TO storage_v2_shadow_worker")
+        positioned=batch.replace("storage_v2_put_lexical_segments(","storage_v2_put_lexical_segments_at(")[:-1]+",ARRAY[1,7]::BIGINT[])"
+        self.assertEqual(self.sql(self.admin(positioned)),"2")
+        self.assertEqual(self.sql(f"SELECT row_to_json(segment)::TEXT FROM storage_v2_lexical_segment segment WHERE occurrence_id={generated_occurrence} ORDER BY segment_order"),old_rows)
+        self.assert_sql_fails(self.admin(positioned.replace("ARRAY[1,7]","ARRAY[1,6]")),"valid source-backed lexical segment group required")
+        self.assert_sql_fails(self.admin(positioned.replace("ARRAY['','']","ARRAY['prefix','']")),"lexical segment identity collision")
+        self.assert_sql_fails(self.actor(schema.OTHER_ID,positioned),"authorized source-backed lexical segment required")
+        self.assert_sql_fails(self.admin(positioned.replace("ARRAY[1,7]","ARRAY[1,-1]")),"bounded source character window required")
 
         # Presence is a boolean support check. It must retain the authorized
         # source boundary, duplicate-input semantics, and search results while
@@ -633,6 +647,17 @@ SELECT node_id || ':' || id || ':' || encode(digest,'hex') FROM view_row;
         verify_window = f"SELECT storage_v2_verify_lexical_segments({window_generation})"
         self.assertEqual(json.loads(self.sql(self.admin(verify_window))), expected)
         self.assertEqual(expected["segment_count"], 3)
+        self.assertEqual(self.sql(self.admin(
+            f"SELECT storage_v2_put_lexical_segments_at({window_occurrence},{window_artifact},ARRAY[0,1,2]::BIGINT[],"
+            "ARRAY['Über🙂 Grenze甲','Grenze甲','tail Ω']::TEXT[],"
+            "ARRAY['context Ω','context Ω','context Ω']::TEXT[],ARRAY['text','text','text']::TEXT[],"
+            f"ARRAY(SELECT text_start FROM storage_v2_lexical_segment WHERE occurrence_id={window_occurrence} ORDER BY segment_order))")),"3")
+
+        self.assertEqual(self.sql(self.admin(
+            f"SELECT storage_v2_put_lexical_segments({window_occurrence},{window_artifact},ARRAY[0,1,2]::BIGINT[],"
+            "ARRAY['Über🙂 Grenze甲','Grenze甲','tail Ω']::TEXT[],"
+            "ARRAY['context Ω','context Ω','context Ω']::TEXT[],ARRAY['text','text','text']::TEXT[])")), "3")
+        self.assertEqual(json.loads(self.sql(self.admin(verify_window))),expected)
 
         # A segment larger than the normal window must enlarge its overlap;
         # no truncation or UTF-8 byte/character conversion is acceptable.
@@ -643,6 +668,18 @@ SELECT node_id || ':' || id || ':' || encode(digest,'hex') FROM view_row;
         self.assertEqual(json.loads(self.sql(self.admin(verify_window)))["segment_count"], 4)
         self.assert_sql_fails(self.actor(schema.OTHER_ID, verify_window),
                               "verified authorized generation required")
+
+        rank_request=(f"SELECT COALESCE(jsonb_agg(ranked ORDER BY occurrence_id,score,segment_order),'[]'::JSONB) "
+                      f"FROM storage_v2_source_segment_ranks(ARRAY[{window_occurrence},{context_occurrence},{known_occurrence},{generated_occurrence}]::BIGINT[],'alpha') ranked")
+        previous_ranks=self.sql(self.admin(rank_request))
+        self.file(schema.ROOT / "migrations/084_storage_v2_requested_segment_rank_kind.sql")
+        self.assertEqual(self.sql(self.admin(rank_request)),previous_ranks)
+        self.assertEqual(self.sql(self.actor(schema.OTHER_ID,rank_request)),"[]")
+        self.assertEqual(self.sql(self.actor(schema.OTHER_ID,"SELECT count(*) FROM storage_v2_lexical_segment")),"0")
+        self.assertEqual(self.sql("SELECT relforcerowsecurity FROM pg_class WHERE oid='storage_v2_lexical_segment'::REGCLASS"),"t")
+        self.assert_sql_fails(self.actor(schema.OTHER_ID,batch),"authorized source-backed lexical segment required")
+
+        self.assertEqual(json.loads(self.sql(self.admin(verify_window)))["invalid_count"],0)
 
         # Corruption is injected only in a disposable fixture transaction.
         # An error rolls back both the mutation and the disabled trigger.

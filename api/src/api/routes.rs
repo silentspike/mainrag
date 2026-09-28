@@ -141,6 +141,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             post(handlers::admin_build_release_candidate),
         )
         .route(
+            "/api/v1/admin/sources/:id/storage-v2-release-candidate-progress",
+            get(handlers::admin_release_candidate_progress),
+        )
+        .route(
             "/api/v1/admin/sources/:id/storage-v2-release-candidate-verify",
             post(handlers::admin_verify_release_candidate),
         )

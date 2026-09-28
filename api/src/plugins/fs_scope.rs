@@ -5,7 +5,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FilesystemScopeProof {
@@ -93,6 +93,58 @@ impl FilesystemScope {
             .is_none_or(|matcher| matcher.is_match(relative))
     }
 
+    /// Resolve a watcher request before opening content. Discovery does not
+    /// traverse symlinks; an incremental caller must preserve that boundary.
+    pub async fn incremental_path(
+        &self,
+        root: &Path,
+        requested: &Path,
+    ) -> Result<Option<(PathBuf, String)>> {
+        let relative = if requested.is_absolute() {
+            requested
+                .strip_prefix(root)
+                .context("incremental path is outside the registered root")?
+        } else {
+            requested
+        };
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_)))
+        {
+            bail!("incremental path must be relative to the registered root");
+        }
+        if !self.includes(relative) {
+            return Ok(None);
+        }
+        let mut path = root.to_path_buf();
+        for component in relative.components() {
+            path.push(component.as_os_str());
+            let metadata = match tokio::fs::symlink_metadata(&path).await {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            if metadata.file_type().is_symlink() {
+                bail!("incremental symlink path is outside discovery scope");
+            }
+        }
+        if !tokio::fs::metadata(&path).await?.is_file() {
+            return Ok(None);
+        }
+        let canonical = tokio::fs::canonicalize(&path).await?;
+        if !canonical.starts_with(root) {
+            bail!("incremental path escaped the registered root");
+        }
+        Ok(Some((
+            canonical,
+            relative
+                .to_str()
+                .context("incremental path is not UTF-8")?
+                .to_string(),
+        )))
+    }
+
     #[cfg_attr(not(feature = "storage-v2-retrieval"), allow(dead_code))]
     pub fn release_profile(&self) -> String {
         match &self.proof {
@@ -109,6 +161,50 @@ impl FilesystemScope {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn incremental_selection_rejects_external_and_symlink_paths_before_read() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        tokio::fs::write(root.path().join("session.jsonl"), "selected")
+            .await
+            .unwrap();
+        tokio::fs::write(root.path().join("excluded.txt"), "excluded")
+            .await
+            .unwrap();
+        tokio::fs::write(outside.path().join("secret.jsonl"), "outside")
+            .await
+            .unwrap();
+        let canonical = tokio::fs::canonicalize(root.path()).await.unwrap();
+        let scope = FilesystemScope::from_config(&json!({"file_patterns":["*.jsonl"]})).unwrap();
+        assert_eq!(
+            scope
+                .incremental_path(&canonical, Path::new("session.jsonl"))
+                .await
+                .unwrap()
+                .unwrap()
+                .1,
+            "session.jsonl"
+        );
+        assert!(scope
+            .incremental_path(&canonical, Path::new("excluded.txt"))
+            .await
+            .unwrap()
+            .is_none());
+        assert!(scope
+            .incremental_path(&canonical, Path::new("../secret.jsonl"))
+            .await
+            .is_err());
+        assert!(scope
+            .incremental_path(&canonical, &outside.path().join("secret.jsonl"))
+            .await
+            .is_err());
+        std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
+        assert!(scope
+            .incremental_path(&canonical, Path::new("escape/secret.jsonl"))
+            .await
+            .is_err());
+    }
 
     #[test]
     fn configured_scope_is_stable_and_fail_closed() {

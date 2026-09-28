@@ -171,6 +171,29 @@ def validate_result(step_plan: dict, result_path: Path,
     return result, hashlib.sha256(result_bytes).hexdigest()
 
 
+def observe_live_build(step_plan: dict, source_state: dict, step_state: dict, state: dict, state_path: Path) -> None:
+    if step_plan["tool"] != "candidate-build": return
+    path=Path(step_plan["result_path"])
+    path=path.with_suffix(path.suffix+".progress.json")
+    if not path.exists(): return
+    try:
+        value=json.loads(private_file(path))
+        if value.get("schema_version")!="mainrag.storage-v2.build-monitor.v1" or value.get("source_id")!=source_state["source_id"] or value.get("commit_sha")!=state["package_commit_sha"]:
+            raise ValueError("progress identity differs")
+        attempt=value["attempt_id"]
+        if step_state.get("progress_attempt_id",attempt)!=attempt: raise ValueError("progress attempt changed")
+        step_state["progress_attempt_id"]=attempt
+        source_state["live_progress"]={k:value.get(k) for k in ["status","observed_at_unix","transaction_committed","committed_items","generation_id"]}
+        if value.get("progress") is not None:
+            progress=value["progress"]
+            if progress.get("attempt_id")!=attempt or progress.get("source_id")!=source_state["source_id"] or progress.get("commit_sha")!=state["package_commit_sha"]:
+                raise ValueError("backend progress identity differs")
+            source_state["live_progress"]["backend"]=progress
+    except (OSError,ValueError,KeyError,TypeError,RuntimeError):
+        source_state["live_progress"]={"status":"unavailable_requires_reconciliation"}
+    write_state(state_path,state)
+
+
 def invoke(step_plan: dict, state_path: Path, source_state: dict,
            step_state: dict, state: dict) -> bool:
     script = Path(__file__).with_name(TOOLS[step_plan["tool"]])
@@ -194,7 +217,13 @@ def invoke(step_plan: dict, state_path: Path, source_state: dict,
         except OSError:
             process.wait()
             raise
-        code = process.wait()
+        while True:
+            try:
+                code = process.wait(timeout=30)
+                break
+            except subprocess.TimeoutExpired:
+                observe_live_build(step_plan, source_state, step_state, state, state_path)
+        observe_live_build(step_plan, source_state, step_state, state, state_path)
     step_state["exit_code"] = code
     step_state["finished_at_unix"] = int(time.time())
     if code != 0 or not result_path.is_file():
