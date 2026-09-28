@@ -113,7 +113,11 @@ AS $$
                AND CASE p_action WHEN 'read' THEN can_read WHEN 'write' THEN can_write ELSE FALSE END
         )
 $$;
-CREATE ROLE storage_v2_shadow_worker;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'storage_v2_shadow_worker') THEN
+        CREATE ROLE storage_v2_shadow_worker;
+    END IF;
+END $$;
 GRANT USAGE ON SCHEMA public TO storage_v2_shadow_worker;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO storage_v2_shadow_worker;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO storage_v2_shadow_worker;

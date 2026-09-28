@@ -551,12 +551,116 @@ SELECT id,'text',digest('alpha','sha256'),'','alpha','prefixonly',1,1
         self.assertEqual(self.sql(f"SELECT count(*) FROM storage_v2_legacy_lexical_segment "
                                   f"WHERE occurrence_id={known_occurrence}"), "2")
         self.file(schema.ROOT / "migrations/081_storage_v2_set_based_lexical_verification.sql")
+        self.file(schema.ROOT / "migrations/082_storage_v2_windowed_lexical_verification.sql")
         verification_definition = self.sql(
             "SELECT pg_get_functiondef("
             "'storage_v2_verify_lexical_segments(bigint)'::regprocedure)")
         self.assertIn("segment_values AS MATERIALIZED", verification_definition)
+        self.assertIn("segment_base AS MATERIALIZED", verification_definition)
+        self.assertIn("document_chunks AS MATERIALIZED", verification_definition)
         self.assertIn("segment_checks AS", verification_definition)
         self.assertNotIn("LEFT JOIN LATERAL", verification_definition)
+
+        # PostgreSQL substring offsets count characters, not UTF-8 bytes.
+        # Check a multibyte slice spanning a window boundary and a slice in
+        # the next window against the previous complete-document verifier.
+        self.sql("INSERT INTO sources(id,name,type,path) VALUES "
+                 "(21,'window-fixture','fixture','window-fixture')")
+        window_body = " " * 61438 + "Über🙂 Grenze甲 " + " " * 5000 + "tail Ω"
+        window_run = self.begin(21, "d1" * 32, "d2" * 32, commit_sha=COMMIT)
+        projection = self.sql(self.admin("""
+WITH content AS (
+    SELECT repeat(' ',61438) AS first,
+           'Über🙂 Grenze甲 ' || repeat(' ',5000) || 'tail Ω' AS second
+), body AS (
+    SELECT first_body.id AS first_id, second_body.id AS second_id,
+           digest(convert_to(content.first||content.second,'UTF8'),'sha256') AS digest,
+           octet_length(convert_to(content.first||content.second,'UTF8')) AS size
+      FROM content CROSS JOIN LATERAL
+           storage_v2_put_inline_body(convert_to(content.first,'UTF8')) first_body
+      CROSS JOIN LATERAL
+           storage_v2_put_inline_body(convert_to(content.second,'UTF8')) second_body
+), leaves AS (
+    SELECT first_node.id AS first_id, second_node.id AS second_id, body.digest, body.size
+      FROM body CROSS JOIN LATERAL
+           storage_v2_put_leaf_node('shadow-fixture','text',body.first_id) first_node
+      CROSS JOIN LATERAL
+           storage_v2_put_leaf_node('shadow-fixture','text',body.second_id) second_node
+), node AS (
+    SELECT root.id, leaves.digest, leaves.size
+      FROM leaves CROSS JOIN LATERAL storage_v2_put_internal_node(
+           'shadow-fixture','artifact-root',leaves.size,
+           ARRAY['first','second'],ARRAY[leaves.first_id,leaves.second_id]) root
+), view_row AS (
+    SELECT view_value.id, node.id AS node_id, node.digest
+      FROM node CROSS JOIN LATERAL storage_v2_put_retrieval_view(
+           'chunk','fixture-view-v1','text','fixture-tokenizer-v1',0,
+           ARRAY['content'],ARRAY['node'],ARRAY[node.id],ARRAY[0::BIGINT],
+           ARRAY[node.size::BIGINT]) view_value
+)
+SELECT node_id || ':' || id || ':' || encode(digest,'hex') FROM view_row;
+"""))
+        window_node, window_view, window_digest = projection.split(":")
+        self.stage(window_run, "window.txt", window_body, int(window_node),
+                   int(window_view), window_digest)
+        self.complete_analysis(window_digest)
+        window_document = self.sql(self.admin(
+            "SELECT id FROM storage_v2_put_search_document("
+            f"'mainrag.lexical-simple.v1','node',{window_node},"
+            "repeat(' ',61438)||'Über🙂 Grenze甲 '||repeat(' ',5000)||'tail Ω',"
+            "ARRAY[]::TEXT[])"))
+        self.sql(self.admin(
+            f"SELECT storage_v2_bind_search_document({window_view},0,{window_document},1.0)"))
+        self.commit(window_run, 1)
+        window_generation = int(self.sql(
+            f"SELECT generation_id FROM storage_v2_ingest_run WHERE id={window_run}"))
+        self.sql(self.admin(
+            f"SELECT storage_v2_verify_generation({window_generation},'{'d3' * 32}')"))
+        window_occurrence, window_artifact = map(int, self.sql(
+            "SELECT id::TEXT||':'||artifact_version_id::TEXT "
+            "FROM occurrence WHERE source_id=21").split(":"))
+        for order, text in enumerate(("Über🙂 Grenze甲", "Grenze甲", "tail Ω")):
+            self.sql(self.admin(
+                f"SELECT storage_v2_put_lexical_segment({window_occurrence},"
+                f"{window_artifact},{order},'{text}','context Ω','text')"))
+        self.assertEqual(self.sql(
+            "SELECT text_start FROM storage_v2_lexical_segment "
+            f"WHERE occurrence_id={window_occurrence} AND segment_order=0"), "61439")
+        self.file(schema.ROOT / "migrations/081_storage_v2_set_based_lexical_verification.sql")
+        expected = json.loads(self.sql(self.admin(
+            f"SELECT storage_v2_verify_lexical_segments({window_generation})")))
+        self.file(schema.ROOT / "migrations/082_storage_v2_windowed_lexical_verification.sql")
+        verify_window = f"SELECT storage_v2_verify_lexical_segments({window_generation})"
+        self.assertEqual(json.loads(self.sql(self.admin(verify_window))), expected)
+        self.assertEqual(expected["segment_count"], 3)
+
+        # A segment larger than the normal window must enlarge its overlap;
+        # no truncation or UTF-8 byte/character conversion is acceptable.
+        self.sql(self.admin(
+            f"SELECT storage_v2_put_lexical_segment({window_occurrence},"
+            f"{window_artifact},3,repeat(' ',61438)||'Über🙂 Grenze甲 '"
+            "||repeat(' ',5000)||'tail Ω','context Ω','text')"))
+        self.assertEqual(json.loads(self.sql(self.admin(verify_window)))["segment_count"], 4)
+        self.assert_sql_fails(self.actor(schema.OTHER_ID, verify_window),
+                              "verified authorized generation required")
+
+        # Corruption is injected only in a disposable fixture transaction.
+        # An error rolls back both the mutation and the disabled trigger.
+        mutation_prefix = (
+            "BEGIN; ALTER TABLE storage_v2_lexical_segment DISABLE TRIGGER "
+            "storage_v2_lexical_segment_immutable; ")
+        for value in ("text_sha256=digest('corrupt','sha256')",
+                      "fts_vector=to_tsvector('simple','corrupt')"):
+            self.assert_sql_fails(
+                mutation_prefix + "UPDATE storage_v2_lexical_segment SET " + value
+                + f" WHERE occurrence_id={window_occurrence} AND segment_order=0; "
+                + self.admin(verify_window),
+                "lexical segment projection is incomplete or differs from immutable source")
+        self.assert_sql_fails(
+            mutation_prefix + "DELETE FROM storage_v2_lexical_segment "
+            + f"WHERE occurrence_id={window_occurrence}; " + self.admin(verify_window),
+            "lexical segment projection is incomplete or differs from immutable source")
+        self.assertEqual(json.loads(self.sql(self.admin(verify_window)))["segment_count"], 4)
         self.sql(f"DELETE FROM chunks WHERE id={context_chunk}")
         self.assertEqual(self.sql(self.admin(rank_query)).splitlines(),
                          [str(context_occurrence), str(generated_occurrence)])
