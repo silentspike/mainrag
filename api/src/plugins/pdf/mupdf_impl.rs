@@ -20,14 +20,16 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::LazyLock;
 use std::time::Instant;
+use tokio::io::AsyncReadExt;
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 use super::super::pdf_smart_chunker::chunk_pdf_blocks;
 use super::super::pdf_types::{BlockType, FontStats, PdfBlock, ProcessedChunk};
-use super::super::{RawFile, SourcePlugin, SyncResult};
+use super::super::{ObservedSyncResult, RawFile, SourcePlugin, SyncResult};
 use super::{MAX_PDF_SIZE, MIN_TEXT_LENGTH};
 use crate::services::chunker::ChunkerConfig;
+use crate::services::source_read::ReadAccounting;
 use crate::utils::text::slugify;
 
 /// Max concurrent PDF extractions (CPU-bound, not too many in parallel)
@@ -125,12 +127,12 @@ fn extract_line_text(line: &mupdf::TextLine) -> (String, Option<f32>, f32) {
 type RawBlockData = (String, usize, Option<f32>, f32, f32);
 
 /// Extract raw blocks from PDF (before heading classification)
-fn extract_raw_blocks(path: &Path) -> anyhow::Result<Vec<RawBlockData>> {
-    let doc = Document::open(
-        path.to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid path encoding"))?,
-    )?;
+fn extract_raw_blocks(source_bytes: &[u8]) -> anyhow::Result<Vec<RawBlockData>> {
+    let doc = Document::from_bytes(source_bytes, "application/pdf")?;
+    extract_document_blocks(&doc)
+}
 
+fn extract_document_blocks(doc: &Document) -> anyhow::Result<Vec<RawBlockData>> {
     let mut raw_blocks = Vec::new();
     let page_count = doc.page_count()?;
 
@@ -309,6 +311,10 @@ fn chunks_to_raw_files(
 #[async_trait]
 impl SourcePlugin for PdfPlugin {
     async fn sync(&self, source_path: &str) -> anyhow::Result<SyncResult> {
+        Ok(self.sync_observed(source_path).await?.result)
+    }
+
+    async fn sync_observed(&self, source_path: &str) -> anyhow::Result<ObservedSyncResult> {
         info!("PDF plugin syncing (MuPDF): {}", source_path);
         let start = Instant::now();
 
@@ -338,6 +344,19 @@ impl SourcePlugin for PdfPlugin {
             );
         }
 
+        // Freeze one bounded, accounted read before entering the native parser.
+        // MuPDF only receives these bytes; it cannot reopen a drifting source.
+        let accounting = ReadAccounting::pdf_adapter();
+        let mut source_bytes = Vec::new();
+        accounting
+            .reader(tokio::fs::File::open(path).await?)
+            .take(MAX_PDF_SIZE + 1)
+            .read_to_end(&mut source_bytes)
+            .await?;
+        if source_bytes.len() as u64 > MAX_PDF_SIZE {
+            anyhow::bail!("PDF too large after source read");
+        }
+
         let path_buf = path.to_path_buf();
         let chunker_config = self.chunker_config.clone();
         let source_path_owned = source_path.to_string();
@@ -345,7 +364,7 @@ impl SourcePlugin for PdfPlugin {
         // FIX: ALL in spawn_blocking (Extract + Classify + Chunk + Convert)
         let files = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<RawFile>> {
             // 1. Extract raw blocks with sorted spans
-            let raw_blocks = extract_raw_blocks(&path_buf)?;
+            let raw_blocks = extract_raw_blocks(&source_bytes)?;
 
             if raw_blocks.is_empty() {
                 return Ok(vec![]);
@@ -383,9 +402,12 @@ impl SourcePlugin for PdfPlugin {
                 "PDF contains no extractable text (may be scanned): {}",
                 source_path
             );
-            return Ok(SyncResult {
-                files: vec![],
-                errors: vec![format!("PDF contains no extractable text: {}", source_path)],
+            return Ok(ObservedSyncResult {
+                result: SyncResult {
+                    files: vec![],
+                    errors: vec![format!("PDF contains no extractable text: {}", source_path)],
+                },
+                application_read_bytes: Some(accounting.bytes()),
             });
         }
 
@@ -405,10 +427,20 @@ impl SourcePlugin for PdfPlugin {
             duration
         );
 
-        Ok(SyncResult {
-            files,
-            errors: vec![],
+        Ok(ObservedSyncResult {
+            result: SyncResult {
+                files,
+                errors: vec![],
+            },
+            application_read_bytes: Some(accounting.bytes()),
         })
+    }
+
+    async fn sync_for_storage_v2_observed(
+        &self,
+        source_path: &str,
+    ) -> anyhow::Result<ObservedSyncResult> {
+        self.sync_observed(source_path).await
     }
 
     fn source_type(&self) -> &'static str {
@@ -419,6 +451,69 @@ impl SourcePlugin for PdfPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_pdf_observed_read_preserves_structured_output_and_identity() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test.pdf");
+        let source_path = fixture.to_str().unwrap();
+        let bytes = std::fs::read(&fixture).unwrap();
+
+        // Compare memory parsing with the previous native file-opening path.
+        // The same public PDF must retain text, font sizes and page coordinates.
+        let expected_blocks = {
+            let document = Document::open(source_path).unwrap();
+            extract_document_blocks(&document).unwrap()
+        };
+        assert!(!expected_blocks.is_empty());
+        assert_eq!(extract_raw_blocks(&bytes).unwrap(), expected_blocks);
+        let expected_files = chunks_to_raw_files(
+            chunk_pdf_blocks(classify_blocks(expected_blocks), &ChunkerConfig::default()),
+            "test",
+            "test.pdf",
+            source_path,
+        );
+
+        let plugin = PdfPlugin::new();
+        let observed = plugin
+            .sync_for_storage_v2_observed(source_path)
+            .await
+            .unwrap();
+        assert_eq!(observed.application_read_bytes, Some(bytes.len() as u64));
+        assert!(observed.result.errors.is_empty());
+        assert!(!observed.result.files.is_empty());
+        assert!(observed
+            .result
+            .files
+            .iter()
+            .any(|file| file.content.contains("Chapter 1: Introduction")));
+        let legacy = plugin.sync(source_path).await.unwrap();
+        for actual in [&observed.result.files, &legacy.files] {
+            assert_eq!(actual.len(), expected_files.len());
+            for (actual, expected) in actual.iter().zip(&expected_files) {
+                assert_eq!(actual.path, expected.path);
+                assert_eq!(actual.content, expected.content);
+                assert_eq!(actual.size, expected.size);
+                assert_eq!(actual.language, expected.language);
+                assert!(actual.source_path.is_none());
+                assert!(actual.source_range.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_pdf_rejects_oversized_source_before_parsing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oversized.pdf");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_PDF_SIZE + 1)
+            .unwrap();
+        let error = PdfPlugin::new()
+            .sync_observed(path.to_str().unwrap())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("PDF too large"));
+    }
 
     #[test]
     fn test_slugify_pdf_stem() {
