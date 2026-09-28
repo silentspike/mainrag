@@ -95,9 +95,17 @@ def git_checkout(registration: dict, cache_dir: Path) -> tuple[Path, str]:
     root = (cache_dir / name).resolve(strict=True)
     if not root.is_relative_to(cache_dir.resolve(strict=True)):
         raise RuntimeError("git cache root escapes its registered cache")
+    cache_owner = cache_dir.stat().st_uid
+    if root.stat().st_uid != cache_owner or root.stat().st_mode & 0o022:
+        raise RuntimeError("git checkout ownership differs from its trusted cache")
 
     def git(*args: str) -> str:
-        result = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+        command = ["git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", str(root), *args]
+        if cache_owner != os.geteuid():
+            # Read the service-owned checkout as its existing owner. Keep
+            # Git's ownership guard; do not add a global safe-directory rule.
+            command = ["sudo", "-n", "-u", f"#{cache_owner}", "--", *command]
+        result = subprocess.run(command, capture_output=True,
                                 text=True, check=False, timeout=30)
         if result.returncode:
             raise RuntimeError("git checkout identity cannot be verified")

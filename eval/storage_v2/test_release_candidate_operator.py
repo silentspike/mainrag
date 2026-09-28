@@ -646,6 +646,39 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
         self.assertFalse(MODULE.query_coverage_gates(
             seed, current, storage, proof, checkpoint, stale_review)["passed"])
 
+    def test_changed_expected_path_requires_independent_complete_source_body(self) -> None:
+        seed, current, storage, proof, checkpoint = self.coverage_fixture()
+        proof["schema_version"] = "mainrag.storage-v2.query-coverage.v4"
+        for hit in proof["candidate"]:
+            hit.update(fts_body_matches=True, segment_matches=True, legacy_segment_matches=False)
+        checkpoint["source_watermark_sha256"] = "c" * 64
+        path_hash = seed["expected_path_sha256"]
+        review = {"source_id": checkpoint["source_id"],
+                  "source_watermark_sha256": checkpoint["source_watermark_sha256"],
+                  "review_sha256": "d" * 64,
+                  "paths": {path_hash: {"status": "changed_bytes", "legacy_sha256": "a" * 64,
+                                        "observed_sha256": "b" * 64}}}
+        accepted = MODULE.query_coverage_gates(seed, current, storage, proof, checkpoint, review)
+        self.assertTrue(accepted["passed"])
+        self.assertEqual(accepted["expected_source_body"]["observed_sha256"], "b" * 64)
+        self.assertEqual(accepted["same_byte_baseline_path_count"], 0)
+        for field, value in (("observed_sha256", "e" * 64), ("observed_sha256", None),
+                             ("legacy_sha256", "b" * 64), ("status", "source_file_missing"),
+                             ("status", "outside_configured_scope")):
+            bad_review = copy.deepcopy(review)
+            bad_review["paths"][path_hash][field] = value
+            self.assertFalse(MODULE.query_coverage_gates(
+                seed, current, storage, proof, checkpoint, bad_review)["passed"])
+        for field, value in (("body_sha256", "e" * 64), ("fts_body_matches", False),
+                             ("segment_matches", False), ("body_text_matches", False)):
+            bad_proof = copy.deepcopy(proof)
+            bad_proof["candidate"][0][field] = value
+            self.assertFalse(MODULE.query_coverage_gates(
+                seed, current, storage, bad_proof, checkpoint, review)["passed"])
+        self.assertFalse(MODULE.query_coverage_gates(
+            seed, current, {**storage, "results": storage["results"][1:]},
+            {**proof, "candidate": proof["candidate"][1:]}, checkpoint, review)["passed"])
+
     def test_restart_waits_for_authenticated_readback(self) -> None:
         unavailable = urllib.error.URLError(ConnectionRefusedError())
         with patch.object(MODULE, "source_state", side_effect=[
