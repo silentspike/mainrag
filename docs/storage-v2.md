@@ -917,6 +917,17 @@ integrity, latency and current package qualification still run normally. The
 durable source batch accepts PDF sources as well as filesystem, Git and managed
 append sources without changing their phase or result acceptance checks.
 
+Both PDF backends read one bounded source snapshot through application read
+accounting before parsing. The native MuPDF parser receives memory bytes rather
+than reopening the source file. Its structured page ranges, chunk content and
+path hashes retain the existing native format. Storage-v2 discovery returns the
+actual source bytes consumed; the final watermark scan contributes another
+measured read. These are application bytes, not physical device I/O. The native
+feature and composed watermark accounting are covered by required hosted CI.
+Switching from the fallback backend to MuPDF changes the existing backend-bound
+adapter profile and requires fresh PDF candidates; old candidates and their
+original profile evidence remain historical.
+
 Migration 085 validates bounded groups at explicit character locators in one
 source window. Rust retains canonical first-match positions using byte searches
 and one shared UTF-8 walk. The independent SQL check compares each exact segment
