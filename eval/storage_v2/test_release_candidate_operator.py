@@ -41,10 +41,13 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                  "server_instance_id": "later"}
         process = [SimpleNamespace(returncode=0, stdout="456\n"),
                    SimpleNamespace(returncode=0, stdout="100\n")]
-        with patch.object(MODULE.subprocess, "run", side_effect=process), \
-                patch.object(MODULE.time, "time", return_value=1000), \
-                patch.object(MODULE, "source_state", return_value=state):
-            self.assertEqual(MODULE.reconstructed_source_state("api", "token", checkpoint), state)
+        for status in ("verified", "release_candidate"):
+            checkpoint["reconstruction_evidence"]["generation_status"]=status
+            with patch.object(MODULE.subprocess, "run", side_effect=process), \
+                    patch.object(MODULE.time, "time", return_value=1000), \
+                    patch.object(MODULE, "source_state", return_value={**state,"status":status}):
+                self.assertEqual(MODULE.reconstructed_source_state("api", "token", checkpoint),
+                                 {**state,"status":status})
         with patch.object(MODULE.subprocess, "run", side_effect=process), \
                 patch.object(MODULE.time, "time", return_value=1000), \
                 patch.object(MODULE, "source_state", return_value={**state, "generation_id": 4}):

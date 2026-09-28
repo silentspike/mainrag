@@ -154,7 +154,7 @@ def restarted_source_state(api_url: str, token: str, source_id: int,
 def reconstructed_source_state(api_url: str, token: str, checkpoint: dict[str, Any]) -> dict[str, Any]:
     """Recheck a restart proven by persisted generation and live service ages."""
     proof = checkpoint.get("reconstruction_evidence")
-    if not isinstance(proof, dict) or proof.get("generation_status") != "verified" \
+    if not isinstance(proof, dict) or proof.get("generation_status") not in {"verified", "release_candidate"} \
             or proof.get("run_status") != "sealed" \
             or type(proof.get("generation_created_at_unix")) is not int:
         raise RuntimeError("reconstructed checkpoint lacks persisted restart proof")
