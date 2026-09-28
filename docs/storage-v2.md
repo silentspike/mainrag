@@ -891,6 +891,24 @@ The lexical read policy retains FORCE RLS and the existing write check, while
 computing the authorized visible source set once per scan. Explicit source checks
 and immutable-document/rank semantics remain required for both provenance paths.
 
+Migration 092 probes each query term once through the existing term index and
+intersects those postings with authorized corpus bindings before computing
+document frequency or scores. Both the original term and its digest remain
+required. Segment presence returns one authorized occurrence if either its
+copied projection or its correctly bound generated segments exist. It does not
+enumerate every segment. Complete result envelopes, full corpus statistics,
+rank precision, ties, function ownership, grants and configuration are unchanged.
+Definition guards reject unexpected function bodies and permit exact replay.
+
+A lost build checkpoint can be reconstructed read-only for a sealed verified or
+release-candidate generation, including the PDF adapter. This retains the
+original build commit and fixture identity, requires an exact live watermark
+and adapter match, and proves that the API restarted after the original build.
+Reconstruction does not qualify a candidate: frozen gold, source drift,
+integrity, latency and current package qualification still run normally. The
+durable source batch accepts PDF sources as well as filesystem, Git and managed
+append sources without changing their phase or result acceptance checks.
+
 Migration 085 validates bounded groups at explicit character locators in one
 source window. Rust retains canonical first-match positions using byte searches
 and one shared UTF-8 walk. The independent SQL check compares each exact segment

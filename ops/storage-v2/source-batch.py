@@ -75,7 +75,7 @@ def validate_plan(plan: dict) -> None:
     for source in plan["sources"]:
         sid = source.get("source_id")
         if type(sid) is not int or sid <= 0 or sid in seen \
-                or source.get("adapter") not in {"fs", "git", "managed_append"} \
+                or source.get("adapter") not in {"fs", "git", "managed_append", "pdf"} \
                 or not isinstance(source.get("failure_group"), str) \
                 or not NAME.fullmatch(source["failure_group"]) \
                 or type(source.get("planned_items")) is not int \
