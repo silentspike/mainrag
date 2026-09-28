@@ -1022,3 +1022,52 @@ SELECT node_id || ':' || id || ':' || encode(digest,'hex') FROM view_row;
         self.assertFalse(portable_context["candidate"][0]["fts_body_matches"])
         self.assertTrue(portable_context["candidate"][0]["segment_matches"])
         self.assertTrue(portable_context["candidate"][0]["legacy_segment_matches"])
+
+        # Query-scoped input gathering must preserve complete envelopes and
+        # copied token-boundary support after mutable legacy chunks are gone.
+        # Check both rank surfaces, duplicate/NULL requests, generated fallback,
+        # empty matches, authorization and unchanged function ownership/config.
+        scoped_before = [self.sql(request) for request in requests]
+        scoped_authority = self.sql(changed_metadata)
+        scoped_rank_requests = [
+            self.admin(
+                "SELECT COALESCE(jsonb_agg(to_jsonb(rank) ORDER BY occurrence_id),'[]'::JSONB) "
+                f"FROM {surface}(ARRAY[{boundary_occurrence},{partial_occurrence},"
+                f"{generated_occurrence},{boundary_occurrence},NULL,999999999]::BIGINT[],"
+                f"'{query}') rank"
+            )
+            for surface in ("storage_v2_source_segment_ranks",
+                            "storage_v2_source_segment_ranks_precise")
+            for query in ("alpha omega", "novel conjunction", "prefixonly alpha",
+                          "synthetic_no_lexical_matches")
+        ]
+        scoped_ranks = [self.sql(request) for request in scoped_rank_requests]
+        for _ in range(2):
+            self.file(schema.ROOT / "migrations/096_storage_v2_query_scoped_lexical_inputs.sql")
+            self.assertEqual([self.sql(request) for request in requests], scoped_before)
+            self.assertEqual(self.sql(changed_metadata), scoped_authority)
+            self.assertEqual([self.sql(request) for request in scoped_rank_requests], scoped_ranks)
+            self.assertEqual(self.exact_search(boundary_ast, source_id=23), boundary_result)
+            self.assertEqual(self.exact_search(new_conjunction, source_id=22), added)
+            self.assertEqual(self.sql(self.admin(rank_query)).splitlines(),
+                             [str(context_occurrence), str(generated_occurrence)])
+            denied = ("SET ROLE mainrag; SELECT occurrence_id FROM "
+                      "storage_v2_source_segment_ranks_precise("
+                      f"ARRAY[{boundary_occurrence},{partial_occurrence}]::BIGINT[],"
+                      "'alpha omega')")
+            self.assertEqual(self.sql(self.actor(schema.OTHER_ID, denied)), "")
+            self.assertEqual(json.loads(self.sql(self.admin(proof_sql.replace(
+                f"ARRAY[{boundary_chunk}]::BIGINT[]", "ARRAY[]::BIGINT[]")))), portable_proof)
+        self.assertEqual(self.sql(
+            "SELECT count(*) FROM logical_source WHERE active_generation_id IS NOT NULL"), "0")
+        self.sql("DROP INDEX idx_storage_v2_lexical_segment_source; "
+                 "CREATE INDEX idx_storage_v2_lexical_segment_source "
+                 "ON storage_v2_lexical_segment(source_id,artifact_version_id)")
+        mismatch = self.command(
+            "--file", str(schema.ROOT / "migrations/096_storage_v2_query_scoped_lexical_inputs.sql"),
+            check=False)
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertIn("source lexical input index definition differs", mismatch.stderr)
+        self.sql("DROP INDEX idx_storage_v2_lexical_segment_source")
+        self.file(schema.ROOT / "migrations/096_storage_v2_query_scoped_lexical_inputs.sql")
+        self.assertEqual([self.sql(request) for request in requests], scoped_before)
