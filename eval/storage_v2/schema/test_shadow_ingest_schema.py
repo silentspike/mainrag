@@ -1092,6 +1092,49 @@ SELECT storage_v2_verify_generation({generation_id}, '{'31' * 32}');
             "release_candidate:none",
         )
 
+        # A newer reader must requalify this immutable candidate without
+        # changing the build identity or losing the earlier accepted envelope.
+        self.file(ROOT / "migrations/088_storage_v2_candidate_requalification.sql")
+        import re
+        runtime=(ROOT / "api/src/services/shadow_slice.rs").read_text().split(
+            "pub async fn record_dual_read_evidence",1)[1]
+        selection=re.search(r'"(SELECT generation.id,.*?AND generation.status.*?)",',
+                            runtime,re.S).group(1).replace(chr(92)+chr(10),'')
+        selection=selection.replace('$1','10').replace('$2','1')
+        self.assertEqual(self.sql(self.admin(
+            f"SELECT count(*) FROM ({selection}) eligible")),"1")
+        old_row=self.sql(f"SELECT to_jsonb(e) FROM storage_v2_release_candidate_evidence e WHERE id='{evidence_id}'")
+        self.assertEqual(self.sql(self.admin(
+            "SELECT (storage_v2_record_dual_read_evidence("
+            f"'{dual_read_id}',10,{generation_id},'{'44' * 20}',"
+            f"'{watermark}','{'45' * 32}','{dual_read}'::JSONB)).id")),dual_read_id)
+        fresh_id="00000000-0000-4000-8000-000000000042"
+        fresh_manifest=json.dumps({"status":"PASS","checks":checks,
+                                   "reader_receipt":"synthetic-new-reader"})
+        qualify=("SELECT (storage_v2_qualify_release_candidate("
+                 f"'{fresh_id}',10,{generation_id},'{'44' * 20}','{watermark}',"
+                 "'fixture-adapter-v1','fixture-analysis-v1','fixture-search-v1',"
+                 f"'{fresh_manifest}'::JSONB)).id")
+        for _ in range(2):
+            self.assertEqual(self.sql(self.admin(qualify)),fresh_id)
+        self.assertEqual(self.sql(
+            f"SELECT evidence FROM storage_v2_release_candidate_evidence_history WHERE id='{evidence_id}'"),old_row)
+        self.assertEqual(self.sql("SELECT count(*) FROM storage_v2_release_candidate_evidence_history"),"1")
+        self.assertEqual(self.sql(self.actor(OTHER_ID,
+            "SET ROLE mainrag; SELECT count(*) FROM storage_v2_release_candidate_evidence_history")),"0")
+        self.assert_sql_fails("UPDATE storage_v2_release_candidate_evidence_history SET superseded_by=id",
+                              "qualification history is immutable")
+        self.assert_sql_fails(self.admin(qualify.replace(fresh_id,evidence_id)),
+                              "historical qualification identity cannot be reused")
+        self.assert_sql_fails(self.admin(qualify.replace(fresh_manifest,incomplete)),
+                              "all release-candidate qualification checks must pass")
+        self.assert_sql_fails(self.admin(qualify.replace("fixture-search-v1","changed-profile")),
+                              "evidence identity collision")
+        self.assertEqual(self.sql("SELECT count(*) FROM storage_v2_release_candidate_evidence_history"),"1")
+        self.assertEqual(self.sql(f"SELECT id FROM storage_v2_release_candidate_evidence WHERE generation_id={generation_id}"),fresh_id)
+        self.assertEqual(self.sql("SELECT count(*) FROM logical_source WHERE active_generation_id IS NOT NULL"),"0")
+        self.file(ROOT / "migrations/088_storage_v2_candidate_requalification.sql")
+
         replacement_node_id, replacement_view_id, replacement_digest = (
             self.make_projection("replacement candidate evidence")
         )
