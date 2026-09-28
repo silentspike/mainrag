@@ -17,6 +17,7 @@ pub struct FilesystemScopeProof {
 
 pub struct FilesystemScope {
     matcher: Option<GlobSet>,
+    #[cfg_attr(not(feature = "storage-v2-retrieval"), allow(dead_code))]
     pub proof: Option<FilesystemScopeProof>,
 }
 
@@ -92,6 +93,7 @@ impl FilesystemScope {
             .is_none_or(|matcher| matcher.is_match(relative))
     }
 
+    #[cfg_attr(not(feature = "storage-v2-retrieval"), allow(dead_code))]
     pub fn release_profile(&self) -> String {
         match &self.proof {
             None => "mainrag.fs-release-candidate.v2.fragment-1048576-newline-65536".to_string(),

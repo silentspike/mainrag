@@ -671,6 +671,7 @@ pub struct ReleaseWatermarkObservation {
 
 /// Observe the same release-adapter watermark used by candidate construction
 /// without allocating a generation or changing any persisted state.
+#[cfg(test)]
 pub async fn observe_release_watermark(
     source_id: i64,
     source_type: &str,
