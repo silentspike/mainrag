@@ -80,6 +80,52 @@ class CandidateAggregateAuditTests(unittest.TestCase):
                 "candidate_commit_sha": "b" * 40,
                 "sources": list(sources)}
 
+    def test_cut_manifest_and_complete_file_proof_keep_original_build_and_generation_identity(self) -> None:
+        import copy
+        import uuid
+        reviewed = source(1); candidate = reviewed["generations"][0]
+        manifest = candidate["qualification_manifest"]
+        original = {"cut":{"format":"mainrag.fs-read-cut.v1", "cut_id":str(uuid.uuid4()),
+                    "snapshot_uuid":str(uuid.uuid4()), "origin_uuid":str(uuid.uuid4()),
+                    "source_root_sha256":"2"*64, "descriptor_sha256":"4"*64, "captured_at_unix":1},
+                    "fixture_sha256":"5"*64,"item_count":2,"input_bytes":8}
+        current = copy.deepcopy(original); current["cut"].update(cut_id=str(uuid.uuid4()),
+            snapshot_uuid=str(uuid.uuid4()),descriptor_sha256="6"*64,captured_at_unix=2)
+        profile="mainrag.fs-release-candidate.v4.btrfs-cut-v1.scope-unfiltered.fragment-1048576-newline-65536"
+        candidate.update(adapter_profile_id=profile,filesystem_cut=original)
+        manifest["source_snapshot_review"]={"review_sha256":"1"*64,"source_watermark_sha256":"c"*64,
+            "source_root_sha256":"2"*64,"adapter_profile_id":profile,"item_count":2,
+            "filesystem_cut":current,"build_filesystem_cut":original,"status_counts":{"changed_bytes":1}}
+        manifest["gold_suite_summary"].update(source_snapshot_review_sha256="1"*64,
+            source_snapshot_gold_review_sha256="3"*64)
+        for query in manifest["query_results"]:
+            query.update(expected_in_storage_v2=True)
+            query["coverage"]={"passed":True,"policy":"simple-conjunction-source-snapshot-v1",
+                "source_snapshot_review_sha256":"1"*64,"baseline_paths_retained_in_order":True,
+                "all_candidate_hits_supported":True,"all_current_hits_supported":True,
+                "same_byte_baseline_path_count":0,"stale_baseline_path_count":1}
+        complete={"schema_version":"mainrag.storage-v2.complete-source-file.v1",
+            "source_id":1,"generation_id":candidate["generation_id"],"generation_seq":candidate["generation_seq"],
+            "commit_sha":candidate["commit_sha"],"path_sha256":"7"*64,"body_sha256":"8"*64,
+            "item_manifest_sha256":"9"*64,"fragment_count":2,"logical_bytes":8,"byte_start":0,"byte_end":8,
+            "all_fragments_verified":True}
+        manifest["query_results"][0]["coverage"]["expected_source_body"]={
+            "schema_version":"mainrag.storage-v2.expected-source-body.v2","path_sha256":"7"*64,
+            "observed_sha256":"8"*64,"legacy_sha256":"a"*64,"body_sha256":"8"*64,
+            "source_status":"changed_bytes","query_body_match":True,
+            "source_snapshot_review_sha256":"1"*64,"complete_source_file":complete}
+        inventory=self.inventory(reviewed,source(2,benchmark=True))
+        result,_=AUDIT.audit(inventory,"e"*64);self.assertTrue(result["persisted_candidate_set_complete"])
+        current["input_bytes"]=9
+        rejected,_=AUDIT.audit(inventory,"e"*64)
+        self.assertIn("source_snapshot_cut_invalid",rejected["persisted_gate_blockers"])
+        current["input_bytes"]=8;complete["generation_id"]+=1
+        rejected,_=AUDIT.audit(inventory,"e"*64)
+        self.assertIn("source_file_proof_generation_mismatch",rejected["persisted_gate_blockers"])
+        complete["generation_id"]-=1;complete["byte_end"]=7
+        rejected,_=AUDIT.audit(inventory,"e"*64)
+        self.assertIn("expected_source_file_proof_invalid",rejected["persisted_gate_blockers"])
+
     def test_complete_persisted_shape_remains_observed_only(self) -> None:
         inventory = self.inventory(source(1), source(2, benchmark=True))
         protected, public = AUDIT.audit(inventory, "e" * 64)

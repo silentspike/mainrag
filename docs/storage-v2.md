@@ -897,3 +897,43 @@ and one shared UTF-8 walk. The independent SQL check compares each exact segment
 against the immutable document, retaining all hash/vector/collision checks. The
 previous writer remains available when a canonical group spans over eight million
 characters. Existing immutable segment identities remain compatible.
+
+## Explicit filesystem cuts and complete-file proof
+
+An explicitly configured `btrfs-cut-v1` filesystem source retains its registered
+root, relative item identities and exact file filters. Its release profile is
+`mainrag.fs-release-candidate.v4.btrfs-cut-v1.scope-<digest-or-unfiltered>.fragment-1048576-newline-65536`.
+The privileged producer accepts only an allowlisted root digest. Readers verify
+root-owned immutable descriptor history, actual snapshot and origin UUIDs, and
+the kernel read-only property. A mutable current descriptor cannot redirect an
+ongoing read. Nonrecursive snapshots with nested source subvolumes are rejected.
+Nontext conversation files are rejected rather than silently omitted.
+
+The administrative configuration transition uses root and configuration digest
+comparison, preserves every other configuration value, and rejects a profile
+change on an active source. Source review reads the same pinned cut independently.
+The full fixture digest, item count, byte count, registered-root digest and source
+watermark bind that review to the build witness and aggregate qualification.
+Different captures of identical complete source bytes may reuse an immutable
+build; the original build cut and commit remain preserved in the evidence.
+
+Changed fragmented files need more than one fragment hash. A requested complete
+file proof verifies each stored body under a pack reader epoch, checks contiguous
+byte ranges, and hashes their ordered decoded bytes with bounded row and I/O
+buffers. The resulting whole-file digest must match the independently frozen
+source review. Query support still requires a matching returned body and lexical
+segment. Qualification caches this file proof within its attempt. A missing,
+reordered, overlapping, corrupted or foreign-generation proof fails acceptance.
+
+Legacy compatibility ranks use a double precision tier so close original REAL
+FTS ranks remain distinguishable. The historical REAL function stays available.
+Query matches are gathered once within authorized requested sources, with narrow
+rank tuples; immutable hit identities are hydrated only at the exact score and
+tie-key boundary. Corpus normalization, complete scoped evaluation, authorization,
+final total order and latency limits remain unchanged.
+
+Regular active ingest captures a fresh cut after checking the complete active
+set. Legacy incremental filesystem ingest cannot substitute for this contract.
+Cuts, failed capture intents and original descriptors remain owned until their
+explicit manifest cleanup. This feature alone does not establish production
+qualification, activation, recovery or cleanup acceptance.

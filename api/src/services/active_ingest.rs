@@ -218,6 +218,13 @@ where
         == Some(observation.source_watermark_sha256.as_str())
         && witness["adapter_profile_id"].as_str() == Some(observation.adapter_profile_id.as_str())
     {
+        let mut source_io = json!({
+            "application_read_bytes":observation.application_read_bytes,
+            "logical_input_bytes":observation.input_bytes,"device_read_bytes":null,
+        });
+        if let Some(cut) = observation.filesystem_cut {
+            source_io["filesystem_cut"] = serde_json::to_value(cut)?;
+        }
         return Ok(ActiveIngestPreparation::NoChange(ActiveIngestResult {
             status: "NO_CHANGE",
             sync_mode: if source_type == "managed_append" {
@@ -230,11 +237,7 @@ where
             generation_seq: source.get("generation_seq"),
             item_count: observation.item_count,
             changed_item_count: 0,
-            source_io: json!({
-                "application_read_bytes": observation.application_read_bytes,
-                "logical_input_bytes": observation.input_bytes,
-                "device_read_bytes": null,
-            }),
+            source_io,
             telemetry: json!({"generation_reused": true}),
             receipt: None,
         }));
@@ -394,6 +397,10 @@ where
             .await?
             .get::<_, i64>(0),
     )?;
+    let mut source_io = built.telemetry["source_io"].clone();
+    if let Some(cut) = built.filesystem_cut {
+        source_io["filesystem_cut"] = serde_json::to_value(cut)?;
+    }
     Ok(ActiveIngestResult {
         status: "ACTIVE_INGEST_COMMITTED",
         sync_mode: if source_type == "managed_append" {
@@ -406,7 +413,7 @@ where
         generation_seq: built.generation_seq,
         item_count: built.item_count,
         changed_item_count,
-        source_io: built.telemetry["source_io"].clone(),
+        source_io,
         telemetry: built.telemetry,
         receipt: Some(receipt),
     })

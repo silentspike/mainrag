@@ -47,6 +47,7 @@ LEFT JOIN LATERAL (
         'generation_seq', generation.generation_seq,
         'status', generation.status::text,
         'item_count', generation.item_count,
+        'filesystem_cut', generation.witness -> 'filesystem_cut',
         'verification_manifest_sha256', generation.verification_manifest_sha256,
         'evidence_id', evidence.id,
         'commit_sha', evidence.commit_sha,

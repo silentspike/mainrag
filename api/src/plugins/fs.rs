@@ -71,6 +71,7 @@ const BINARY_SIGNATURES: &[&[u8]] = &[
 
 pub struct FilesystemPlugin {
     scope: super::fs_scope::FilesystemScope,
+    cut: std::sync::Mutex<Option<super::fs_cut::ReadCut>>,
 }
 
 impl Default for FilesystemPlugin {
@@ -87,6 +88,7 @@ impl FilesystemPlugin {
     pub fn with_config(config: &serde_json::Value) -> anyhow::Result<Self> {
         Ok(Self {
             scope: super::fs_scope::FilesystemScope::from_config(config)?,
+            cut: std::sync::Mutex::new(None),
         })
     }
 }
@@ -172,6 +174,10 @@ async fn check_if_binary(
 #[async_trait]
 impl SourcePlugin for FilesystemPlugin {
     async fn sync(&self, source_path: &str) -> anyhow::Result<SyncResult> {
+        anyhow::ensure!(
+            !self.scope.cut_consistency,
+            "immutable filesystem cuts require the storage-v2 source path"
+        );
         let path = Path::new(source_path);
 
         if !path.exists() {
@@ -199,7 +205,8 @@ impl SourcePlugin for FilesystemPlugin {
     }
 
     async fn sync_for_storage_v2(&self, source_path: &str) -> anyhow::Result<SyncResult> {
-        let path = Path::new(source_path);
+        let selected = self.read_root(Path::new(source_path)).await?;
+        let path = selected.as_path();
 
         if !path.exists() {
             return Err(anyhow::anyhow!("Path does not exist: {}", source_path));
@@ -210,15 +217,8 @@ impl SourcePlugin for FilesystemPlugin {
 
         let mut files = vec![];
         let mut errors = vec![];
-        self.collect_files(
-            path,
-            Path::new(source_path),
-            &mut files,
-            &mut errors,
-            false,
-            None,
-        )
-        .await?;
+        self.collect_files(path, path, &mut files, &mut errors, false, None)
+            .await?;
         Ok(SyncResult { files, errors })
     }
 
@@ -236,15 +236,63 @@ impl SourcePlugin for FilesystemPlugin {
     fn source_type(&self) -> &'static str {
         "fs"
     }
+
+    fn filesystem_cut(&self) -> Option<super::fs_cut::CutProof> {
+        self.cut.lock().ok()?.as_ref().map(|cut| cut.proof.clone())
+    }
 }
 
 impl FilesystemPlugin {
+    async fn read_root(&self, registered: &Path) -> anyhow::Result<PathBuf> {
+        if !self.scope.cut_consistency {
+            return Ok(registered.to_path_buf());
+        }
+        let registered = registered.to_path_buf();
+        let cached = self
+            .cut
+            .lock()
+            .map_err(|_| anyhow::anyhow!("source-cut lock poisoned"))?
+            .clone();
+        let selected = tokio::task::spawn_blocking(move || {
+            if let Some(cut) = cached {
+                anyhow::ensure!(
+                    super::fs_cut::root_digest(&registered)? == cut.proof.source_root_sha256,
+                    "filesystem plugin cannot reuse a cut for another source"
+                );
+                cut.validate_pinned()?;
+                Ok(cut)
+            } else {
+                super::fs_cut::ReadCut::select(&registered)
+            }
+        })
+        .await??;
+        let root = selected.read_root.clone();
+        let mut cached = self
+            .cut
+            .lock()
+            .map_err(|_| anyhow::anyhow!("source-cut lock poisoned"))?;
+        if let Some(previous) = cached.as_ref() {
+            anyhow::ensure!(
+                previous.proof == selected.proof,
+                "source-cut selection raced"
+            );
+        } else {
+            *cached = Some(selected);
+        }
+        Ok(root)
+    }
+
     async fn observe(
         &self,
         source_path: &str,
         load_content: bool,
     ) -> anyhow::Result<ObservedSyncResult> {
-        let path = Path::new(source_path);
+        anyhow::ensure!(
+            !load_content || !self.scope.cut_consistency,
+            "immutable filesystem cuts require the storage-v2 source path"
+        );
+        let selected = self.read_root(Path::new(source_path)).await?;
+        let path = selected.as_path();
         anyhow::ensure!(path.is_dir(), "source root is not an accessible directory");
         let accounting = ReadAccounting::filesystem_adapter();
         let mut files = Vec::new();
@@ -363,7 +411,16 @@ impl FilesystemPlugin {
 
             // Binary check
             match check_if_binary(&path, !load_content, accounting).await {
-                Ok(true) => continue, // Skip binary silently
+                Ok(true) => {
+                    if self.scope.cut_consistency
+                        && path
+                            .extension()
+                            .is_some_and(|extension| extension == "jsonl" || extension == "json")
+                    {
+                        anyhow::bail!("selected conversation cut contains a nontext source item");
+                    }
+                    continue;
+                }
                 Err(e) => {
                     let err = format!("Failed to check binary status {}: {}", path.display(), e);
                     warn!("{}", err);

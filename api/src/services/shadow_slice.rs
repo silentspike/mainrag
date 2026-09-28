@@ -185,6 +185,8 @@ pub struct ShadowSliceResult {
     pub active_generation_before: Option<i64>,
     pub active_generation_after: Option<i64>,
     pub telemetry: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_cut: Option<plugins::fs_cut::CutObservation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -231,12 +233,18 @@ pub struct CandidateQueryEvidenceInput {
     pub query: String,
     pub candidate_occurrence_ids: Vec<i64>,
     pub current_chunk_ids: Vec<i64>,
+    #[serde(default)]
+    pub complete_source_path_sha256: Option<String>,
 }
 
 fn validate_candidate_query_evidence(input: &CandidateQueryEvidenceInput) -> Result<()> {
     let terms: Vec<&str> = input.query.split(' ').collect();
     if input.generation_id <= 0
         || !is_git_sha(&input.commit_sha)
+        || input
+            .complete_source_path_sha256
+            .as_deref()
+            .is_some_and(|hash| !is_sha256(hash))
         || input.query.len() > 128
         || terms.is_empty()
         || terms.len() > 8
@@ -266,6 +274,8 @@ pub async fn candidate_query_evidence<C>(
     client: &C,
     source_id: i64,
     input: &CandidateQueryEvidenceInput,
+    pack_root: &Path,
+    io_buffer_bytes: usize,
 ) -> Result<serde_json::Value>
 where
     C: GenericClient + Sync,
@@ -287,8 +297,34 @@ where
             ],
         )
         .await?;
-    Ok(row.get(0))
+    let mut evidence: serde_json::Value = row.get(0);
+    if let Some(path_sha) = &input.complete_source_path_sha256 {
+        if !evidence["candidate"]
+            .as_array()
+            .context("candidate evidence omitted hits")?
+            .iter()
+            .any(|hit| hit["path_sha256"].as_str() == Some(path_sha))
+        {
+            bail!("complete source proof requires a returned candidate path");
+        }
+        evidence["complete_source_file"] = content_body::with_reader_epoch(
+            client,
+            source_file_proof::complete_source_file(
+                client,
+                source_id,
+                input,
+                &evidence,
+                path_sha,
+                pack_root,
+                io_buffer_bytes,
+            ),
+        )
+        .await?;
+    }
+    Ok(evidence)
 }
+
+mod source_file_proof;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReleaseCandidateVerifyResult {
@@ -697,6 +733,8 @@ pub struct ReleaseWatermarkObservation {
     pub application_read_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filesystem_scope: Option<plugins::fs_scope::FilesystemScopeProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_cut: Option<plugins::fs_cut::CutObservation>,
 }
 
 /// Observe the same release-adapter watermark used by candidate construction
@@ -768,17 +806,18 @@ async fn observe_configured_watermark_with_prefix(
         .to_str()
         .context("release source path is not UTF-8")?;
     let adapter_profile = configured_release_adapter_profile(source_type, config)?;
-    let (observed, managed_identities) = if source_type == "managed_append" {
+    let (observed, managed_identities, filesystem_cut) = if source_type == "managed_append" {
         let snapshot =
             plugins::managed_append::read_snapshot(source_path, trusted_prefix, full_comparison)
                 .await?;
-        (snapshot.observed, Some(snapshot.identities))
+        (snapshot.observed, Some(snapshot.identities), None)
     } else {
         let plugin = plugins::get_configured_plugin(source_type, config)?
             .context("release source adapter is unavailable")?;
         (
             plugin.sync_for_storage_v2_observed(source_path).await?,
             None,
+            plugin.filesystem_cut(),
         )
     };
     let adapter_bytes = observed.application_read_bytes;
@@ -836,6 +875,12 @@ async fn observe_configured_watermark_with_prefix(
         } else {
             None
         },
+        filesystem_cut: filesystem_cut.map(|cut| plugins::fs_cut::CutObservation {
+            cut,
+            fixture_sha256: manifest_sha256.clone(),
+            item_count: files.len(),
+            input_bytes,
+        }),
     })
 }
 
@@ -1029,7 +1074,15 @@ where
         SliceMode::PublicFixture => "public-fixture",
         SliceMode::ReleaseCandidate => "release-candidate-build",
     };
-    let witness = json!({
+    let filesystem_cut = plugin
+        .filesystem_cut()
+        .map(|cut| plugins::fs_cut::CutObservation {
+            cut,
+            fixture_sha256: fixture_sha256.clone(),
+            item_count: files.len(),
+            input_bytes,
+        });
+    let mut witness = json!({
         "kind": witness_kind,
         "fixture_sha256": fixture_sha256.clone(),
         "source_watermark_sha256": source_watermark_sha256.clone(),
@@ -1037,16 +1090,21 @@ where
         "is_test": is_test,
         "adapter_profile_id": adapter_profile,
     });
+    if let Some(cut) = &filesystem_cut {
+        witness["filesystem_cut"] = serde_json::to_value(cut)?;
+    }
     let idempotency_domain = match mode {
         SliceMode::PublicFixture => "mainrag.storage-v2.shadow-snapshot.v1",
         SliceMode::ReleaseCandidate => "mainrag.storage-v2.release-candidate-build.v1",
     };
-    let idempotency_key = hex::encode(Sha256::digest(
-        format!(
-            "{idempotency_domain}:{source_id}:{predecessor_generation_id}:{source_watermark_sha256}:{adapter_profile}:{commit_sha}"
-        )
-        .as_bytes(),
-    ));
+    let mut idempotency_identity=format!(
+        "{idempotency_domain}:{source_id}:{predecessor_generation_id}:{source_watermark_sha256}:{adapter_profile}:{commit_sha}"
+    );
+    if let Some(cut) = &filesystem_cut {
+        idempotency_identity.push(':');
+        idempotency_identity.push_str(&cut.cut.descriptor_sha256);
+    }
+    let idempotency_key = hex::encode(Sha256::digest(idempotency_identity.as_bytes()));
     let begin_started = Instant::now();
     let run = generation_ingest::begin_shadow_ingest(
         client,
@@ -1067,7 +1125,7 @@ where
         let reuse_lookup_started = Instant::now();
         let generation = client
             .query_one(
-                "SELECT generation_seq, status::TEXT AS status \
+                "SELECT generation_seq, status::TEXT AS status, witness \
                  FROM source_generation WHERE id=$1 AND source_id=$2",
                 &[&run.generation_id, &source_id],
             )
@@ -1077,6 +1135,21 @@ where
             "verified" | "release_candidate"
         ) {
             bail!("idempotent storage-v2 run exists but its generation is not qualified");
+        }
+        let reused_witness: serde_json::Value = generation.get("witness");
+        let original_cut: Option<plugins::fs_cut::CutObservation> = reused_witness
+            .get("filesystem_cut")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()?;
+        match (&filesystem_cut, &original_cut) {
+            (Some(current), Some(original))
+                if current.fixture_sha256 == original.fixture_sha256
+                    && current.item_count == original.item_count
+                    && current.input_bytes == original.input_bytes
+                    && current.cut.source_root_sha256 == original.cut.source_root_sha256 => {}
+            (None, None) => {}
+            _ => bail!("reused source generation differs from the complete cut manifest"),
         }
         if let Some((epoch, chain, _)) = &managed_identity {
             if managed_frontier
@@ -1167,6 +1240,7 @@ where
             active_generation_before,
             active_generation_after,
             telemetry: measurements.to_telemetry_json(),
+            filesystem_cut: original_cut,
         });
     }
     if run.status != "building" {
@@ -1986,6 +2060,7 @@ where
         active_generation_before,
         active_generation_after,
         telemetry: measurements.to_telemetry_json(),
+        filesystem_cut,
     })
 }
 
@@ -2341,6 +2416,15 @@ fn verify_stored_body_row(
     pack_root: &Path,
     io_buffer_bytes: usize,
 ) -> Result<u64> {
+    deliver_stored_body_row(row, pack_root, io_buffer_bytes, None)
+}
+
+fn deliver_stored_body_row(
+    row: &tokio_postgres::Row,
+    pack_root: &Path,
+    io_buffer_bytes: usize,
+    writer: Option<&mut dyn std::io::Write>,
+) -> Result<u64> {
     if row.get::<_, String>("digest_algorithm") != "sha256-v1" {
         bail!("candidate body uses an unsupported digest algorithm");
     }
@@ -2355,6 +2439,9 @@ fn verify_stored_body_row(
             || <[u8; 32]>::from(Sha256::digest(&bytes)) != digest
         {
             bail!("candidate inline body failed full digest verification");
+        }
+        if let Some(writer) = writer {
+            writer.write_all(&bytes)?;
         }
         return Ok(logical_length);
     }
@@ -2435,11 +2522,22 @@ fn verify_stored_body_row(
                 .context("candidate packed body omitted its pack length")?,
         )?,
     );
-    reader.verify_integrity(
-        &entry,
-        dictionary.as_ref().map(|(_, bytes)| *bytes),
-        io_buffer_bytes,
-    )?;
+    if let Some(writer) = writer {
+        reader
+            .verify_to_staging(
+                &entry,
+                dictionary.as_ref().map(|(_, bytes)| *bytes),
+                pack_root,
+                io_buffer_bytes,
+            )?
+            .copy_to(writer)?;
+    } else {
+        reader.verify_integrity(
+            &entry,
+            dictionary.as_ref().map(|(_, bytes)| *bytes),
+            io_buffer_bytes,
+        )?;
+    }
     Ok(logical_length)
 }
 
@@ -3199,6 +3297,7 @@ mod tests {
             query: "fixture_123".into(),
             candidate_occurrence_ids: vec![1, 2],
             current_chunk_ids: vec![1, 3],
+            complete_source_path_sha256: None,
         };
         assert!(validate_candidate_query_evidence(&input).is_ok());
         let mut conjunction = input.clone();

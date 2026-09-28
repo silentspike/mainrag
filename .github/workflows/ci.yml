@@ -109,7 +109,16 @@ jobs:
         shell: bash
         run: |
           cargo test -p mainrag-api --features storage-v2-retrieval --lib fs_scope -- --nocapture | tee fs-scope-tests.log
-          python3 -c 'from pathlib import Path; assert "3 passed; 0 failed; 0 ignored;" in Path("fs-scope-tests.log").read_text(), "Expected all filesystem scope regressions to execute"'
+          python3 -c 'from pathlib import Path; assert "4 passed; 0 failed; 0 ignored;" in Path("fs-scope-tests.log").read_text(), "Expected all filesystem scope regressions to execute"'
+      - name: Verify immutable source cuts and complete fragment proof
+        shell: bash
+        run: |
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib fs_cut -- --nocapture | tee fs-cut-tests.log
+          python3 -c 'from pathlib import Path; assert "3 passed; 0 failed; 0 ignored;" in Path("fs-cut-tests.log").read_text(), "Expected all cut authority regressions to execute"'
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib source_file_proof -- --nocapture | tee source-file-tests.log
+          python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("source-file-tests.log").read_text(), "Expected complete fragment proof regression to execute"'
+          cargo test -p mainrag-api --features storage-v2-retrieval --bin mainrag-api api::handlers::admin::fs_cut -- --nocapture | tee cut-config-tests.log
+          python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("cut-config-tests.log").read_text(), "Expected the source configuration CAS regression to execute"'
       - name: Verify character boundaries and durable attempt progress
         shell: bash
         run: |
@@ -392,6 +401,7 @@ jobs:
               'eval.storage_v2.schema.test_content_schema',
               'eval.storage_v2.schema.test_pack_epoch_fence',
               'eval.storage_v2.schema.test_query_coverage_evidence.QueryCoverageTests.test_y_source_backed_postgres_lexeme_keeps_chunk_order_without_legacy_reads',
+              'eval.storage_v2.schema.test_shadow_ingest_schema.ShadowIngestSchemaTests.test_filesystem_cut_qualification_binds_original_build_and_current_full_manifest',
               'eval.storage_v2.schema.benchmark_staging_projection_reuse.StagingProjectionBenchmark.test_projection_reuse_at_two_document_sizes',
           ])
           assert suite.countTestCases() >= 32, 'Expected search, pack reader-fence, append frontier and lexical window regressions'

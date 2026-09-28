@@ -716,6 +716,44 @@ SELECT node_id || ':' || id || ':' || encode(digest,'hex') FROM view_row;
         self.assertEqual(self.sql("SELECT relforcerowsecurity FROM pg_class WHERE oid='storage_v2_lexical_segment'::REGCLASS"),"t")
         self.assert_sql_fails(self.actor(schema.OTHER_ID,batch),"authorized source-backed lexical segment required")
 
+        # A fragment has a different hash from the legacy whole file. Rank
+        # materialization must precede the contiguous-copy early return.
+        fragment_prefix=("BEGIN; ALTER TABLE storage_v2_legacy_lexical_segment DISABLE TRIGGER "
+            "storage_v2_legacy_lexical_segment_immutable; "
+            f"DELETE FROM storage_v2_legacy_lexical_segment WHERE occurrence_id={known_occurrence}; "
+            f"UPDATE files SET hash=digest('alpha visible whole-file suffix','sha256'), "
+            f"content_text='alpha visible whole-file suffix' WHERE id={known_file}; ")
+        fragment_probe=(fragment_prefix+self.admin(
+            f"SELECT storage_v2_copy_legacy_lexical_segments({known_occurrence},{known_artifact}); ")
+            +f" RESET ROLE; SELECT count(*) FROM storage_v2_legacy_lexical_segment WHERE occurrence_id={known_occurrence}; ROLLBACK;")
+        self.assertEqual(self.sql(fragment_probe).splitlines()[-1],"0")
+        old_rank_definition=self.sql("SELECT pg_get_functiondef('storage_v2_source_segment_ranks(bigint[],text)'::REGPROCEDURE)")
+        stable_source_requests=[request for request in requests if "(15," in request]
+        stable_envelopes=[self.sql(request) for request in stable_source_requests]
+        self.file(schema.ROOT / "migrations/089_storage_v2_fragment_rank_precision.sql")
+        self.sql("GRANT EXECUTE ON FUNCTION storage_v2_source_segment_ranks_precise(BIGINT[],TEXT) TO storage_v2_shadow_worker")
+        self.assertEqual(self.sql(fragment_probe).splitlines()[-1],"2")
+        self.assertEqual([self.sql(request) for request in stable_source_requests],stable_envelopes)
+        self.assertEqual(self.sql("SELECT pg_get_functiondef('storage_v2_source_segment_ranks(bigint[],text)'::REGPROCEDURE)"),old_rank_definition)
+        self.assertEqual(self.sql(metadata),authority)
+        self.assertEqual(self.sql(self.actor(schema.OTHER_ID,rank_request.replace(
+            "storage_v2_source_segment_ranks(","storage_v2_source_segment_ranks_precise("))),"[]")
+
+        # Two close proximity ranks collapse inside a REAL million-point tier.
+        # The precise surface must select the stronger rank before the tie key.
+        precision_prefix=("BEGIN; ALTER TABLE storage_v2_legacy_lexical_segment DISABLE TRIGGER "
+            "storage_v2_legacy_lexical_segment_immutable; "
+            f"DELETE FROM storage_v2_legacy_lexical_segment WHERE occurrence_id={occurrence}; "
+            "INSERT INTO storage_v2_legacy_lexical_segment(occurrence_id,source_id,artifact_version_id,legacy_chunk_id,legacy_file_hash,fts_vector) VALUES "
+            f"({occurrence},19,{artifact},9001,digest('foo_3d alpha','sha256'),to_tsvector('simple','foo '||repeat('x ',32)||'alpha')),"
+            f"({occurrence},19,{artifact},9002,digest('foo_3d alpha','sha256'),to_tsvector('simple','foo '||repeat('x ',31)||'alpha')); ")
+        order_probe=self.admin(
+            f"SELECT segment_order FROM storage_v2_source_segment_ranks(ARRAY[{occurrence}]::BIGINT[],'foo alpha'); "
+            f"SELECT segment_order FROM storage_v2_source_segment_ranks_precise(ARRAY[{occurrence}]::BIGINT[],'foo alpha');")
+        self.assertEqual(self.sql(precision_prefix+order_probe+" ROLLBACK;").splitlines(),["9001","9002"])
+        self.file(schema.ROOT / "migrations/089_storage_v2_fragment_rank_precision.sql")
+        self.assertEqual(self.sql(metadata),authority)
+
         self.assertEqual(json.loads(self.sql(self.admin(verify_window)))["invalid_count"],0)
 
         # Corruption is injected only in a disposable fixture transaction.
