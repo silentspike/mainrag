@@ -928,3 +928,17 @@ build is unnecessary when Rust inputs and the executable are unchanged. Capture
 the previous function definition, owner and grants, retain failed trials, execute
 a transactional rollback/readback, and requalify preserved generations with the
 same frozen gold and unchanged latency ceiling before admitting further runs.
+
+### Complete scoring and late hit identities
+
+Migration 087 keeps both named and active reads on the complete authorized
+scoring scope. Shared posting/statistics bindings carry only their needed
+columns. Generated-segment provenance is checked after excluding legacy
+projections, and occurrence/document guards precede the segment expansion.
+The lexical query is constructed once per rank call.
+
+External hit identities are hydrated after finding the exact top-k boundary
+in score and lexical sort key. All ties at that boundary are included before
+applying the unchanged external identity and occurrence ID order. Full counts,
+normalization, score explanations, content and authorization remain unchanged.
+This does not reuse a failed latency result or relax qualification limits.
