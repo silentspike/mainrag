@@ -9,6 +9,7 @@ use async_trait::async_trait;
 
 pub mod export;
 pub mod fs;
+pub mod fs_cut;
 pub mod fs_scope;
 pub mod git;
 #[cfg(feature = "storage-v2-retrieval")]
@@ -69,6 +70,10 @@ pub struct RawFileRange {
 /// Plugin trait for source handling
 #[async_trait]
 pub trait SourcePlugin: Send + Sync {
+    #[cfg(feature = "storage-v2-shadow-ingest")]
+    fn filesystem_cut(&self) -> Option<fs_cut::CutProof> {
+        None
+    }
     /// Sync source and return files
     async fn sync(&self, source_path: &str) -> anyhow::Result<SyncResult>;
 

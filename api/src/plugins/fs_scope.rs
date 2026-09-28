@@ -17,6 +17,7 @@ pub struct FilesystemScopeProof {
 
 pub struct FilesystemScope {
     matcher: Option<GlobSet>,
+    pub cut_consistency: bool,
     #[cfg_attr(not(feature = "storage-v2-retrieval"), allow(dead_code))]
     pub proof: Option<FilesystemScopeProof>,
 }
@@ -35,9 +36,15 @@ impl FilesystemScope {
         if !config.is_null() && !config.is_object() {
             bail!("filesystem source config must be an object or null");
         }
+        let cut_consistency = match config.get("filesystem_consistency") {
+            None => false,
+            Some(Value::String(kind)) if kind == super::fs_cut::KIND => true,
+            Some(_) => bail!("unsupported filesystem consistency contract"),
+        };
         let Some(patterns) = config.get("file_patterns") else {
             return Ok(Self {
                 matcher: None,
+                cut_consistency,
                 proof: None,
             });
         };
@@ -78,6 +85,7 @@ impl FilesystemScope {
         digest.update(serde_json::to_vec(&(&values, &byte_regexes))?);
         Ok(Self {
             matcher: Some(builder.build()?),
+            cut_consistency,
             proof: Some(FilesystemScopeProof {
                 format: "mainrag.fs-scope.v1".to_string(),
                 patterns: values,
@@ -100,6 +108,9 @@ impl FilesystemScope {
         root: &Path,
         requested: &Path,
     ) -> Result<Option<(PathBuf, String)>> {
+        if self.cut_consistency {
+            bail!("immutable source-cut consistency requires full storage-v2 ingest");
+        }
         let relative = if requested.is_absolute() {
             requested
                 .strip_prefix(root)
@@ -147,6 +158,12 @@ impl FilesystemScope {
 
     #[cfg_attr(not(feature = "storage-v2-retrieval"), allow(dead_code))]
     pub fn release_profile(&self) -> String {
+        if self.cut_consistency {
+            return format!(
+                "mainrag.fs-release-candidate.v4.btrfs-cut-v1.scope-{}.fragment-1048576-newline-65536",
+                self.proof.as_ref().map(|proof| proof.sha256.as_str()).unwrap_or("unfiltered")
+            );
+        }
         match &self.proof {
             None => "mainrag.fs-release-candidate.v2.fragment-1048576-newline-65536".to_string(),
             Some(proof) => format!(
@@ -161,6 +178,23 @@ impl FilesystemScope {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn explicit_cut_profile_retains_the_registered_filter_and_rejects_unknown_kinds() {
+        let original = FilesystemScope::from_config(&json!({"file_patterns":["*.jsonl"]})).unwrap();
+        let selected = FilesystemScope::from_config(&json!({"file_patterns":["*.jsonl"],
+            "filesystem_consistency":super::super::fs_cut::KIND}))
+        .unwrap();
+        assert_eq!(original.proof, selected.proof);
+        assert!(selected.includes(Path::new("nested/active.jsonl")));
+        assert!(!selected.includes(Path::new("excluded.txt")));
+        assert!(selected
+            .release_profile()
+            .starts_with("mainrag.fs-release-candidate.v4.btrfs-cut-v1.scope-"));
+        assert!(
+            FilesystemScope::from_config(&json!({"filesystem_consistency":"unknown"})).is_err()
+        );
+    }
 
     #[tokio::test]
     async fn incremental_selection_rejects_external_and_symlink_paths_before_read() {
