@@ -46,12 +46,16 @@ pub struct BuildProgressRecorder {
     inner: Mutex<Inner>,
 }
 
-fn directory(root: &Path) -> Result<PathBuf> {
+fn directory(root: &Path, create: bool) -> Result<PathBuf> {
     let directory = root.join(".build-progress");
-    match fs::create_dir(&directory) {
-        Ok(()) => fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
-        Err(error) => return Err(error.into()),
+    if create {
+        // A first candidate may precede the content store's pack-root creation.
+        fs::create_dir_all(root)?;
+        match fs::create_dir(&directory) {
+            Ok(()) => fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(error.into()),
+        }
     }
     let metadata = fs::symlink_metadata(&directory)?;
     if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 {
@@ -76,7 +80,7 @@ impl BuildProgressRecorder {
         {
             bail!("exact build progress identity required");
         }
-        let path = directory(root)?.join(format!("{attempt}.json"));
+        let path = directory(root, true)?.join(format!("{attempt}.json"));
         let value = BuildProgress {
             schema_version: "mainrag.storage-v2.build-progress.v1".into(),
             attempt_id: attempt,
@@ -225,7 +229,7 @@ impl Drop for BuildProgressRecorder {
 }
 
 pub fn read(root: &Path, source_id: i64, commit: &str, attempt: Uuid) -> Result<BuildProgress> {
-    let path = directory(root)?.join(format!("{attempt}.json"));
+    let path = directory(root, false)?.join(format!("{attempt}.json"));
     let input = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
@@ -250,27 +254,24 @@ mod tests {
     use super::*;
     #[test]
     fn attempt_progress_survives_reopen_without_claiming_commit() -> Result<()> {
-        let root = tempfile::tempdir()?;
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().join("initially-missing-packs");
         let attempt = Uuid::new_v4();
         let commit = "a".repeat(40);
-        let progress =
-            BuildProgressRecorder::create(root.path(), 7, &commit, Uuid::new_v4(), attempt)?;
+        let progress = BuildProgressRecorder::create(&root, 7, &commit, Uuid::new_v4(), attempt)?;
         progress.phase("staging", Some(100), Some((11, 12)))?;
         let measurements = ShadowIngestMeasurements::default();
         progress.advance(32, &measurements, true)?;
-        let value = read(root.path(), 7, &commit, attempt)?;
+        let value = read(&root, 7, &commit, attempt)?;
         assert_eq!(value.staged_items, 32);
         assert!(!value.transaction_committed);
-        assert!(read(root.path(), 8, &commit, attempt).is_err());
-        assert!(
-            BuildProgressRecorder::create(root.path(), 7, &commit, Uuid::new_v4(), attempt)
-                .is_err()
-        );
+        assert!(read(&root, 8, &commit, attempt).is_err());
+        assert!(BuildProgressRecorder::create(&root, 7, &commit, Uuid::new_v4(), attempt).is_err());
         assert!(progress.advance(31, &measurements, true).is_err());
         assert!(progress.advance(101, &measurements, true).is_err());
         progress.finish(false)?;
         assert_eq!(
-            read(root.path(), 7, &commit, attempt)?.status,
+            read(&root, 7, &commit, attempt)?.status,
             "failed_requires_reconciliation"
         );
         Ok(())
