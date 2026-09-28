@@ -903,6 +903,96 @@ SELECT node_id || ':' || id || ':' || encode(digest,'hex') FROM view_row;
                                   "FROM storage_v2_legacy_lexical_segment projection "
                                   f"WHERE occurrence_id={partial_occurrence}"), partial_rows)
 
+        # Chunk boundaries can split a larger source token. The copied slice
+        # is still exact source data, even though whole-document FTS misses it.
+        self.sql("INSERT INTO sources(id,name,type,path) VALUES "
+                 "(23,'copied-token-boundary','fixture','copied-token-boundary')")
+        boundary_body = "prefixalpha omegaSuffix"
+        boundary_run = self.begin(23, "b1" * 32, "b2" * 32, commit_sha=COMMIT)
+        boundary_node, boundary_view, boundary_digest = self.make_projection(boundary_body)
+        self.stage(boundary_run, "boundary.txt", boundary_body, boundary_node,
+                   boundary_view, boundary_digest)
+        self.complete_analysis(boundary_digest)
+        boundary_document = self.sql(self.admin(
+            "SELECT id FROM storage_v2_put_search_document("
+            f"'mainrag.lexical-simple.v1','node',{boundary_node},"
+            f"'{boundary_body}',ARRAY[]::TEXT[])"))
+        self.sql(self.admin(f"SELECT storage_v2_bind_search_document("
+                            f"{boundary_view},0,{boundary_document},1.0)"))
+        self.commit(boundary_run, 1)
+        boundary_generation = int(self.sql(
+            f"SELECT generation_id FROM storage_v2_ingest_run WHERE id={boundary_run}"))
+        self.sql(self.admin(f"SELECT storage_v2_verify_generation("
+                            f"{boundary_generation},'{'b3' * 32}')"))
+        boundary_occurrence, boundary_artifact = map(int, self.sql(
+            "SELECT id::TEXT||':'||artifact_version_id::TEXT "
+            "FROM occurrence WHERE source_id=23").split(":"))
+        boundary_chunk = int(self.sql(
+            "WITH file AS (INSERT INTO files(source_id,path,hash,content,content_text,"
+            "size_original,size_compressed,last_modified) VALUES "
+            f"(23,'/synthetic/boundary.txt',digest('{boundary_body}','sha256'),'',"
+            f"'{boundary_body}',{len(boundary_body)},0,now()) RETURNING id) "
+            "INSERT INTO chunks(file_id,chunk_type,content_hash,content_compressed,"
+            "content_text,start_line,end_line) SELECT id,'text',digest('alpha omega','sha256'),"
+            "'','alpha omega',1,1 FROM file RETURNING id"))
+        self.assertEqual(self.sql(self.admin(f"SELECT storage_v2_copy_legacy_lexical_segments("
+                                           f"{boundary_occurrence},{boundary_artifact})")), "1")
+        boundary_ast = {"type": "and", "children": [
+            {"type": "term", "value": "alpha"}, {"type": "term", "value": "omega"}]}
+        self.assertEqual(self.exact_search(boundary_ast, source_id=23)["results"], [])
+        self.file(schema.ROOT / "migrations/088_storage_v2_candidate_requalification.sql")
+        dual_id = "00000000-0000-4000-8000-000000000095"
+        old_artifact = '{"status":"PASS","unexplained_count":0,"comparisons":[]}'
+        dual_sql = ("SELECT to_jsonb(storage_v2_record_dual_read_evidence("
+                    f"'{dual_id}',23,{boundary_generation},'{COMMIT}',"
+                    f"'{'b2' * 32}','{'b4' * 32}','{old_artifact}'::JSONB))")
+        original_dual = json.loads(self.sql(self.admin(dual_sql)))
+        revised_artifact = ('{"status":"PASS","unexplained_count":0,'
+                            '"comparisons":[{"classification":"segmentation"}]}')
+        revised_sql = dual_sql.replace(old_artifact, revised_artifact)
+        self.assert_sql_fails(self.admin(revised_sql), "dual-read evidence identity collision")
+        for _ in range(2):
+            self.file(schema.ROOT / "migrations/095_storage_v2_qualification_continuation.sql")
+            self.assertEqual([self.sql(request) for request in requests], current_envelopes)
+            self.assertEqual(self.sql(changed_metadata), authority)
+            boundary_result = self.exact_search(boundary_ast, source_id=23)
+            self.assertEqual([row["occurrence_id"] for row in boundary_result["results"]],
+                             [boundary_occurrence])
+            self.assertGreater(boundary_result["results"][0]["score"], 1000000.0)
+            proof_sql = (f"SELECT storage_v2_candidate_query_evidence(23,{boundary_generation},"
+                         f"'{COMMIT}','alpha omega',ARRAY[{boundary_occurrence}]::BIGINT[],"
+                         f"ARRAY[{boundary_chunk}]::BIGINT[])")
+            proof = json.loads(self.sql(self.admin(proof_sql)))
+            self.assertTrue(proof["candidate"][0]["fts_body_matches"])
+            self.assertTrue(proof["candidate"][0]["segment_matches"])
+            self.assertTrue(proof["candidate"][0]["legacy_segment_matches"])
+            self.assertEqual(self.sql(self.actor(schema.OTHER_ID,
+                "SET ROLE mainrag; SELECT storage_v2_source_legacy_segment_matches("
+                f"{boundary_occurrence},'alpha omega')")), "f")
+            self.assertEqual(self.sql(self.admin(
+                "SET ROLE mainrag; SELECT storage_v2_source_legacy_segment_matches("
+                f"{partial_occurrence},'novel conjunction')")), "f")
+            revised_dual = json.loads(self.sql(self.admin(revised_sql)))
+            self.assertNotEqual(revised_dual["id"], dual_id)
+            self.assertEqual(json.loads(self.sql(self.admin(dual_sql))), original_dual)
+            self.assertEqual(json.loads(self.sql(self.admin(revised_sql))), revised_dual)
+            self.assertEqual(self.sql("SELECT count(*) FROM storage_v2_dual_read_evidence "
+                                     f"WHERE source_id=23 AND generation_id={boundary_generation}"), "2")
+        self.assert_sql_fails(self.admin(revised_sql.replace("'" + COMMIT + "'", "'" + "c" * 40 + "'")),
+                              "dual-read evidence identity collision")
+        self.assert_sql_fails(self.actor(schema.OTHER_ID, revised_sql), "source access denied")
+        self.assert_sql_fails(f"UPDATE storage_v2_dual_read_evidence SET artifact=artifact WHERE id='{dual_id}'",
+                              "dual-read artifacts are immutable")
+        self.assert_sql_fails(f"DELETE FROM storage_v2_dual_read_evidence WHERE id='{dual_id}'",
+                              "dual-read artifacts are immutable")
+        self.sql(f"DELETE FROM chunks WHERE id={boundary_chunk}")
+        self.assertEqual(self.exact_search(boundary_ast, source_id=23), boundary_result)
+        portable_proof = json.loads(self.sql(self.admin(proof_sql.replace(
+            f"ARRAY[{boundary_chunk}]::BIGINT[]", "ARRAY[]::BIGINT[]"))))
+        self.assertTrue(portable_proof["candidate"][0]["fts_body_matches"])
+        self.assertTrue(portable_proof["candidate"][0]["legacy_segment_matches"])
+        self.assertEqual(self.sql("SELECT count(*) FROM logical_source WHERE active_generation_id IS NOT NULL"), "0")
+
         self.assertEqual(json.loads(self.sql(self.admin(verify_window)))["invalid_count"],0)
 
         # Corruption is injected only in a disposable fixture transaction.
@@ -925,3 +1015,10 @@ SELECT node_id || ':' || id || ':' || encode(digest,'hex') FROM view_row;
         self.sql(f"DELETE FROM chunks WHERE id={context_chunk}")
         self.assertEqual(self.sql(self.admin(rank_query)).splitlines(),
                          [str(context_occurrence), str(generated_occurrence)])
+        portable_context = json.loads(self.sql(self.admin(
+            f"SELECT storage_v2_candidate_query_evidence(20,{context_generation},"
+            f"'{COMMIT}','prefixonly alpha',ARRAY[{context_occurrence}]::BIGINT[],"
+            "ARRAY[]::BIGINT[])")))
+        self.assertFalse(portable_context["candidate"][0]["fts_body_matches"])
+        self.assertTrue(portable_context["candidate"][0]["segment_matches"])
+        self.assertTrue(portable_context["candidate"][0]["legacy_segment_matches"])
