@@ -37,7 +37,7 @@ def observation(api_url: str, token: str, source_id: int) -> dict:
         + f"/api/v1/admin/sources/{source_id}/storage-v2-release-watermark",
         headers={"Authorization": f"Bearer {token}"},
     )
-    with urllib.request.urlopen(call, timeout=120) as response:
+    with urllib.request.urlopen(call, timeout=720) as response:
         value = json.load(response)
     if (value.get("source_id") != source_id
             or not isinstance(value.get("source_watermark_sha256"), str)
@@ -78,11 +78,39 @@ FROM sources source WHERE source.id = {source_id};
         value = json.loads(result.stdout.strip())
     except (ValueError, TypeError) as error:
         raise RuntimeError("legacy registration query returned invalid JSON") from error
-    if value.get("source_id") != source_id or value.get("source_type") != "fs" \
+    if value.get("source_id") != source_id or value.get("source_type") not in {"fs", "git"} \
             or not isinstance(value.get("source_path"), str) \
             or not isinstance(value.get("files"), list):
-        raise RuntimeError("registered filesystem source identity differs")
+        raise RuntimeError("registered source identity differs")
     return value
+
+
+def git_checkout(registration: dict, cache_dir: Path) -> tuple[Path, str]:
+    """Observe the exact clean checkout used by the Git adapter without fetching."""
+    source = registration["source_path"]
+    name = source.split("/")[-1].removesuffix(".git")
+    if not name or name in {".", ".."} or "\\" in name:
+        raise RuntimeError("git cache name is invalid")
+    root = (cache_dir / name).resolve(strict=True)
+    if not root.is_relative_to(cache_dir.resolve(strict=True)):
+        raise RuntimeError("git cache root escapes its registered cache")
+
+    def git(*args: str) -> str:
+        result = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                                text=True, check=False, timeout=30)
+        if result.returncode:
+            raise RuntimeError("git checkout identity cannot be verified")
+        return result.stdout.rstrip("\n")
+
+    if (git("rev-parse", "--show-toplevel") != str(root)
+            or git("remote", "get-url", "origin") != source
+            or git("symbolic-ref", "--short", "HEAD") not in {"main", "master"}
+            or git("status", "--porcelain", "--untracked-files=all")):
+        raise RuntimeError("git checkout is dirty or differs from registered source")
+    head = git("rev-parse", "--verify", "HEAD^{commit}")
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
+        raise RuntimeError("git checkout commit identity is invalid")
+    return root, head
 
 
 def file_status(root: Path, relative: str, legacy_hash: str) -> tuple[str, str | None]:
@@ -117,10 +145,15 @@ def file_status(root: Path, relative: str, legacy_hash: str) -> tuple[str, str |
     return ("same_bytes" if observed == legacy_hash else "changed_bytes"), observed
 
 
-def capture(database: str, api_url: str, token: str, source_id: int) -> dict:
+def capture(database: str, api_url: str, token: str, source_id: int,
+            git_cache_dir: Path = Path("/data/mainrag/git-cache")) -> dict:
     before = observation(api_url, token, source_id)
     registration = legacy_registration(database, source_id)
-    root = Path(registration["source_path"]).resolve(strict=True)
+    git_head = None
+    if registration["source_type"] == "git":
+        root, git_head = git_checkout(registration, git_cache_dir)
+    else:
+        root = Path(registration["source_path"]).resolve(strict=True)
     if not root.is_dir():
         raise RuntimeError("registered source root is not a directory")
     paths = {}
@@ -138,11 +171,14 @@ def capture(database: str, api_url: str, token: str, source_id: int) -> dict:
     after = observation(api_url, token, source_id)
     if before != after:
         raise RuntimeError("source adapter watermark changed during drift review")
+    if git_head is not None and git_checkout(registration, git_cache_dir) != (root, git_head):
+        raise RuntimeError("git checkout changed during drift review")
     statuses = Counter(item["status"] for item in paths.values())
     return {
         "schema_version": "mainrag.storage-v2.source-snapshot-review.v1",
         "source_id": source_id,
-        "source_type": "fs",
+        "source_type": registration["source_type"],
+        **({"git_head": git_head} if git_head is not None else {}),
         "source_root_sha256": hashlib.sha256(registration["source_path"].encode()).hexdigest(),
         "source_config_sha256": hashlib.sha256(canonical(registration["config"])).hexdigest(),
         "source_watermark_sha256": before["source_watermark_sha256"],
