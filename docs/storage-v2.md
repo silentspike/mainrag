@@ -900,6 +900,14 @@ enumerate every segment. Complete result envelopes, full corpus statistics,
 rank precision, ties, function ownership, grants and configuration are unchanged.
 Definition guards reject unexpected function bodies and permit exact replay.
 
+Migration 093 bounds each global term probe to 4,097 matching postings. A probe
+with at most 4,096 rows is complete. An overflowing probe is discarded for
+scoring; the full posting set is then read through the primary index for every
+distinct document in the authorized corpus. No result set is truncated. This
+retains the rare-term benefit while preventing common terms in other sources
+from dominating a small source's search cost. Both branches keep the term/digest
+checks and intersect with corpus bindings before document frequency and scoring.
+
 A lost build checkpoint can be reconstructed read-only for a sealed verified or
 release-candidate generation, including the PDF adapter. This retains the
 original build commit and fixture identity, requires an exact live watermark
