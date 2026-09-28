@@ -5,7 +5,11 @@
 use async_trait::async_trait;
 use git2::{build::CheckoutBuilder, Repository, StatusOptions};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 use tokio::fs;
+use tokio::process::{Child, Command};
 use tracing::{info, warn};
 
 use super::{RawFile, SourcePlugin, SyncResult};
@@ -17,6 +21,120 @@ const INDEXABLE_EXTENSIONS: &[&str] = &[
 
 const GIT_CACHE_DIR: &str = "/data/mainrag/git-cache";
 const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
+const GIT_TRANSPORT_TIMEOUT: Duration = Duration::from_secs(600);
+static GIT_SYNC_LOCK: LazyLock<Arc<tokio::sync::Mutex<()>>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
+
+struct CloneStaging(PathBuf);
+
+impl Drop for CloneStaging {
+    fn drop(&mut self) {
+        // This unique staging directory is owned by this clone attempt only.
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+struct GitProcess {
+    child: Child,
+    group: Option<u32>,
+}
+
+impl Drop for GitProcess {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(group) = self.group {
+            // The child creates its own process group. Kill transport/index-pack
+            // descendants as well when a deadline or caller cancellation fires.
+            unsafe { libc::kill(-(group as i32), libc::SIGKILL) };
+        }
+    }
+}
+
+async fn run_git(command: &mut Command, deadline: Duration) -> anyhow::Result<()> {
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+    let child = command.spawn()?;
+    let mut process = GitProcess {
+        group: child.id(),
+        child,
+    };
+    let status = tokio::time::timeout(deadline, process.child.wait())
+        .await
+        .map_err(|_| anyhow::anyhow!("git transport deadline exceeded"))??;
+    process.group = None;
+    if !status.success() {
+        anyhow::bail!("git transport failed");
+    }
+    Ok(())
+}
+
+fn cached_identity(cache: &Path, source: &str) -> anyhow::Result<(String, git2::Oid)> {
+    let repo = Repository::open(cache)?;
+    let mut options = StatusOptions::new();
+    options.include_untracked(true).recurse_untracked_dirs(true);
+    if !repo.statuses(Some(&mut options))?.is_empty() {
+        anyhow::bail!("git source cache contains local changes");
+    }
+    let head = repo.head()?;
+    if !head.is_branch() {
+        anyhow::bail!("git source cache has no checked-out branch");
+    }
+    let branch = head
+        .shorthand()
+        .ok_or_else(|| anyhow::anyhow!("git source branch name is invalid"))?
+        .to_string();
+    if !matches!(branch.as_str(), "main" | "master") {
+        anyhow::bail!("git source cache branch is unsupported");
+    }
+    if repo.find_remote("origin")?.url() != Some(source) {
+        anyhow::bail!("git source cache origin differs from registered source");
+    }
+    let oid = head
+        .target()
+        .ok_or_else(|| anyhow::anyhow!("git source branch has no commit"))?;
+    Ok((branch, oid))
+}
+
+fn publish_clone(staging: &Path, cache: &Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let staging = CString::new(staging.as_os_str().as_bytes())?;
+        let cache = CString::new(cache.as_os_str().as_bytes())?;
+        // Publish the owned staging directory atomically without replacing even
+        // an empty directory or dangling symlink created by another process.
+        let result = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                staging.as_ptr(),
+                libc::AT_FDCWD,
+                cache.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if cache.symlink_metadata().is_ok() {
+            anyhow::bail!("git source cache appeared during clone");
+        }
+        std::fs::rename(staging, cache)?;
+    }
+    Ok(())
+}
 
 // Binary file signatures to skip
 const BINARY_SIGNATURES: &[&[u8]] = &[
@@ -100,6 +218,14 @@ impl GitPlugin {
 
     /// Clone or update repository
     async fn sync_repo(&self, source_path: &str, source_name: &str) -> anyhow::Result<PathBuf> {
+        if source_name.is_empty()
+            || source_name == "."
+            || source_name == ".."
+            || source_name.contains(['/', '\\'])
+        {
+            anyhow::bail!("git source cache name is invalid");
+        }
+        let lease = GIT_SYNC_LOCK.clone().lock_owned().await;
         self.ensure_cache_dir().await?;
 
         let cache_path = self.get_cache_path(source_name);
@@ -107,52 +233,85 @@ impl GitPlugin {
         // If repo exists, pull updates
         if cache_path.exists() {
             info!("Updating existing repo: {}", source_name);
-            let repo = Repository::open(&cache_path)?;
-            let mut status_options = StatusOptions::new();
-            status_options
-                .include_untracked(true)
-                .recurse_untracked_dirs(true);
-            if !repo.statuses(Some(&mut status_options))?.is_empty() {
-                anyhow::bail!("git source cache contains local changes");
-            }
-            let mut head = repo.head()?;
-            if !head.is_branch() {
-                anyhow::bail!("git source cache has no checked-out branch");
-            }
-            let branch = head
-                .shorthand()
-                .ok_or_else(|| anyhow::anyhow!("git source branch name is invalid"))?
-                .to_string();
-            if !matches!(branch.as_str(), "main" | "master") {
-                anyhow::bail!("git source cache branch is unsupported");
-            }
-            let old_oid = head
-                .target()
-                .ok_or_else(|| anyhow::anyhow!("git source branch has no commit"))?;
-            let mut remote = repo.find_remote("origin")?;
-            if remote.url() != Some(source_path) {
-                anyhow::bail!("git source cache origin differs from registered source");
-            }
-            remote.fetch(&[&branch], None, None)?;
-            let remote_oid = repo
-                .find_reference(&format!("refs/remotes/origin/{branch}"))?
-                .target()
-                .ok_or_else(|| anyhow::anyhow!("git source remote branch has no commit"))?;
-            if remote_oid != old_oid {
-                if !repo.graph_descendant_of(remote_oid, old_oid)? {
-                    anyhow::bail!("git source history changed without fast-forward");
+            let cache = cache_path.clone();
+            let source = source_path.to_string();
+            let (branch, old_oid) =
+                tokio::task::spawn_blocking(move || cached_identity(&cache, &source)).await??;
+            let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
+            run_git(
+                Command::new("git").arg("-C").arg(&cache_path).args([
+                    "fetch",
+                    "--no-tags",
+                    "--no-recurse-submodules",
+                    "origin",
+                    &refspec,
+                ]),
+                GIT_TRANSPORT_TIMEOUT,
+            )
+            .await?;
+            let cache = cache_path.clone();
+            let source = source_path.to_string();
+            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                let _lease = lease;
+                if cached_identity(&cache, &source)? != (branch.clone(), old_oid) {
+                    anyhow::bail!("git source cache changed during fetch");
                 }
-                let target = repo.find_object(remote_oid, None)?;
-                repo.checkout_tree(&target, Some(CheckoutBuilder::new().safe()))?;
-                head.set_target(remote_oid, "Advance verified git source cache")?;
-            }
+                let repo = Repository::open(&cache)?;
+                let remote_oid = repo
+                    .find_reference(&format!("refs/remotes/origin/{branch}"))?
+                    .target()
+                    .ok_or_else(|| anyhow::anyhow!("git source remote branch has no commit"))?;
+                if remote_oid != old_oid {
+                    if !repo.graph_descendant_of(remote_oid, old_oid)? {
+                        anyhow::bail!("git source history changed without fast-forward");
+                    }
+                    let target = repo.find_object(remote_oid, None)?;
+                    repo.checkout_tree(&target, Some(CheckoutBuilder::new().safe()))?;
+                    repo.head()?
+                        .set_target(remote_oid, "Advance verified git source cache")?;
+                }
+                Ok(())
+            })
+            .await??;
             return Ok(cache_path);
         }
 
-        // Clone new repo (shallow clone for performance)
-        info!("Cloning repo: {} from {}", source_name, source_path);
-        Repository::clone_recurse(source_path, &cache_path)?;
-
+        info!("Cloning repo: {}", source_name);
+        let staging =
+            self.cache_dir
+                .join(format!(".{}-clone-{}", source_name, uuid::Uuid::new_v4()));
+        let staging_owner = CloneStaging(staging.clone());
+        let result = run_git(
+            Command::new("git")
+                .args([
+                    "clone",
+                    "--recurse-submodules",
+                    "--single-branch",
+                    "--no-tags",
+                    "--",
+                ])
+                .arg(source_path)
+                .arg(&staging),
+            GIT_TRANSPORT_TIMEOUT,
+        )
+        .await;
+        if let Err(error) = result {
+            let _ = fs::remove_dir_all(&staging).await;
+            return Err(error);
+        }
+        let cache = cache_path.clone();
+        let source = source_path.to_string();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let _lease = lease;
+            let _staging_owner = staging_owner;
+            cached_identity(&staging, &source)?;
+            if cache.try_exists()? {
+                anyhow::bail!("git source cache appeared during clone");
+            }
+            publish_clone(&staging, &cache)?;
+            Ok(())
+        })
+        .await??;
         Ok(cache_path)
     }
 
@@ -360,9 +519,111 @@ mod tests {
         assert_eq!(second.files.len(), 1);
         assert_eq!(second.files[0].content, "fn second() {}\n");
 
+        let cache_root = directory.0.join("cache/source");
+        let cache_head = Repository::open(&cache_root)
+            .unwrap()
+            .head()
+            .unwrap()
+            .target()
+            .unwrap();
+        git(&source, &["checkout", "--orphan", "rewritten"]);
+        git(&source, &["add", "."]);
+        git(
+            &source,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-m",
+                "rewritten history",
+            ],
+        );
+        git(&source, &["branch", "-M", "main"]);
+        assert!(plugin.sync(source_path).await.is_err());
+        assert_eq!(
+            Repository::open(&cache_root)
+                .unwrap()
+                .head()
+                .unwrap()
+                .target()
+                .unwrap(),
+            cache_head
+        );
+        assert_eq!(
+            std::fs::read_to_string(cache_root.join("src/a.rs")).unwrap(),
+            "fn second() {}\n"
+        );
+
         let cached = directory.0.join("cache/source/src/a.rs");
         std::fs::write(&cached, "local change\n").unwrap();
         assert!(plugin.sync(source_path).await.is_err());
         assert_eq!(std::fs::read_to_string(cached).unwrap(), "local change\n");
+        #[cfg(target_os = "linux")]
+        {
+            let staging = directory.0.join("owned-staging");
+            let destination = directory.0.join("competing-cache");
+            std::fs::create_dir_all(&staging).unwrap();
+            std::os::unix::fs::symlink("missing-original", &destination).unwrap();
+            assert!(publish_clone(&staging, &destination).is_err());
+            assert_eq!(
+                std::fs::read_link(destination).unwrap(),
+                PathBuf::from("missing-original")
+            );
+            assert!(staging.is_dir());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn transport_deadline_and_cancellation_stop_descendants() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("mainrag-git-deadline-{}", Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&directory.0).unwrap();
+        for cancel in [false, true] {
+            let ticks = directory.0.join(if cancel { "cancel" } else { "timeout" });
+            let output = ticks.clone();
+            let task = tokio::spawn(async move {
+                run_git(
+                    tokio::process::Command::new("sh")
+                        .args([
+                            "-c",
+                            "(while :; do echo tick >> \"$1\"; sleep 0.02; done) & wait",
+                            "fixture",
+                        ])
+                        .arg(output),
+                    Duration::from_millis(200),
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !ticks.exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            if cancel {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                assert!(task
+                    .await
+                    .unwrap()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("deadline"));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let stopped = std::fs::read(&ticks).unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                std::fs::read(&ticks).unwrap(),
+                stopped,
+                "transport descendant survived"
+            );
+        }
     }
 }

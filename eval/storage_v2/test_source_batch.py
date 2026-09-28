@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import runpy
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -51,19 +53,59 @@ class SourceBatchTests(unittest.TestCase):
             previous = global_table["invoke"]
             try:
                 global_table["invoke"] = fake_invoke
-                OPERATOR["run"](args)
+                self.assertEqual(OPERATOR["run"](args), 2)
                 state = json.loads(state_path.read_text())
                 self.assertEqual(calls, [101])
                 self.assertEqual([source["status"] for source in state["sources"]],
                                  ["passed", "pending"])
+                stopped = subprocess.run([sys.executable, OPERATOR["__file__"], "run",
+                    "--plan", str(plan_path), "--state", str(state_path)], capture_output=True)
+                self.assertEqual(stopped.returncode, 2)
                 args.resume = True
-                OPERATOR["run"](args)
+                self.assertEqual(OPERATOR["run"](args), 0)
                 state = json.loads(state_path.read_text())
                 self.assertEqual(calls, [101, 102])
                 self.assertEqual([source["status"] for source in state["sources"]],
                                  ["passed", "passed"])
             finally:
                 global_table["invoke"] = previous
+
+    def test_failed_group_does_not_hide_failure_or_block_independent_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plan = {"schema_version": "mainrag.storage-v2.source-batch-plan.v1",
+                    "package_commit_sha": "a" * 40, "sources": [{
+                "source_id": sid, "adapter": "fs", "failure_group": group,
+                "planned_items": 1, "steps": [{"name": "review", "tool": "source-review",
+                    "args": ["--source-id", str(sid), "--protected-output", str(root / f"{sid}.json")],
+                    "result_path": str(root / f"{sid}.json")}],
+            } for sid, group in [(101, "shared"), (102, "shared"), (103, "independent")]]}
+            plan_path = root / "plan.json"
+            plan_path.write_text(json.dumps(plan))
+            plan_path.chmod(0o600)
+            state_path = root / "state.json"
+            args = argparse.Namespace(plan=plan_path, state=state_path, resume=False)
+            calls = []
+            def invoke(step_plan, path, source, step, state):
+                calls.append(source["source_id"])
+                step["status"] = "failed" if source["source_id"] == 101 else "passed"
+                source["status"] = step["status"]
+                return source["status"] == "passed"
+            globals_ = OPERATOR["run"].__globals__
+            previous = globals_["invoke"]
+            try:
+                globals_["invoke"] = invoke
+                self.assertEqual(OPERATOR["run"](args), 1)
+                failed = subprocess.run([sys.executable, OPERATOR["__file__"], "run",
+                    "--plan", str(plan_path), "--state", str(state_path)], capture_output=True)
+                self.assertEqual(failed.returncode, 1)
+                self.assertEqual(json.loads(failed.stdout)["status"], "FAIL")
+                self.assertEqual(calls, [101, 103])
+                self.assertEqual([s["status"] for s in json.loads(state_path.read_text())["sources"]],
+                                 ["failed", "skipped", "passed"])
+                self.assertEqual(OPERATOR["run"](args), 1)
+            finally:
+                globals_["invoke"] = previous
 
     def test_crashed_phase_requires_reconciliation(self) -> None:
         state = {"sources": [{"status": "running", "steps": [

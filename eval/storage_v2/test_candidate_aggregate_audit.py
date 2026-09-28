@@ -123,6 +123,21 @@ class CandidateAggregateAuditTests(unittest.TestCase):
         inventory = self.inventory(reviewed, source(2, benchmark=True))
         good, _ = AUDIT.audit(inventory, "e" * 64)
         self.assertTrue(good["persisted_candidate_set_complete"])
+        query = manifest["query_results"][0]
+        query.update(expected_in_current=True, expected_in_storage_v2=True)
+        query["automatic_expectation_binding"] = {
+            "policy": "unchanged-legacy-positive-before-candidate-read-v1",
+            "original_expected_path_sha256": "4" * 64,
+            "expected_path_sha256": "5" * 64,
+            "original_source_status": "changed_bytes",
+            "source_snapshot_review_sha256": "1" * 64,
+        }
+        rebound, _ = AUDIT.audit(inventory, "e" * 64)
+        self.assertTrue(rebound["persisted_candidate_set_complete"])
+        query["automatic_expectation_binding"]["source_snapshot_review_sha256"] = "2" * 64
+        unbound, _ = AUDIT.audit(inventory, "e" * 64)
+        self.assertEqual(unbound["persisted_gate_blockers"], {"automatic_expectation_binding_invalid": 1})
+        del query["automatic_expectation_binding"]
         manifest["query_results"][0]["coverage"]["source_snapshot_review_sha256"] = "2" * 64
         bad, _ = AUDIT.audit(inventory, "e" * 64)
         self.assertEqual(bad["persisted_gate_blockers"],

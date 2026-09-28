@@ -2647,6 +2647,7 @@ dependencies = [
  "http-body-util",
  "ignore",
  "jsonwebtoken",
+ "libc",
  "metrics",
  "metrics-exporter-prometheus",
  "moka",
