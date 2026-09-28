@@ -454,6 +454,22 @@ ALTER TABLE storage_v2_activation_set_evidence
         self.assertEqual(self.search(ADMIN, digest)["total"], 2)
         self.assertEqual(self.intelligence(ADMIN, digest, "card")["source_count"], 2)
         self.assert_sql_fails(self.actor(ADMIN, activate), "regular ingest active pointer drift")
+        # Requalify the mixed active generations and tenant/test-source boundary
+        # against the same late identity-hydration path used by named reads.
+        for number in range(68,87):
+            migration=next((ROOT / "migrations").glob(f"{number:03}_*.sql"))
+            self.command(self.database,file=migration)
+        calls=[(ADMIN,None,False),(ADMIN,None,True),(READER,None,False),
+               (ADMIN,1,False),(READER,1,False)]
+        before=[self.search(actor,digest,source=source,include_test=include_test)
+                for actor,source,include_test in calls]
+        self.command(self.database,file=ROOT / "migrations/087_storage_v2_scoped_search_scaling.sql")
+        after=[self.search(actor,digest,source=source,include_test=include_test)
+               for actor,source,include_test in calls]
+        self.assertEqual(after,before)
+        self.assertEqual(after[0]["fully_scored_views"],2)
+        self.assertEqual(after[1]["fully_scored_views"],3)
+        self.assertEqual(after[2]["fully_scored_views"],1)
         self.sql("INSERT INTO sources(id,name,type,path) VALUES "
                  "(4,'late-source','fixture','late-source')")
         self.assert_sql_fails(
