@@ -44,8 +44,10 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Require the bundled MuPDF build tools
-        run: command -v make && command -v cc && command -v c++ && command -v unzip
+      - name: Install the bundled MuPDF generators
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y gperf unzip
       - name: Verify the native structured PDF adapter
         shell: bash
         run: |
