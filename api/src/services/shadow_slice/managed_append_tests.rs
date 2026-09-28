@@ -166,6 +166,11 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             .output()?;
         ensure!(lexical_batches.status.success(), "managed fixture lexical batch migration failed: {}",
             String::from_utf8_lossy(&lexical_batches.stderr));
+        let positioned = Command::new("psql").arg("-X").arg("--set=ON_ERROR_STOP=1")
+            .arg("--host=127.0.0.1").arg("--username=fixture").arg("--dbname").arg(&database)
+            .arg("--file").arg(project.join("migrations/085_storage_v2_positioned_lexical_segments.sql"))
+            .env("PGPASSWORD","fixture_only").output()?;
+        ensure!(positioned.status.success(),"positioned lexical migration failed: {}",String::from_utf8_lossy(&positioned.stderr));
         client.batch_execute(&format!(
             "CREATE TABLE users(id UUID PRIMARY KEY, is_admin BOOLEAN NOT NULL); \
              INSERT INTO users VALUES ('{PRINCIPAL}', TRUE); \
@@ -177,6 +182,29 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             "INSERT INTO sources(id,name,type,path,is_test) VALUES (63,'managed-fixture','managed_append',$1,TRUE)",
             &[&root.to_str().context("managed fixture path is not UTF-8")?],
         ).await?;
+
+        let code_root=directory.0.join("code-source");
+        std::fs::create_dir(&code_root)?;
+        let code=(0..130).map(|n| format!("pub fn fixture_{n}() {{}}\n")).collect::<String>();
+        std::fs::write(code_root.join("fixture.rs"),code)?;
+        client.execute("INSERT INTO sources(id,name,type,path,is_test) VALUES (164,'bounded-card-fixture','fs',$1,TRUE)",
+            &[&code_root.to_str().context("fixture root is not UTF-8")?]).await?;
+        let progress_id=Uuid::new_v4();
+        let progress=crate::services::build_progress::BuildProgressRecorder::create(&packs,164,COMMIT,Uuid::new_v4(),progress_id)?;
+        let transaction=client.transaction().await?;
+        transaction.batch_execute(&format!("SET LOCAL app.user_id='{PRINCIPAL}'")).await?;
+        let grouped=Box::pin(run_release_candidate_build_with_progress(&transaction,164,"fs",&code_root,&packs,4096,COMMIT,Some(&progress))).await?;
+        let before_commit=crate::services::build_progress::read(&packs,164,COMMIT,progress_id)?;
+        ensure!(before_commit.staged_items==grouped.item_count && before_commit.phase=="transaction_pending" && !before_commit.transaction_committed,
+            "progress confused staged rows with transaction commit");
+        transaction.commit().await?;
+        progress.finish(true)?;
+        ensure!(crate::services::build_progress::read(&packs,164,COMMIT,progress_id)?.transaction_committed,
+            "progress did not retain the observed commit");
+        ensure!(grouped.symbol_count>=130 && grouped.telemetry["ablauf"]["structural_card_batch_calls"].as_u64()==Some(3)
+            && grouped.telemetry["ablauf"]["db_staging_round_trips"].as_u64().is_some_and(|calls| calls<10),
+            "bounded card projection did not reduce round trips or retain all symbols");
+        println!("{}",json!({"fixture":"bounded-card-projection","items":grouped.item_count,"symbols":grouped.symbol_count,"telemetry":grouped.telemetry}));
 
         let initial = Box::pin(run(&mut client, &root, &packs)).await?;
         ensure!(initial.item_count == 1 && !initial.reused_generation,

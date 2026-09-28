@@ -882,3 +882,16 @@ live watermark. The recovered checkpoint retains the original build commit
 and marks the missing original capacity observation explicitly. Qualification
 still rechecks current resource reserve, generation identity, restart, search,
 intelligence, integrity, and source drift before promotion.
+
+### Live candidate build progress
+
+`release-candidate.py build` saves a private `<checkpoint>.progress.json` before
+starting its write. The attempt UUID and exact build commit bind the supported
+progress endpoint to this POST. It reports source observation, content store,
+staging, final watermark, membership/sealing and transaction-pending phases.
+Staged items are not committed items or qualification. A confirmed build response
+records committed item count and generation, while the original staged cursor is
+retained. Reuse the protected checkpoint/witness after interruption; an existing
+attempt record prevents an automatic second write. `source-batch.py` retains live
+observations independently of its completed-item result and keeps draining the
+owned phase when an observation is missing or invalid.

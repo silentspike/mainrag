@@ -579,7 +579,7 @@ impl IndexService {
         // Get source info
         let source = client
             .query_opt(
-                "SELECT id, name, type, path FROM sources WHERE id = $1",
+                "SELECT id, name, type, path, config FROM sources WHERE id = $1",
                 &[&source_id],
             )
             .await?
@@ -587,7 +587,14 @@ impl IndexService {
 
         let source_name: String = source.get("name");
         let source_path: String = source.get("path");
-        let source_path = std::path::Path::new(&source_path);
+        let source_path = tokio::fs::canonicalize(&source_path).await?;
+        let source_config = source
+            .get::<_, Option<serde_json::Value>>("config")
+            .unwrap_or(serde_json::Value::Null);
+        let scope =
+            plugins::fs_scope::FilesystemScope::from_config(&source_config).map_err(|error| {
+                AppError::BadRequest(format!("invalid filesystem source scope: {error}"))
+            })?;
 
         info!(
             "Syncing {} files for source '{}' (incremental)",
@@ -606,15 +613,23 @@ impl IndexService {
             errors: vec![],
         };
 
-        for file_path in files {
-            // Skip if file doesn't exist (was deleted)
-            if !file_path.exists() {
-                debug!("File no longer exists, skipping: {}", file_path.display());
-                continue;
-            }
-
+        for requested in files {
+            let (file_path, rel_path) = match scope.incremental_path(&source_path, requested).await
+            {
+                Ok(Some(selected)) => selected,
+                Ok(None) => {
+                    stats.files_skipped += 1;
+                    continue;
+                }
+                Err(_) => {
+                    stats.errors.push(
+                        "incremental file is outside the registered discovery scope".to_string(),
+                    );
+                    continue;
+                }
+            };
             // Read file content
-            let content = match fs::read_to_string(file_path).await {
+            let content = match fs::read_to_string(&file_path).await {
                 Ok(c) => c,
                 Err(e) => {
                     let err_msg = format!("Failed to read {}: {}", file_path.display(), e);
@@ -623,13 +638,6 @@ impl IndexService {
                     continue;
                 }
             };
-
-            // Calculate relative path from source root
-            let rel_path = file_path
-                .strip_prefix(source_path)
-                .unwrap_or(file_path)
-                .to_string_lossy()
-                .to_string();
 
             // Detect language from extension
             let language = file_path

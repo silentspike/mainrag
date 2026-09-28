@@ -169,6 +169,93 @@ where
         .map(StagedItemRecord::from)
 }
 
+/// One item projection, staging, search binding and unavailable-score group.
+/// All writes still use the established controlled functions in dependency order.
+pub struct StageDocument<'a> {
+    pub run_id: i64,
+    pub item_key: &'a str,
+    pub witness_type: &'a str,
+    pub witness: &'a Value,
+    pub adapter_profile_id: &'a str,
+    pub body_id: i64,
+    pub node_domain: &'a str,
+    pub view_profile: &'a str,
+    pub language: &'a str,
+    pub expected_content_hash: &'a str,
+    pub byte_length: i64,
+    pub content_identity_sha256: &'a [u8],
+    pub analysis_profile_id: &'a str,
+    pub source_path: &'a str,
+    pub locator: &'a Value,
+    pub parser_pass_count: i16,
+    pub search_profile: &'a str,
+    pub text: &'a str,
+    pub identifiers: &'a [String],
+    pub score_profile: &'a str,
+    pub score_evidence: &'a Value,
+    pub score_stages: &'a [String],
+}
+
+pub async fn stage_shadow_document<C>(
+    client: &C,
+    item: &StageDocument<'_>,
+) -> Result<StagedItemRecord, Error>
+where
+    C: GenericClient + Sync,
+{
+    client
+        .query_one(
+            "WITH node AS MATERIALIZED ( \
+            SELECT id FROM storage_v2_put_leaf_node($7, 'artifact', $6) \
+         ), view_row AS MATERIALIZED ( \
+            SELECT view_value.id FROM node CROSS JOIN LATERAL \
+              storage_v2_put_retrieval_view('artifact', $8, $9, 'whole-bytes-v1', 0, \
+                ARRAY['content']::TEXT[], ARRAY['node']::TEXT[], ARRAY[node.id], \
+                ARRAY[0]::BIGINT[], ARRAY[$11]::BIGINT[]) view_value \
+         ), item AS MATERIALIZED ( \
+            SELECT staged.* FROM node CROSS JOIN view_row CROSS JOIN LATERAL \
+              storage_v2_stage_shadow_item($1,$2,'document',$3,$4,$5,node.id,NULL, \
+                $10,$11,$12,$13,view_row.id,$14,$15,$16) staged \
+         ), document AS MATERIALIZED ( \
+            SELECT document_value.id FROM node CROSS JOIN item CROSS JOIN LATERAL \
+              storage_v2_put_search_document($17,'node',node.id,$18,$19) document_value \
+         ), binding AS MATERIALIZED ( \
+            SELECT storage_v2_bind_search_document(view_row.id,0,document.id,1.0) \
+              FROM view_row CROSS JOIN document \
+         ), scores AS MATERIALIZED ( \
+            SELECT count(storage_v2_put_occurrence_score_component( \
+                item.occurrence_id,stage,$20,'unavailable',NULL,$21)) \
+              FROM item CROSS JOIN unnest($22::TEXT[]) stage CROSS JOIN binding \
+         ) SELECT item.* FROM item CROSS JOIN binding CROSS JOIN scores",
+            &[
+                &item.run_id,
+                &item.item_key,
+                &item.witness_type,
+                item.witness,
+                &item.adapter_profile_id,
+                &item.body_id,
+                &item.node_domain,
+                &item.view_profile,
+                &item.language,
+                &item.expected_content_hash,
+                &item.byte_length,
+                &item.content_identity_sha256,
+                &item.analysis_profile_id,
+                &item.source_path,
+                item.locator,
+                &item.parser_pass_count,
+                &item.search_profile,
+                &item.text,
+                &item.identifiers,
+                &item.score_profile,
+                item.score_evidence,
+                &item.score_stages,
+            ],
+        )
+        .await
+        .map(StagedItemRecord::from)
+}
+
 pub async fn begin_analysis_attempt<C>(
     client: &C,
     content_identity_sha256: &[u8],

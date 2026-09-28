@@ -26,6 +26,7 @@ from typing import Any
 
 scope_matcher = runpy.run_path(str(Path(__file__).with_name("fs_scope.py")))["scope_matcher"]
 load_token = runpy.run_path(str(Path(__file__).with_name("operator_token.py")))["load_token"]
+monitored_build = runpy.run_path(str(Path(__file__).with_name("build_progress.py")))["monitored_build"]
 candidate_proof = runpy.run_path(
     str(Path(__file__).with_name("candidate-aggregate-audit.py"))
 )["candidate_proof"]
@@ -357,13 +358,7 @@ def build(arguments: argparse.Namespace, token: str) -> None:
     if arguments.checkpoint.exists() or arguments.checkpoint.is_symlink():
         raise RuntimeError("checkpoint already exists; preserve it and use verify")
     pack_capacity = prebuild_pack_capacity(arguments)
-    result = request(
-        arguments.api_url,
-        token,
-        "POST",
-        f"/api/v1/admin/sources/{arguments.source_id}/storage-v2-release-candidate-build",
-        {"commit_sha": arguments.commit_sha},
-    )
+    result, progress_attempt = monitored_build(arguments, token, request, atomic_private_json)
     if result["active_generation_before"] != result["active_generation_after"]:
         raise RuntimeError("candidate construction changed the active pointer")
     validate_telemetry(result.get("telemetry"), int(result["item_count"]))
@@ -379,6 +374,7 @@ def build(arguments: argparse.Namespace, token: str) -> None:
         postbuild_resource_blocked = True
     checkpoint = {
         "schema_version": 1,
+        "build_progress_attempt_id": progress_attempt,
         # This reference may be published. A hash of a small numeric source ID
         # is enumerable, so use a random opaque value retained in the checkpoint.
         "source_ref": os.urandom(32).hex(),

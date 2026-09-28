@@ -865,3 +865,35 @@ exact candidate set:
 
 Legacy data remains intact after activation until the separately approved
 cleanup issue proves that no supported reader/writer depends on it.
+
+### Candidate staging and progress
+
+The candidate writer groups node/view/item/search binding and unavailable scores
+in one dependent statement. Structural cards are submitted in groups of at most
+64 through the existing immutable, authorized scalar function. Migration 083
+computes each bounded lexical group's first-match location, hash and weighted
+vector once and preserves the installed compatibility-rank copy hook. The
+character chunker counts UTF-8 boundaries and newlines in one pass; content,
+overlap and line semantics remain unchanged, and byte locators use actual bytes.
+
+An optional candidate-build `progress_id` selects a private, create-only attempt
+record under the configured pack root. The administrative progress endpoint
+requires the registered source and exact attempt/commit. Counts represent staged
+work in an uncommitted transaction. Only the handler's successful commit readback
+marks the record committed; an interrupted/restarted reader requires witness
+reconciliation. The operator saves the attempt identity and observations beside
+its checkpoint every 30 seconds and drains its owned POST before reporting a
+monitor identity failure. The source batch exposes this cursor separately from
+completed items and never restarts a writer because progress is unavailable.
+
+Migration 084 materializes generated/copied provenance before joining segments.
+The lexical read policy retains FORCE RLS and the existing write check, while
+computing the authorized visible source set once per scan. Explicit source checks
+and immutable-document/rank semantics remain required for both provenance paths.
+
+Migration 085 validates bounded groups at explicit character locators in one
+source window. Rust retains canonical first-match positions using byte searches
+and one shared UTF-8 walk. The independent SQL check compares each exact segment
+against the immutable document, retaining all hash/vector/collision checks. The
+previous writer remains available when a canonical group spans over eight million
+characters. Existing immutable segment identities remain compatible.

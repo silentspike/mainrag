@@ -29,36 +29,37 @@ impl Default for CharacterChunker {
 impl Chunker for CharacterChunker {
     fn chunk(&self, content: &str, _language: Option<&str>) -> Vec<Chunk> {
         let mut chunks = vec![];
-        let chars: Vec<char> = content.chars().collect();
+        // Each character boundary records its byte offset and preceding newline
+        // count once. Rebuilding/counting both prefixes per chunk was quadratic.
+        let mut boundaries = Vec::new();
+        let mut lines = 0;
+        for (offset, character) in content.char_indices() {
+            boundaries.push((offset, lines));
+            lines += usize::from(character == '\n');
+        }
+        let char_count = boundaries.len();
+        boundaries.push((content.len(), lines));
 
         // Empty content: return empty chunks
-        if chars.is_empty() {
+        if char_count == 0 {
             return chunks;
         }
 
         let mut start = 0;
         let mut prev_start: Option<usize> = None;
 
-        while start < chars.len() {
-            let end = (start + self.max_chars).min(chars.len());
-            let text: String = chars[start..end].iter().collect();
-
-            // Line calculation
-            let start_line = content[..chars[..start].iter().collect::<String>().len()]
-                .matches('\n')
-                .count()
-                + 1;
-            let end_line = content[..chars[..end].iter().collect::<String>().len()]
-                .matches('\n')
-                .count()
-                + 1;
+        while start < char_count {
+            let end = start.saturating_add(self.max_chars).min(char_count);
+            let text = content[boundaries[start].0..boundaries[end].0].to_string();
+            let start_line = boundaries[start].1 + 1;
+            let end_line = boundaries[end].1 + 1;
 
             chunks.push(Chunk {
                 text,
                 start_line,
                 end_line,
-                start_byte: start,
-                end_byte: end,
+                start_byte: boundaries[start].0,
+                end_byte: boundaries[end].0,
                 chunk_type: ChunkType::Text,
                 metadata: None,
                 parent_idx: None, // Character chunker: flat structure
@@ -67,7 +68,7 @@ impl Chunker for CharacterChunker {
             });
 
             // If we reached the end of content, stop
-            if end >= chars.len() {
+            if end >= char_count {
                 break;
             }
 
@@ -120,5 +121,38 @@ mod tests {
         assert!(!chunks.is_empty());
         assert!(chunks[0].start_line >= 1);
         assert!(chunks[0].end_line >= chunks[0].start_line);
+    }
+
+    #[test]
+    fn character_boundaries_preserve_unicode_overlap_and_absolute_lines() {
+        let content = "é\n水🙂abc\né\n水🙂abc\n";
+        let chunks = CharacterChunker::new(ChunkerConfig {
+            max_chars: Some(5),
+            overlap_chars: Some(2),
+            ..Default::default()
+        })
+        .chunk(content, None);
+        assert!(chunks.len() > 2);
+        for chunk in &chunks {
+            assert_eq!(&content[chunk.start_byte..chunk.end_byte], chunk.text);
+            assert_eq!(
+                chunk.start_line,
+                content[..chunk.start_byte].matches('\n').count() + 1
+            );
+            assert_eq!(
+                chunk.end_line,
+                content[..chunk.end_byte].matches('\n').count() + 1
+            );
+        }
+        let characters: Vec<char> = content.chars().collect();
+        for (index, chunk) in chunks.iter().enumerate() {
+            let start = index * 3;
+            assert_eq!(
+                chunk.text,
+                characters[start..(start + 5).min(characters.len())]
+                    .iter()
+                    .collect::<String>()
+            );
+        }
     }
 }
