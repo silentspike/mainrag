@@ -26,6 +26,30 @@ def watermark(root, profile, fixture):
 
 
 class CutTests(unittest.TestCase):
+    def test_privileged_inspection_uses_only_opaque_bound_arguments(self):
+        import types
+        proof = {"source_root_sha256": "a" * 64, "cut_id": str(uuid.uuid4()),
+                 "descriptor_sha256": "b" * 64, "snapshot_uuid": str(uuid.uuid4()),
+                 "origin_uuid": str(uuid.uuid4())}
+        expected = {"status": "PASS", "read_only": True, **proof}
+        metadata = types.SimpleNamespace(st_uid=0, st_mode=0o100755)
+        snapshot = Path("/synthetic/snapshot")
+        with patch.dict(PRODUCER, {"trusted_directory": lambda *_: None}), \
+                patch.object(Path, "stat", return_value=metadata), \
+                patch.object(Path, "lstat", return_value=metadata), \
+                patch.object(CUT["os"], "geteuid", return_value=1000), \
+                patch.object(CUT["subprocess"], "run") as run:
+            run.return_value.stdout = json.dumps(expected).encode()
+            CUT["inspect_kernel"](snapshot, proof, 0)
+            self.assertEqual(run.call_args.args[0], ["/usr/bin/sudo", "-n",
+                "/usr/libexec/mainrag/source-cut-capture", "--source-root-sha256", proof["source_root_sha256"],
+                "--inspect-cut-id", proof["cut_id"]])
+            for altered in ({**expected, "read_only": False}, {**expected, "snapshot_uuid": str(uuid.uuid4())},
+                            {**expected, "descriptor_sha256": "c" * 64}, {**expected, "arbitrary_path": "/synthetic"}):
+                run.return_value.stdout = json.dumps(altered).encode()
+                with self.assertRaisesRegex(RuntimeError, "kernel"):
+                    CUT["inspect_kernel"](snapshot, proof, 0)
+
     def fixture(self, parent):
         origin = parent / "origin"; root = origin / "sessions"
         registry = parent / "registry"; cut_id = str(uuid.uuid4())

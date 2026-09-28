@@ -903,9 +903,12 @@ characters. Existing immutable segment identities remain compatible.
 An explicitly configured `btrfs-cut-v1` filesystem source retains its registered
 root, relative item identities and exact file filters. Its release profile is
 `mainrag.fs-release-candidate.v4.btrfs-cut-v1.scope-<digest-or-unfiltered>.fragment-1048576-newline-65536`.
-The privileged producer accepts only an allowlisted root digest. Readers verify
-root-owned immutable descriptor history, actual snapshot and origin UUIDs, and
-the kernel read-only property. A mutable current descriptor cannot redirect an
+The privileged producer accepts only an allowlisted root digest. Its inspection
+mode additionally accepts an opaque cut UUID, never a caller-selected path or
+policy. Unprivileged readers use that fixed helper for the kernel inspection and
+independently verify root-owned immutable descriptor history, actual snapshot
+and origin UUIDs, and the kernel read-only property. Service write access is
+restricted to the owned cut registry. A mutable current descriptor cannot redirect an
 ongoing read. Nonrecursive snapshots with nested source subvolumes are rejected.
 Nontext conversation files are rejected rather than silently omitted.
 

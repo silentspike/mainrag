@@ -2,15 +2,45 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import runpy
+import stat
+import subprocess
 import uuid
 
 PRODUCER = runpy.run_path(str(Path(__file__).with_name("source-cut-capture.py")))
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 CUT_PROFILE = "mainrag.fs-release-candidate.v4.btrfs-cut-v1."
+
+
+def inspect_kernel(snapshot: Path, proof: dict, owner: int) -> None:
+    if snapshot.stat().st_uid != owner:
+        raise RuntimeError("snapshot property authority is unsafe")
+    if owner != 0 or os.geteuid() == 0:
+        binary = PRODUCER["inspector"]()
+        identity = PRODUCER["identity"](binary, snapshot)
+        immutable = PRODUCER["command"](binary, "property", "get", "-ts", snapshot, "ro") == "ro=true\n"
+        if identity != {"uuid": proof["snapshot_uuid"], "parent_uuid": proof["origin_uuid"]} or not immutable:
+            raise RuntimeError("cut kernel identity is not immutable")
+        return
+    helper = Path("/usr/libexec/mainrag/source-cut-capture")
+    PRODUCER["trusted_directory"](helper.parent)
+    meta = helper.lstat()
+    if not stat.S_ISREG(meta.st_mode) or meta.st_uid != 0 or meta.st_mode & 0o022:
+        raise RuntimeError("cut inspector authority is unsafe")
+    result = subprocess.run(["/usr/bin/sudo", "-n", str(helper),
+        "--source-root-sha256", proof["source_root_sha256"], "--inspect-cut-id", proof["cut_id"]],
+        capture_output=True, check=True, timeout=120)
+    if len(result.stdout) > PRODUCER["MAX_BYTES"]:
+        raise RuntimeError("cut inspection exceeds its bound")
+    observed = json.loads(result.stdout)
+    expected = {key: proof[key] for key in (
+        "source_root_sha256", "cut_id", "descriptor_sha256", "snapshot_uuid", "origin_uuid")}
+    if observed != {"status": "PASS", "read_only": True, **expected}:
+        raise RuntimeError("cut kernel identity is not immutable")
 
 
 def cut_observation_valid(value: object) -> bool:
@@ -92,11 +122,5 @@ def read_root(registered_root: Path, observation: dict,
     if (control["snapshot_root"] != str(snapshot) or control["read_root"] != str(selected)
             or selected.resolve(strict=True) != selected or not selected.is_dir()):
         raise RuntimeError("cut read boundary is redirected")
-    binary = PRODUCER["inspector"]()
-    if snapshot.stat().st_uid != _owner:
-        raise RuntimeError("snapshot property authority is unsafe")
-    identity = PRODUCER["identity"](binary, snapshot)
-    if (identity != {"uuid": proof["snapshot_uuid"], "parent_uuid": proof["origin_uuid"]}
-            or PRODUCER["command"](binary, "property", "get", "-ts", snapshot, "ro") != "ro=true\n"):
-        raise RuntimeError("cut kernel identity is not immutable")
+    inspect_kernel(snapshot, proof, _owner)
     return selected
