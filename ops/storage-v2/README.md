@@ -942,3 +942,16 @@ in score and lexical sort key. All ties at that boundary are included before
 applying the unchanged external identity and occurrence ID order. Full counts,
 normalization, score explanations, content and authorization remain unchanged.
 This does not reuse a failed latency result or relax qualification limits.
+
+### Requalification of immutable candidates
+
+Migration 088 permits dual-read recording for verified generations and existing
+release candidates. The API keeps the original generation, fixture and build
+witness checks. No activation or rebuild follows from this eligibility change.
+
+A fresh passing qualification may replace the current evidence slot only with
+unchanged source, generation, build commit, watermark and adapter/analysis/search
+profiles. The previous complete row is archived before the replacement in a
+source-isolated history ledger. Replays retain their identity; a changed manifest
+under the same ID, changed build identity, historical ID reuse, failed gates and
+history mutation are rejected. The current slot remains unique per generation.

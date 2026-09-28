@@ -2679,7 +2679,7 @@ where
                FROM source_generation generation \
                JOIN sources source ON source.id=generation.source_id \
               WHERE generation.source_id = $1 AND generation.generation_seq = $2 \
-                AND generation.status = 'verified'",
+                AND generation.status IN ('verified', 'release_candidate')",
             &[&source_id, &input.generation],
         )
         .await?
