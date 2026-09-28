@@ -107,6 +107,28 @@ class SourceBatchTests(unittest.TestCase):
             finally:
                 globals_["invoke"] = previous
 
+    def test_projection_phase_requires_complete_verification_without_qualification(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); root.chmod(0o700)
+            output = root / "state.json"
+            step = {"name": "project", "tool": "candidate-projections", "args": [
+                "apply", "--source-id", "101", "--state", str(output)], "result_path": str(output)}
+            plan = {"schema_version": "mainrag.storage-v2.source-batch-plan.v1", "package_commit_sha": "a" * 40,
+                    "sources": [{"source_id": 101, "adapter": "fs", "failure_group": "owned", "planned_items": 1, "steps": [step]}]}
+            OPERATOR["validate_plan"](plan)
+            value = {"source_id": 101, "status": "PASS_PROJECTIONS_ONLY", "qualification": False,
+                     "pending": None, "verification": {"invalid_count": 0, "missing_count": 0}}
+            OPERATOR["write_state"](output, value)
+            self.assertEqual(OPERATOR["validate_result"](step, output, 101, "a" * 40)[0], value)
+            for changes in [{"qualification": True}, {"pending": [{"occurrence_id": 1}]},
+                            {"verification": {"invalid_count": 0, "missing_count": 1}}]:
+                OPERATOR["write_state"](output, {**value, **changes})
+                with self.assertRaises(ValueError):
+                    OPERATOR["validate_result"](step, output, 101, "a" * 40)
+            step["args"][0] = "plan"
+            with self.assertRaises(RuntimeError):
+                OPERATOR["validate_plan"](plan)
+
     def test_crashed_phase_requires_reconciliation(self) -> None:
         state = {"sources": [{"status": "running", "steps": [
             {"status": "running", "pid": 999999999,

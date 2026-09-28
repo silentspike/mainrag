@@ -28,6 +28,7 @@ TOOLS = {
     "source-review": "source-snapshot-review.py",
     "candidate-build": "release-candidate.py",
     "candidate-reconstruct": "reconstruct-candidate-checkpoint.py",
+    "candidate-projections": "restore-candidate-projections.py",
     "candidate-verify": "release-candidate.py",
 }
 PHASE = {"candidate-build": "build", "candidate-verify": "verify"}
@@ -95,9 +96,11 @@ def validate_plan(plan: dict) -> None:
                 raise RuntimeError("source batch contains an invalid step")
             if tool in PHASE and (not arguments or arguments[0] != PHASE[tool]):
                 raise RuntimeError("candidate step does not name its supported phase")
+            if tool == "candidate-projections" and (not arguments or arguments[0] != "apply"):
+                raise RuntimeError("projection step must name the guarded apply phase")
             required = "--protected-output" if tool == "source-review" else (
                 "--checkpoint" if tool in {"candidate-build", "candidate-reconstruct"}
-                else "--output")
+                else "--state" if tool == "candidate-projections" else "--output")
             if arguments.count("--source-id") != 1 or arguments[arguments.index("--source-id") + 1:
                     arguments.index("--source-id") + 2] != [str(sid)] \
                     or arguments.count(required) != 1 or arguments[arguments.index(required) + 1:
@@ -168,6 +171,11 @@ def validate_result(step_plan: dict, result_path: Path,
             result.get("qualification", {}).get("manifest", {}).get("status") != "PASS"
             or result.get("result", {}).get("status") != "release_candidate"):
         raise ValueError("qualification result is not accepted")
+    if step_plan["tool"] == "candidate-projections" and (
+            result.get("status") != "PASS_PROJECTIONS_ONLY" or result.get("qualification") is not False
+            or result.get("pending") is not None or result.get("verification", {}).get("invalid_count") != 0
+            or result.get("verification", {}).get("missing_count") != 0):
+        raise ValueError("complete original projection verification is not established")
     return result, hashlib.sha256(result_bytes).hexdigest()
 
 

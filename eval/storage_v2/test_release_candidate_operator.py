@@ -589,6 +589,25 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
         self.assertFalse(MODULE.query_coverage_gates(
             seed, current, storage, invalid, checkpoint)["passed"])
 
+    def test_empty_legacy_snapshot_is_valid_but_cannot_hide_baseline_hits(self) -> None:
+        checkpoint = {"source_id": 1, "source_watermark_sha256": "a" * 64}
+        review = {"schema_version": "mainrag.storage-v2.source-snapshot-review.v1",
+                  "source_id": 1, "source_type": "fs", "adapter_profile_id": "fixture-adapter",
+                  "source_watermark_sha256": "a" * 64, "source_root_sha256": "b" * 64,
+                  "source_config_sha256": "c" * 64, "item_count": 13, "captured_at_unix": 1,
+                  "paths": {}, "status_counts": {}}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "review.json"
+            MODULE.atomic_private_json(path, review)
+            sha = MODULE.hashlib.sha256(path.read_bytes()).hexdigest()
+            frozen = MODULE.read_snapshot_review(path, sha, checkpoint, "fixture-adapter")
+            self.assertEqual(frozen["paths"], {})
+        seed, current, storage, proof, candidate = self.coverage_fixture()
+        proof["schema_version"] = "mainrag.storage-v2.query-coverage.v4"
+        candidate["source_watermark_sha256"] = "a" * 64
+        frozen["source_id"] = candidate["source_id"]
+        self.assertFalse(MODULE.query_coverage_gates(seed, current, storage, proof, candidate, frozen)["passed"])
+
     def test_source_snapshot_review_preserves_same_byte_recall_only(self) -> None:
         seed, current, storage, proof, checkpoint = self.coverage_fixture()
         proof["schema_version"] = "mainrag.storage-v2.query-coverage.v4"
