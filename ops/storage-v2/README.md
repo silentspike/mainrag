@@ -774,6 +774,28 @@ evidence UUIDs. A candidate is not activation authority.
 
 ## Complete search aggregate comparison
 
+### Query-specific compatibility projection fallback
+
+Migration 094 keeps an occurrence's historical compatibility rank when its
+immutable legacy projection matches the requested query. Merely having a legacy
+projection does not disable generated segment matches for other queries: older
+indexing may cover only a prefix of the complete source file. The fallback
+collects matching projection identities once within the authorized requested
+sources, then excludes those identities from the generated branch. It does not
+enumerate every legacy chunk separately for each requested occurrence.
+
+Both the precise search surface and the historical scalar evidence surface use
+the same rule. Existing compatibility scores, immutable-body guards, generated
+score tiers, owner, privileges and security settings remain unchanged. Migration
+replay is guarded against a differing definition. No generation, source
+watermark, stored projection or active pointer is rewritten.
+
+The PostgreSQL regression requires a previously hidden suffix conjunction to
+appear with source-backed query evidence, while complete existing search
+envelopes and legacy ranks remain identical. Duplicate requests, denied sources
+and replay are included. Real source quality and latency still require normal
+qualification with the original build witness and independently frozen Gold.
+
 Migration 052 materializes the four complete per-occurrence search aggregates
 once and uses function-local custom planning for parameter-sensitive source
 and generation cardinalities. It does not change scope, Boolean matching,
