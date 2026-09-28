@@ -955,3 +955,39 @@ profiles. The previous complete row is archived before the replacement in a
 source-isolated history ledger. Replays retain their identity; a changed manifest
 under the same ID, changed build identity, historical ID reuse, failed gates and
 history mutation are rejected. The current slot remains unique per generation.
+
+### Restore original candidate projections
+
+`restore-candidate-projections.py` plans and resumes deterministic lexical and
+compatibility rank projections for a sealed, verified or candidate generation.
+It reconciles the live native adapter watermark against the original witness;
+source drift requires a different plan or a real source build. It preserves the
+original generation, build commit, membership and inactive pointer.
+
+The private plan freezes the generation/run/registration identities, projection
+function definitions and authority, operator bytes and canonical Rust character
+chunker. Apply requires an exact private plan digest and a fresh passing
+maintenance/resource/backup preflight. Plans and preflights expire after fifteen
+minutes at admission; renew them before resuming longer runs. A refreshed plan
+can resume the same cursor only when its original generation, source watermark,
+operator, canonical planner and projection functions retain their exact identities.
+The state retains previous plan digests. Projection completion does not claim a
+backup restore, body/pack verification, search qualification or activation.
+
+Groups contain at most 32 original documents and 16 MiB of source text; one
+source body cannot exceed 8 MiB. Generated segments retain the accepted Unicode
+character chunking, overlap and first-match positions and are submitted in groups
+of at most 256 to the existing immutable writer. Existing segment projections
+receive compatibility ranks only. Empty legacy file sets remain empty.
+
+Every batch locks the source registry, logical source, original generation and
+sealed run before checking frozen identities and invoking the authorized writers.
+The operator stores a private, fsynced pending intent before the transaction. If a
+commit reply is lost, resume retains the original projection mode, reconciles
+immutable source identities and repeats only idempotent projection writes. It
+never repeats source construction. Signals stop at the current batch boundary.
+The source batch tool accepts the `candidate-projections` phase and requires
+`PASS_PROJECTIONS_ONLY`; the subsequent normal frozen-gold qualification remains
+mandatory. All temporary database tables belong to their transaction and drop at
+commit or rollback; private plans and states belong to the operational evidence
+owner and follow its retention manifest.
