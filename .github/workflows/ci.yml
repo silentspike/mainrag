@@ -369,8 +369,9 @@ jobs:
               'eval.storage_v2.schema.test_keyword_tie_order',
               'eval.storage_v2.schema.test_content_schema',
               'eval.storage_v2.schema.test_pack_epoch_fence',
+              'eval.storage_v2.schema.test_query_coverage_evidence.QueryCoverageTests.test_y_source_backed_postgres_lexeme_keeps_chunk_order_without_legacy_reads',
           ])
-          assert suite.countTestCases() >= 30, 'Expected search, pack reader-fence and append frontier regressions'
+          assert suite.countTestCases() >= 31, 'Expected search, pack reader-fence, append frontier and lexical window regressions'
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           raise SystemExit(0 if result.wasSuccessful() and not result.skipped else 1)
           PY

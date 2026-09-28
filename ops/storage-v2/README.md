@@ -532,7 +532,9 @@ resource gates, records accepted dual-read evidence, and only then submits the
 qualification envelope. Raw checkpoints, seeds, result sets, and evidence stay
 outside Git with mode `0600`.
 The lexical projection check reconstructs every segment digest and FTS vector.
-For large generations its PostgreSQL statement has a 30-minute transaction-local
+It materializes bounded, overlapping windows of each immutable search document
+once, so a large document is not detoasted once per segment. For large
+generations its PostgreSQL statement has a 30-minute transaction-local
 deadline; the prior deadline is restored before subsequent verification queries.
 The integrity comparison and required zero-error counts are unchanged.
 
