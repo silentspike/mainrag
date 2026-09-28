@@ -803,6 +803,28 @@ SELECT node_id || ':' || id || ':' || encode(digest,'hex') FROM view_row;
         self.assert_sql_fails(self.actor(schema.OTHER_ID,requests[0].rsplit('; ',1)[1]),
                               "authorized generation selector required")
 
+        # Unbound documents can make a globally common term enormous without
+        # changing this source's corpus or any of its scores. Exceed the probe
+        # cap, then require full result identity through both complete paths.
+        self.sql(self.admin(
+            "SELECT count(*) FROM (SELECT storage_v2_put_search_document("
+            "'bounded-probe-fixture-'||n::TEXT,'node',"
+            f"(SELECT content_root_node_id FROM artifact_version WHERE id={known_artifact}),"
+            "(SELECT document.search_text FROM storage_v2_search_document document "
+            "JOIN storage_v2_search_view_document binding ON binding.document_id=document.id "
+            "JOIN occurrence occurrence_row ON occurrence_row.view_id=binding.view_id "
+            f"WHERE occurrence_row.id={known_occurrence} AND binding.ordinal=0),"
+            "ARRAY[]::TEXT[]) FROM generate_series(1,4097) n) docs"))
+        self.assertEqual([self.sql(request) for request in requests],current_envelopes)
+        for _ in range(2):
+            self.file(schema.ROOT / "migrations/093_storage_v2_bounded_term_probes.sql")
+            self.assertEqual([self.sql(request) for request in requests],current_envelopes)
+            self.assertEqual(self.sql(changed_metadata),authority)
+            self.assertEqual([self.sql(self.actor(actor,presence_request))
+                              for actor in (schema.ADMIN_ID,schema.OTHER_ID)],presence_before)
+        self.assert_sql_fails(self.actor(schema.OTHER_ID,requests[0].rsplit('; ',1)[1]),
+                              "authorized generation selector required")
+
         self.assertEqual(json.loads(self.sql(self.admin(verify_window)))["invalid_count"],0)
 
         # Corruption is injected only in a disposable fixture transaction.

@@ -501,6 +501,15 @@ ALTER TABLE storage_v2_activation_set_evidence
             self.assertEqual([self.search(ADMIN,digest),self.search(READER,digest),
                               self.search(ADMIN,digest,include_test=True),self.search(ADMIN,digest,source=1)],before)
             self.assertEqual(self.sql(metadata_sql),authority)
+        self.sql(self.admin(
+            "SELECT count(*) FROM (SELECT storage_v2_put_search_document("
+            f"'active-bounded-probe-fixture-'||n::TEXT,'node',{node},'{updated}',"
+            "ARRAY[]::TEXT[]) FROM generate_series(1,4097) n) docs"))
+        for _ in range(2):
+            self.command(self.database,file=ROOT/"migrations/093_storage_v2_bounded_term_probes.sql")
+            self.assertEqual([self.search(ADMIN,digest),self.search(READER,digest),
+                              self.search(ADMIN,digest,include_test=True),self.search(ADMIN,digest,source=1)],before)
+            self.assertEqual(self.sql(metadata_sql),authority)
         self.sql("INSERT INTO sources(id,name,type,path) VALUES "
                  "(4,'late-source','fixture','late-source')")
         self.assert_sql_fails(
