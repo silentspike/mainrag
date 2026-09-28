@@ -677,7 +677,41 @@ SELECT node_id || ':' || id || ':' || encode(digest,'hex') FROM view_row;
         self.assertEqual(self.sql(self.actor(schema.OTHER_ID,rank_request)),"[]")
         self.file(schema.ROOT / "migrations/086_storage_v2_bounded_rank_projection.sql")
         self.assertEqual(self.sql(self.admin(rank_request)),previous_ranks)
+        # Keep complete envelopes, all query classes and boundary ties exact.
+        # The extra fixture has more equal-score/equal-sort-key views than k.
+        from eval.storage_v2.schema.test_search_materialization import SearchMaterializationTests
+        SearchMaterializationTests.make_search_fixture(self)
+        term={"type":"term","value":"alpha"}
+        phrase={"type":"phrase","value":"alpha beta"}
+        cases=[term,phrase,{"type":"exact","value":"exact_key"},
+               {"type":"term","value":"missing"},
+               {"type":"and","children":[term,{"type":"term","value":"beta"}]},
+               {"type":"and","children":[term,{"type":"not","children":[phrase]}]},
+               {"type":"or","children":[term,phrase]}]
+        requests=[]
+        for source in (15,19):
+            for ast in cases:
+                for limit in (1,10,1000):
+                    encoded=json.dumps(ast).replace("'","''")
+                    requests.append(self.admin(
+                        f"SELECT storage_v2_search_exact({source},'1','{encoded}'::JSONB,'{{}}'::JSONB,{limit})"))
+        before=[self.sql(request) for request in requests]
+        metadata="SELECT jsonb_agg(to_jsonb(p)-'prosrc' ORDER BY proname) FROM pg_proc p WHERE oid IN (" \
+                 "'storage_v2_search_exact(bigint,text,jsonb,jsonb,bigint)'::regprocedure," \
+                 "'storage_v2_search_active_unchecked(text,jsonb,jsonb,bigint,bigint,boolean)'::regprocedure," \
+                 "'storage_v2_source_segment_ranks(bigint[],text)'::regprocedure)"
+        authority=self.sql(metadata)
+        self.file(schema.ROOT / "migrations/087_storage_v2_scoped_search_scaling.sql")
+        self.assertEqual([self.sql(request) for request in requests],before)
+        self.assertEqual(self.sql(self.admin(rank_request)),previous_ranks)
         self.assertEqual(self.sql(self.actor(schema.OTHER_ID,rank_request)),"[]")
+        self.assertEqual(self.sql(metadata),authority)
+        self.file(schema.ROOT / "migrations/087_storage_v2_scoped_search_scaling.sql")
+        self.assertEqual(self.sql(metadata),authority)
+        self.assertEqual(self.exact_search(term,source_id=15)["fully_scored_views"],24)
+        self.assertEqual(self.exact_search(term,source_id=15)["total"],24)
+        self.assert_sql_fails(self.actor(schema.OTHER_ID,requests[0].rsplit('; ',1)[1]),
+                              "authorized generation selector required")
         self.assertEqual(self.sql(self.actor(schema.OTHER_ID,"SELECT count(*) FROM storage_v2_lexical_segment")),"0")
         self.assertEqual(self.sql("SELECT relforcerowsecurity FROM pg_class WHERE oid='storage_v2_lexical_segment'::REGCLASS"),"t")
         self.assert_sql_fails(self.actor(schema.OTHER_ID,batch),"authorized source-backed lexical segment required")
