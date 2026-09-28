@@ -25,7 +25,7 @@ async fn create_schema(client: &tokio_postgres::Client) -> anyhow::Result<()> {
         .await?;
     client
         .batch_execute(
-            "CREATE TABLE sources (id BIGINT PRIMARY KEY, name TEXT, type TEXT, path TEXT,
+            "CREATE TABLE sources (id BIGINT PRIMARY KEY, name TEXT, type TEXT, path TEXT, config JSONB,
          last_synced TIMESTAMPTZ, file_count BIGINT, total_size BIGINT, updated_at TIMESTAMPTZ);
          ALTER TABLE chunks ADD COLUMN chunk_type TEXT, ADD COLUMN content_hash BYTEA,
          ADD COLUMN content_compressed BYTEA, ADD COLUMN content_text TEXT,
@@ -133,6 +133,26 @@ async fn exercise(client: &tokio_postgres::Client, pool: PostgresPool) -> anyhow
     ensure!(
         rows == 2,
         "both supported ingests must complete their ledger writes"
+    );
+    // A configured narrowing must stop content work without deleting legacy
+    // history. Exercise the real deletion detector, not only the glob matcher.
+    let config = serde_json::json!({"file_patterns": ["*.jsonl"]});
+    client
+        .execute("UPDATE sources SET config=$1 WHERE id=1", &[&config])
+        .await?;
+    let filtered = service.index_source(1).await?;
+    ensure!(filtered.errors.is_empty() && filtered.files_deleted == 0);
+    ensure!(filtered.files_processed == 0 && filtered.files_skipped == 0);
+    ensure!(filtered.source_io["total_content_read_bytes"] == 0);
+    let preserved_ids: Vec<i64> = client
+        .query("SELECT id FROM chunks ORDER BY id", &[])
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    ensure!(
+        preserved_ids == initial_ids,
+        "excluded legacy history changed"
     );
     let outbox: i64 = client
         .query_one("SELECT COUNT(*) FROM indexing_outbox", &[])
