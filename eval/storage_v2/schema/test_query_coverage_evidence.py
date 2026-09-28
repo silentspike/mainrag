@@ -776,6 +776,33 @@ SELECT node_id || ':' || id || ':' || encode(digest,'hex') FROM view_row;
         self.assert_sql_fails(self.actor(schema.OTHER_ID,requests[0].rsplit('; ',1)[1]),
                               "authorized generation selector required")
 
+        # Probe terms once and test segment presence without enumerating its
+        # rows. Duplicate/NULL requests, generated/copied provenance and denied
+        # source visibility must keep the complete result and function metadata.
+        presence_request=("SELECT COALESCE(jsonb_agg(occurrence_id ORDER BY occurrence_id),'[]'::JSONB) "
+                          "FROM storage_v2_source_segment_presence("
+                          f"ARRAY[{window_occurrence},{context_occurrence},{known_occurrence},"
+                          f"{generated_occurrence},{known_occurrence},NULL,999999999]::BIGINT[])")
+        presence_before=[self.sql(self.actor(actor,presence_request))
+                         for actor in (schema.ADMIN_ID,schema.OTHER_ID)]
+        changed_metadata=metadata.replace(
+            "'storage_v2_source_segment_ranks(bigint[],text)'::regprocedure)",
+            "'storage_v2_source_segment_ranks(bigint[],text)'::regprocedure,"
+            "'storage_v2_source_segment_ranks_precise(bigint[],text)'::regprocedure,"
+            "'storage_v2_source_segment_presence(bigint[])'::regprocedure)")
+        authority=self.sql(changed_metadata)
+        current_envelopes=[self.sql(request) for request in requests]
+        for _ in range(2):
+            self.file(schema.ROOT / "migrations/092_storage_v2_query_posting_reuse.sql")
+            self.assertEqual([self.sql(request) for request in requests],current_envelopes)
+            self.assertEqual([self.sql(self.actor(actor,presence_request))
+                              for actor in (schema.ADMIN_ID,schema.OTHER_ID)],presence_before)
+            self.assertEqual(self.sql(changed_metadata),authority)
+            self.assertEqual(self.sql(self.admin(rank_request)),previous_ranks)
+        self.assertEqual(presence_before[1],"[]")
+        self.assert_sql_fails(self.actor(schema.OTHER_ID,requests[0].rsplit('; ',1)[1]),
+                              "authorized generation selector required")
+
         self.assertEqual(json.loads(self.sql(self.admin(verify_window)))["invalid_count"],0)
 
         # Corruption is injected only in a disposable fixture transaction.

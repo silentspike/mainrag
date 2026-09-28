@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Recover a build checkpoint from sealed database witness and live adapter state.
 
-This is a read-only reconciliation step for a verified generation whose local
-build checkpoint was lost. It does not change the generation or its build identity.
+This is a read-only reconciliation step for a verified or candidate generation
+whose local checkpoint was lost. It does not change the generation or build identity.
 """
 
 from __future__ import annotations
@@ -87,8 +87,8 @@ def api_service_start() -> tuple[int, int]:
 def reconstruct(args: argparse.Namespace) -> dict:
     generation = database_generation(args.database, args.source_id, args.generation_id)
     witness = generation["witness"]
-    if generation["status"] != "verified" or generation["run_status"] != "sealed" \
-            or generation["source_type"] not in {"fs", "git", "managed_append"} \
+    if generation["status"] not in {"verified", "release_candidate"} or generation["run_status"] != "sealed" \
+            or generation["source_type"] not in {"fs", "git", "managed_append", "pdf"} \
             or generation["item_count"] != generation["run_expected_item_count"] \
             or not isinstance(witness, dict) \
             or witness.get("kind") != "release-candidate-build" \

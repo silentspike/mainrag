@@ -484,6 +484,23 @@ ALTER TABLE storage_v2_activation_set_evidence
         self.assertEqual(after[0]["fully_scored_views"],2)
         self.assertEqual(after[1]["fully_scored_views"],3)
         self.assertEqual(after[2]["fully_scored_views"],1)
+        # Exercise the complete current read chain against the same activated
+        # fixture, then require exact envelopes and permissions after term reuse.
+        for migration in sorted((ROOT/"migrations").glob("*.sql")):
+            number=migration.name.split("_",1)[0]
+            if number.isdigit() and 88 <= int(number) <= 91:
+                self.command(self.database,file=migration)
+        before=[self.search(ADMIN,digest),self.search(READER,digest),
+                self.search(ADMIN,digest,include_test=True),self.search(ADMIN,digest,source=1)]
+        metadata_sql=("SELECT jsonb_agg(to_jsonb(p)-'prosrc' ORDER BY p.oid) FROM pg_proc p "
+                      "WHERE oid IN ('storage_v2_search_exact(bigint,text,jsonb,jsonb,bigint)'::REGPROCEDURE,"
+                      f"'{signature}'::REGPROCEDURE,'storage_v2_source_segment_presence(bigint[])'::REGPROCEDURE)")
+        authority=self.sql(metadata_sql)
+        for _ in range(2):
+            self.command(self.database,file=ROOT/"migrations/092_storage_v2_query_posting_reuse.sql")
+            self.assertEqual([self.search(ADMIN,digest),self.search(READER,digest),
+                              self.search(ADMIN,digest,include_test=True),self.search(ADMIN,digest,source=1)],before)
+            self.assertEqual(self.sql(metadata_sql),authority)
         self.sql("INSERT INTO sources(id,name,type,path) VALUES "
                  "(4,'late-source','fixture','late-source')")
         self.assert_sql_fails(
