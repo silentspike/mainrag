@@ -984,6 +984,16 @@ rank tuples; immutable hit identities are hydrated only at the exact score and
 tie-key boundary. Corpus normalization, complete scoped evaluation, authorization,
 final total order and latency limits remain unchanged.
 
+Immutable lexical fallback first identifies matching requested occurrences
+through query and source predicates. A source index supports those probes
+alongside the lexical GIN index. The matching expression stays inline so the
+planner can use indexed occurrence lookups instead of repeatedly scanning a
+materialized vector set. Its FTS predicate is evaluated at that input boundary.
+A query with no lexical match avoids visiting every segment of every requested
+document. Both rank surfaces retain
+their source/artifact checks, copied/generated tiers and complete tie order.
+The migration validates the index identity and supports replay.
+
 Interactive exact and active reads materialize the shared narrow corpus binding
 once and disable JIT only inside those two functions. Full corpus normalization,
 query classes, authorization and complete result envelopes remain unchanged.
