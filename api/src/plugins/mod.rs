@@ -9,6 +9,7 @@ use async_trait::async_trait;
 
 pub mod export;
 pub mod fs;
+pub mod fs_scope;
 pub mod git;
 #[cfg(feature = "storage-v2-retrieval")]
 pub mod managed_append;
@@ -137,4 +138,15 @@ pub fn get_plugin(source_type: &str) -> Option<Box<dyn SourcePlugin>> {
         "export" => Some(Box::new(export::ExportPlugin::new())),
         _ => None,
     }
+}
+
+/// Apply registered selection without changing other adapters' contracts.
+pub fn get_configured_plugin(
+    source_type: &str,
+    config: &serde_json::Value,
+) -> anyhow::Result<Option<Box<dyn SourcePlugin>>> {
+    if source_type == "fs" {
+        return Ok(Some(Box::new(fs::FilesystemPlugin::with_config(config)?)));
+    }
+    Ok(get_plugin(source_type))
 }

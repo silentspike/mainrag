@@ -97,6 +97,7 @@ toml = "0.8"
 # Plugins
 git2 = "0.20"
 ignore = "0.4"
+globset = "0.4"
 html-escape = "0.2"
 scraper = "0.21"
 hex = "0.4"

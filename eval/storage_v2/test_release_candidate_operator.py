@@ -624,6 +624,17 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
         self.assertEqual(binding["source_snapshot_review_sha256"], review["review_sha256"])
         self.assertTrue(MODULE.query_coverage_gates(
             rebound, current, storage, proof, checkpoint, review)["passed"])
+        for status in ("outside_configured_scope", "source_file_missing"):
+            classified = copy.deepcopy(review)
+            classified["paths"][stale_sha]["status"] = status
+            kept = MODULE.query_coverage_gates(seed, current, storage, proof, checkpoint, classified)
+            self.assertTrue(kept["passed"])
+            self.assertFalse(MODULE.query_coverage_gates(
+                stale_seed, current, storage, proof, checkpoint, classified)["passed"])
+            rebound, binding = MODULE.bind_automatic_expectation(stale_seed, current, classified)
+            self.assertEqual(binding["original_source_status"], status)
+            self.assertTrue(MODULE.query_coverage_gates(
+                rebound, current, storage, proof, checkpoint, classified)["passed"])
         unchanged, no_binding = MODULE.bind_automatic_expectation(
             stale_seed, {"results": [stale]}, review)
         self.assertEqual(unchanged, stale_seed)

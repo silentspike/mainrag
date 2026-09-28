@@ -13,9 +13,9 @@ use sysinfo::Disks;
 use tokio_postgres::GenericClient;
 
 use super::shadow_slice::{
-    observe_release_watermark, observe_release_watermark_with_prefix, run_release_candidate_build,
-    verify_release_candidate, ReleaseCandidateVerifyInput, ReleaseCandidateVerifyResult,
-    ReleaseWatermarkObservation, ShadowSliceResult,
+    observe_release_watermark_configured, observe_release_watermark_with_prefix,
+    run_release_candidate_build, verify_release_candidate, ReleaseCandidateVerifyInput,
+    ReleaseCandidateVerifyResult, ReleaseWatermarkObservation, ShadowSliceResult,
 };
 use crate::plugins::managed_append::TrustedPrefix;
 
@@ -112,7 +112,27 @@ async fn observe_active_watermark<C: GenericClient + Sync>(
     adapter_profile_id: &str,
 ) -> Result<ReleaseWatermarkObservation> {
     if source_type != "managed_append" {
-        return observe_release_watermark(source_id, source_type, source_path).await;
+        let source = client
+            .query_one(
+                "SELECT type, path, config FROM sources WHERE id=$1 FOR SHARE",
+                &[&source_id],
+            )
+            .await?;
+        ensure!(
+            source.get::<_, String>("type") == source_type
+                && source.get::<_, String>("path")
+                    == source_path.to_str().context("source path is not UTF-8")?,
+            "registered active source identity changed"
+        );
+        return observe_release_watermark_configured(
+            source_id,
+            source_type,
+            source_path,
+            &source
+                .get::<_, Option<Value>>("config")
+                .unwrap_or(Value::Null),
+        )
+        .await;
     }
     let prefix = managed_prefix(client, source_id, generation_id, adapter_profile_id)
         .await?
