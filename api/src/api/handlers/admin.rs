@@ -43,6 +43,8 @@ pub struct CreateSourceRequest {
 #[derive(Debug, Deserialize)]
 pub struct ShadowSliceRequest {
     pub commit_sha: String,
+    #[serde(default)]
+    pub progress_id: Option<Uuid>,
 }
 
 #[cfg(feature = "storage-v2-retrieval")]
@@ -148,7 +150,47 @@ pub async fn admin_build_release_candidate(
     let commit_sha = request.commit_sha;
     let pack_root = state.config.storage_v2_pack_root.clone();
     let pack_io_buffer_bytes = state.config.storage_v2_pack_io_buffer_bytes;
-    state
+    if request.progress_id.is_some() {
+        state
+            .rls_client
+            .with_rls(user_id, true, move |transaction| {
+                Box::pin(async move {
+                    let authorized: bool = transaction
+                        .query_one(
+                            "SELECT EXISTS(SELECT 1 FROM sources WHERE id=$1) \
+                     AND storage_v2_can_access_source($1,'write')",
+                            &[&source_id],
+                        )
+                        .await?
+                        .get(0);
+                    if !authorized {
+                        return Err(AppError::NotFound("source not available".into()));
+                    }
+                    Ok(())
+                })
+            })
+            .await?;
+    }
+    let progress = request
+        .progress_id
+        .map(|attempt| {
+            crate::services::build_progress::BuildProgressRecorder::create(
+                &pack_root,
+                source_id,
+                &commit_sha,
+                state.instance_id,
+                attempt,
+            )
+            .map(Arc::new)
+            .map_err(|_| {
+                AppError::BadRequest(
+                    "progress attempt cannot be created; reconcile existing state".into(),
+                )
+            })
+        })
+        .transpose()?;
+    let build_progress = progress.clone();
+    let result = state
         .rls_client
         .with_rls(user_id, true, move |transaction| {
             Box::pin(async move {
@@ -161,27 +203,86 @@ pub async fn admin_build_release_candidate(
                     .ok_or_else(|| AppError::NotFound(format!("Source {source_id} not found")))?;
                 let source_type: String = source.get("type");
                 let source_path: String = source.get("path");
-                let result = crate::services::shadow_slice::run_release_candidate_build(
-                    &**transaction,
-                    source_id,
-                    &source_type,
-                    std::path::Path::new(&source_path),
-                    &pack_root,
-                    pack_io_buffer_bytes,
-                    &commit_sha,
-                )
-                .await
-                .map_err(|error| {
-                    let error_chain = format!("{error:#}");
-                    tracing::error!(
-                        error = %error_chain,
-                        "storage-v2 release-candidate build detail"
-                    );
-                    AppError::Internal(format!(
-                        "storage-v2 release-candidate build failed: {error}"
-                    ))
-                })?;
+                let result =
+                    crate::services::shadow_slice::run_release_candidate_build_with_progress(
+                        &**transaction,
+                        source_id,
+                        &source_type,
+                        std::path::Path::new(&source_path),
+                        &pack_root,
+                        pack_io_buffer_bytes,
+                        &commit_sha,
+                        build_progress.as_deref(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        let error_chain = format!("{error:#}");
+                        tracing::error!(
+                            error = %error_chain,
+                            "storage-v2 release-candidate build detail"
+                        );
+                        AppError::Internal(format!(
+                            "storage-v2 release-candidate build failed: {error}"
+                        ))
+                    })?;
                 Ok(Json(result))
+            })
+        })
+        .await;
+    if let Some(progress) = progress {
+        if progress.finish(result.is_ok()).is_err() {
+            tracing::error!(
+                "build progress final persistence failed; reconcile the generation witness"
+            );
+        }
+    }
+    result
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
+#[derive(Deserialize)]
+pub struct BuildProgressQuery {
+    pub attempt_id: Uuid,
+    pub commit_sha: String,
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
+pub async fn admin_release_candidate_progress(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
+    Path(source_id): Path<i64>,
+    axum::extract::Query(query): axum::extract::Query<BuildProgressQuery>,
+) -> Result<Json<crate::services::build_progress::BuildProgress>> {
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| AppError::Unauthorized("invalid user id".into()))?;
+    let root = state.config.storage_v2_pack_root.clone();
+    let instance = state.instance_id;
+    state
+        .rls_client
+        .with_rls(user_id, true, move |transaction| {
+            Box::pin(async move {
+                let authorized: bool = transaction
+                    .query_one(
+                        "SELECT EXISTS(SELECT 1 FROM sources WHERE id=$1) \
+                 AND storage_v2_can_access_source($1,'write')",
+                        &[&source_id],
+                    )
+                    .await?
+                    .get(0);
+                if !authorized {
+                    return Err(AppError::NotFound("source not available".into()));
+                }
+                let mut value = crate::services::build_progress::read(
+                    &root,
+                    source_id,
+                    &query.commit_sha,
+                    query.attempt_id,
+                )
+                .map_err(|_| AppError::NotFound("progress attempt not available".into()))?;
+                if value.server_instance_id != instance && !value.transaction_committed {
+                    value.status = "interrupted_requires_reconciliation".into();
+                }
+                Ok(Json(value))
             })
         })
         .await
