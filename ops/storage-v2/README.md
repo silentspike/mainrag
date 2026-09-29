@@ -527,6 +527,17 @@ backup, or cumulative budgets passed. Refresh those issue #66 gates before each
 source. The estimates do not authorize a build when any live reserve is below
 its minimum.
 
+For a Git source that advances during an independently reviewed source scan,
+`build` accepts `--git-snapshot-commit-sha` and
+`--expected-source-watermark-sha256` together with the protected
+`--source-snapshot-review`, its exact `--source-snapshot-review-sha256`, and
+`--source-snapshot-gold-review`. The commit must be an ancestor of the current
+registered branch. The operator checks the frozen same-byte gold cases and a
+live observation of that commit before posting. The API reads that immutable
+commit for both the build and final source check; the checkpoint binds the
+review identities for resume. `verify` reobserves the pinned commit from the
+checkpoint. Later upstream changes require a separate final delta.
+
 The server-side verification phase recomputes the generation root, decodes and
 hashes every referenced body/pack entry, reconciles membership/search/analysis
 counts and the active pointer, checks the public intelligence export contract,
@@ -658,6 +669,13 @@ review is bounded at 64 MiB and each live watermark request at 10 minutes so
 large registered file sets can complete without dropping either identity
 check. Only paths proved to have identical bytes retain the ordered legacy
 Top-10 requirement; changed or missing paths are classified separately.
+
+Migration 104 replaces the bounded global posting probe and scoped retry with
+one authorized scoped posting lookup per query term. It changes the exact and
+active readers together, leaves persisted source rows untouched, and retains
+the complete result envelope. Install it after 103 and qualify the affected
+sources against its exact package; a faster component query alone does not
+establish the 2000 ms production latency gate.
 
 Registered filesystem `file_patterns` are positive, case-sensitive globset
 patterns evaluated against relative paths; `*` spans directories, so `*.jsonl`

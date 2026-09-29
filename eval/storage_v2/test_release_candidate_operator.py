@@ -197,6 +197,64 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
             request.assert_not_called()
             self.assertFalse(checkpoint.exists())
 
+    def test_pinned_git_build_binds_review_and_gold_before_post(self) -> None:
+        result = {"active_generation_before": None, "active_generation_after": None,
+                  "item_count": 1, "generation_id": 2, "generation_seq": 1,
+                  "source_watermark_sha256": "c" * 64, "reused_generation": False,
+                  "telemetry": {}}
+        review = {"source_id": 1, "source_type": "git", "git_head": "d" * 40,
+                  "source_watermark_sha256": "c" * 64,
+                  "review_sha256": "e" * 64, "captured_at_unix": 10,
+                  "paths": {"a" * 64: {"status": "same_bytes"}}}
+        cases = [{"id": "1" * 64, "query": "positive", "expected_path_sha256": "a" * 64,
+                  "expects_match": True},
+                 {"id": "2" * 64, "query": "negative", "expected_path_sha256": "0" * 64,
+                  "expects_match": False}]
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            gold = directory / "gold-review.json"
+            MODULE.atomic_private_json(gold, {
+                "source_id": 1, "source_type": "git", "source_class": "fixture-class",
+                "source_snapshot_review_sha256": "e" * 64,
+                "reviewed_at_unix": 11, "cases": cases}, replace=False)
+            arguments = Namespace(api_url="http://fixture.invalid", source_id=1,
+                                  commit_sha="b" * 40, checkpoint=directory / "checkpoint.json",
+                                  pack_root=directory, minimum_free_bytes=50,
+                                  maximum_build_bytes=30,
+                                  git_snapshot_commit_sha="d" * 40,
+                                  expected_source_watermark_sha256="c" * 64,
+                                  source_snapshot_review=directory / "source-review.json",
+                                  source_snapshot_review_sha256="e" * 64,
+                                  source_snapshot_gold_review=gold)
+            with patch.object(MODULE, "read_snapshot_review", return_value=review), \
+                 patch.object(MODULE, "require_live_snapshot") as live, \
+                 patch.object(MODULE, "prebuild_pack_capacity", return_value={"thin_pool": None}), \
+                 patch.object(MODULE, "monitored_build", return_value=(result, "attempt")) as post, \
+                 patch.object(MODULE, "source_state", return_value={
+                     "server_instance_id": "fixture", "active_generation_id": None}), \
+                 patch.object(MODULE.shutil, "disk_usage", return_value=SimpleNamespace(free=100)), \
+                 patch.object(MODULE, "thin_pool_capacity", return_value=None), \
+                 patch.object(MODULE, "validate_telemetry"), \
+                 patch.object(MODULE, "publish_telemetry"), \
+                 patch("builtins.print"):
+                MODULE.build(arguments, "private-token")
+                live.assert_called_once()
+                post.assert_called_once()
+            checkpoint = json.loads(arguments.checkpoint.read_text())
+            self.assertEqual(checkpoint["git_snapshot_commit_sha"], "d" * 40)
+            self.assertEqual(checkpoint["source_snapshot_review_sha256"], "e" * 64)
+            self.assertEqual(checkpoint["source_snapshot_gold_review_sha256"],
+                             MODULE.hashlib.sha256(gold.read_bytes()).hexdigest())
+            arguments.checkpoint = directory / "rejected-checkpoint.json"
+            review["paths"]["a" * 64]["status"] = "changed_bytes"
+            with patch.object(MODULE, "read_snapshot_review", return_value=review), \
+                 patch.object(MODULE, "require_live_snapshot"), \
+                 patch.object(MODULE, "monitored_build") as post:
+                with self.assertRaisesRegex(RuntimeError, "not supported by frozen source bytes"):
+                    MODULE.build(arguments, "private-token")
+                post.assert_not_called()
+            self.assertFalse(arguments.checkpoint.exists())
+
     def test_thin_pool_requires_reviewed_total_growth_before_build_post(self) -> None:
         def report(row):
             return SimpleNamespace(returncode=0, stdout=json.dumps({

@@ -416,8 +416,61 @@ def prebuild_pack_capacity(arguments: argparse.Namespace) -> dict[str, object]:
 def build(arguments: argparse.Namespace, token: str) -> None:
     if arguments.checkpoint.exists() or arguments.checkpoint.is_symlink():
         raise RuntimeError("checkpoint already exists; preserve it and use verify")
+    git_snapshot_commit_sha = getattr(arguments, "git_snapshot_commit_sha", None)
+    expected_source_watermark_sha256 = getattr(
+        arguments, "expected_source_watermark_sha256", None)
+    source_review_sha256 = None
+    gold_review_sha256 = None
+    if git_snapshot_commit_sha is not None:
+        review = read_snapshot_review(
+            arguments.source_snapshot_review,
+            arguments.source_snapshot_review_sha256,
+            {"source_id": arguments.source_id,
+             "source_watermark_sha256": expected_source_watermark_sha256},
+            "mainrag.git-release-candidate.v1",
+        )
+        if review["source_type"] != "git" or review["git_head"] != git_snapshot_commit_sha:
+            raise RuntimeError("pinned Git build differs from independently captured snapshot")
+        require_live_snapshot(arguments.api_url, token, arguments.source_id,
+                              review, git_snapshot_commit_sha)
+        gold_path = arguments.source_snapshot_gold_review
+        metadata = gold_path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077 \
+                or metadata.st_size > 1024 * 1024:
+            raise RuntimeError("prebuild gold review must be a bounded private regular file")
+        raw = gold_path.read_bytes()
+        gold = json.loads(raw)
+        cases = gold.get("cases") if isinstance(gold, dict) else None
+        if not isinstance(gold, dict) or gold.get("source_id") != arguments.source_id \
+                or gold.get("source_type") != "git" \
+                or not isinstance(gold.get("source_class"), str) \
+                or gold.get("source_snapshot_review_sha256") != review["review_sha256"] \
+                or not isinstance(cases, list) or len(cases) < 2 \
+                or not any(isinstance(case, dict) and case.get("expects_match") is True
+                           for case in cases) \
+                or not any(isinstance(case, dict) and case.get("expects_match") is False
+                           for case in cases) \
+                or type(gold.get("reviewed_at_unix")) is not int \
+                or gold["reviewed_at_unix"] < review["captured_at_unix"]:
+            raise RuntimeError("prebuild gold review does not bind the frozen source")
+        for case in cases:
+            if not isinstance(case, dict) or set(case) != {
+                    "id", "query", "expected_path_sha256", "expects_match"} \
+                    or not isinstance(case["query"], str) \
+                    or not 1 <= len(case["query"].encode()) <= 512 \
+                    or type(case["expects_match"]) is not bool \
+                    or not isinstance(case["expected_path_sha256"], str) \
+                    or not re.fullmatch(r"[0-9a-f]{64}", case["expected_path_sha256"]) \
+                    or (case["expects_match"] and review["paths"].get(
+                        case["expected_path_sha256"], {}).get("status") != "same_bytes"):
+                raise RuntimeError("prebuild gold case is not supported by frozen source bytes")
+        source_review_sha256 = review["review_sha256"]
+        gold_review_sha256 = hashlib.sha256(raw).hexdigest()
     pack_capacity = prebuild_pack_capacity(arguments)
     result, progress_attempt = monitored_build(arguments, token, request, atomic_private_json)
+    if expected_source_watermark_sha256 is not None \
+            and result["source_watermark_sha256"] != expected_source_watermark_sha256:
+        raise RuntimeError("pinned Git build returned a different source watermark; reconcile writer")
     if result["active_generation_before"] != result["active_generation_after"]:
         raise RuntimeError("candidate construction changed the active pointer")
     validate_telemetry(result.get("telemetry"), int(result["item_count"]))
@@ -452,6 +505,10 @@ def build(arguments: argparse.Namespace, token: str) -> None:
         "build": result,
         "captured_at_unix": int(time.time()),
     }
+    if git_snapshot_commit_sha is not None:
+        checkpoint["git_snapshot_commit_sha"] = git_snapshot_commit_sha
+        checkpoint["source_snapshot_review_sha256"] = source_review_sha256
+        checkpoint["source_snapshot_gold_review_sha256"] = gold_review_sha256
     try:
         atomic_private_json(arguments.checkpoint, checkpoint, replace=False)
     except FileExistsError as error:
@@ -525,6 +582,9 @@ def read_snapshot_review(path: Path, expected_sha256: str, checkpoint: dict[str,
             not isinstance(review.get("git_head"), str) or not re.fullmatch(
                 r"[0-9a-f]{40}|[0-9a-f]{64}", review["git_head"])):
         raise RuntimeError("source snapshot review Git commit identity differs")
+    if checkpoint.get("git_snapshot_commit_sha") is not None \
+            and review.get("git_head") != checkpoint["git_snapshot_commit_sha"]:
+        raise RuntimeError("source snapshot review differs from pinned Git commit")
     scope_matcher(review.get("filesystem_scope"), adapter_profile_id)
     cut = review.get("filesystem_cut")
     if adapter_profile_id.startswith(cut_contract["CUT_PROFILE"]):
@@ -563,9 +623,11 @@ def read_snapshot_review(path: Path, expected_sha256: str, checkpoint: dict[str,
 
 
 def require_live_snapshot(api_url: str, token: str, source_id: int,
-                          review: dict[str, Any]) -> None:
+                          review: dict[str, Any], git_snapshot_commit_sha: str | None = None) -> None:
+    suffix = ("?git_snapshot_commit_sha=" + git_snapshot_commit_sha
+              if git_snapshot_commit_sha is not None else "")
     live = request(api_url, token, "GET",
-                   f"/api/v1/admin/sources/{source_id}/storage-v2-release-watermark",
+                   f"/api/v1/admin/sources/{source_id}/storage-v2-release-watermark{suffix}",
                    timeout_seconds=600)
     if (live.get("source_id") != source_id
             or live.get("source_watermark_sha256") != review["source_watermark_sha256"]
@@ -1151,12 +1213,16 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
     require_same_pool(checkpoint.get("pack_capacity_before_build", {}).get("thin_pool"),
                       progress["thin_pool_before_resume"])
     progress["phase"] = "restart_resume"
+    repeated_body = {"commit_sha": arguments.commit_sha}
+    if checkpoint.get("git_snapshot_commit_sha") is not None:
+        repeated_body["git_snapshot_commit_sha"] = checkpoint["git_snapshot_commit_sha"]
+        repeated_body["expected_source_watermark_sha256"] = checkpoint["source_watermark_sha256"]
     repeated = request(
         arguments.api_url,
         token,
         "POST",
         f"/api/v1/admin/sources/{arguments.source_id}/storage-v2-release-candidate-build",
-        {"commit_sha": arguments.commit_sha},
+        repeated_body,
     )
     if (
         not repeated["reused_generation"]
@@ -1195,7 +1261,8 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             arguments.source_snapshot_review,
             arguments.source_snapshot_review_sha256,
             checkpoint, verified["adapter_profile_id"])
-        require_live_snapshot(arguments.api_url, token, arguments.source_id, source_review)
+        require_live_snapshot(arguments.api_url, token, arguments.source_id,
+                              source_review, checkpoint.get("git_snapshot_commit_sha"))
         progress["source_snapshot_review"] = {
             "review_sha256": source_review["review_sha256"],
             "source_watermark_sha256": source_review["source_watermark_sha256"],
@@ -1319,7 +1386,8 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
         progress.pop("pending_query")
     progress["phase"] = "candidate_search"
     if source_review is not None:
-        require_live_snapshot(arguments.api_url, token, arguments.source_id, source_review)
+        require_live_snapshot(arguments.api_url, token, arguments.source_id,
+                              source_review, checkpoint.get("git_snapshot_commit_sha"))
     if not query_results or not (quality_passed and performance_passed and degradation_passed):
         atomic_private_json(arguments.output, {
             "status": "FAIL", "failed_gate": "candidate_search",
@@ -1453,6 +1521,8 @@ def main() -> int:
     parser.add_argument("--source-snapshot-review", type=Path)
     parser.add_argument("--source-snapshot-review-sha256")
     parser.add_argument("--source-snapshot-gold-review", type=Path)
+    parser.add_argument("--git-snapshot-commit-sha")
+    parser.add_argument("--expected-source-watermark-sha256")
     arguments = parser.parse_args()
     if len(arguments.commit_sha) != 40 or any(c not in "0123456789abcdef" for c in arguments.commit_sha):
         parser.error("--commit-sha must be a full lowercase Git SHA")
@@ -1464,11 +1534,21 @@ def main() -> int:
     if ((arguments.source_snapshot_review is None)
             != (arguments.source_snapshot_review_sha256 is None)):
         parser.error("source snapshot review requires its exact protected SHA-256")
-    if arguments.phase != "verify" and arguments.source_snapshot_review is not None:
-        parser.error("source snapshot review applies only to verification")
     if ((arguments.source_snapshot_review is None)
             != (arguments.source_snapshot_gold_review is None)):
         parser.error("source snapshot review requires its frozen gold review")
+    if ((arguments.git_snapshot_commit_sha is None)
+            != (arguments.expected_source_watermark_sha256 is None)):
+        parser.error("pinned Git build requires commit and exact watermark together")
+    if arguments.git_snapshot_commit_sha is not None and (
+            arguments.phase != "build"
+            or not re.fullmatch(r"[0-9a-f]{40}", arguments.git_snapshot_commit_sha)
+            or not re.fullmatch(r"[0-9a-f]{64}", arguments.expected_source_watermark_sha256)
+            or arguments.source_snapshot_review is None):
+        parser.error("pinned Git build requires an exact frozen source and gold review")
+    if arguments.phase == "build" and arguments.git_snapshot_commit_sha is None \
+            and arguments.source_snapshot_review is not None:
+        parser.error("build source snapshot review requires an exact pinned Git commit")
     if arguments.phase == "build" and (arguments.maximum_build_bytes is None or
                                        arguments.maximum_build_bytes <= 0):
         parser.error("build requires a positive --maximum-build-bytes estimate")

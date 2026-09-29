@@ -41,10 +41,14 @@ def monitored_build(arguments, token: str, request, write, *, interval: float = 
              "observed_at_unix": int(time.time()), "progress": None}
     write(path, state, replace=False)
     endpoint = f"/api/v1/admin/sources/{arguments.source_id}/storage-v2-release-candidate"
+    body = {"commit_sha": arguments.commit_sha, "progress_id": attempt}
+    if getattr(arguments, "git_snapshot_commit_sha", None) is not None:
+        body["git_snapshot_commit_sha"] = arguments.git_snapshot_commit_sha
+        body["expected_source_watermark_sha256"] = arguments.expected_source_watermark_sha256
     invalid = False
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="owned-candidate-build") as executor:
         future = executor.submit(request, arguments.api_url, token, "POST", endpoint + "-build",
-                                 {"commit_sha": arguments.commit_sha, "progress_id": attempt})
+                                 body)
         while True:
             try:
                 result = future.result(timeout=interval)
