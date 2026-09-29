@@ -100,6 +100,8 @@ SELECT jsonb_build_object(
  'source_type',s.type,'registry_sha256',encode(sha256(convert_to(
     jsonb_build_array(s.type,s.path,s.config,s.is_test)::text,'UTF8')),'hex'),
  'active_generation_id',l.active_generation_id,
+ 'lexical_relation',CASE WHEN to_regclass('public.storage_v2_lexical_segment_all') IS NULL
+    THEN 'storage_v2_lexical_segment' ELSE 'storage_v2_lexical_segment_all' END,
  'open_runs',(SELECT count(*) FROM storage_v2_ingest_run WHERE source_id=g.source_id AND status='building'),
  'function_sha256',(SELECT jsonb_object_agg(oid::regprocedure::text,
     encode(sha256(convert_to(jsonb_build_array(pg_get_functiondef(oid),proowner,proacl,proconfig)::text,'UTF8')),'hex'))
@@ -147,13 +149,16 @@ def canonical_segments(text: str) -> list[tuple[int, str, int]]:
 def member_query(plan: dict, after: int, pending: list[dict] | None = None) -> str:
     frozen = plan["original"]
     source_id, seq = frozen["source_id"], frozen["generation_seq"]
+    lexical_relation = frozen["lexical_relation"]
+    if lexical_relation not in {"storage_v2_lexical_segment", "storage_v2_lexical_segment_all"}:
+        raise RuntimeError("frozen lexical projection layout is invalid")
     selected = ("o.id IN (" + ",".join(str(row["occurrence_id"]) for row in pending) + ")"
                 if pending else f"o.id>{after}")
     return f"""
 WITH selected AS MATERIALIZED (
  SELECT o.id occurrence_id,o.artifact_version_id,document.id document_id,
         artifact.expected_content_hash,octet_length(document.search_text) body_bytes,
-        (SELECT count(*) FROM storage_v2_lexical_segment WHERE occurrence_id=o.id) segment_count
+        (SELECT count(*) FROM {lexical_relation} WHERE occurrence_id=o.id) segment_count
  FROM occurrence o JOIN generation_item_version membership
    ON membership.source_id=o.source_id AND membership.artifact_version_id=o.artifact_version_id
  JOIN artifact_version artifact ON artifact.id=o.artifact_version_id
@@ -267,6 +272,8 @@ def validate_plan(plan: dict) -> None:
             or original.get("status") not in {"verified", "release_candidate"}
             or original.get("run_status") != "sealed" or original.get("active_generation_id") is not None
             or original.get("open_runs") != 0
+            or original.get("lexical_relation") not in {
+                "storage_v2_lexical_segment", "storage_v2_lexical_segment_all"}
             or type(plan.get("captured_at_unix")) is not int
             or not 0 <= int(time.time()) - plan["captured_at_unix"] <= 900
             or any(observed.get(key) != expected for key, expected in {
