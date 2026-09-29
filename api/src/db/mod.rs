@@ -1,6 +1,8 @@
 // Allow dead_code for planned infrastructure (Qdrant vectors, RLS, etc.)
 #![allow(dead_code)]
 
+#[cfg(feature = "storage-v2-retrieval")]
+pub mod build_checkpoint;
 pub mod content_body;
 pub mod content_graph;
 #[cfg(feature = "storage-v2-shadow-ingest")]

@@ -85,6 +85,36 @@ impl RlsClient {
         Ok(result)
     }
 
+    /// A dedicated source writer retaining its lock across durable batches.
+    #[cfg(feature = "storage-v2-retrieval")]
+    pub async fn with_checkpointed_source<F, R>(
+        &self,
+        user_id: Uuid,
+        source_id: i64,
+        resume_run_id: Option<i64>,
+        root: std::path::PathBuf,
+        f: F,
+    ) -> Result<R>
+    where
+        R: Send + 'static,
+        F: for<'a> FnOnce(
+            &'a super::build_checkpoint::BuildCheckpointSession,
+        ) -> Pin<Box<dyn Future<Output = Result<R>> + Send + 'a>>,
+    {
+        let session = super::build_checkpoint::BuildCheckpointSession::open(
+            &self.pool, user_id, source_id, &root,
+        )
+        .await
+        .map_err(|error| AppError::Internal(format!("checkpoint session: {error}")))?;
+        let session = session.expect_run(resume_run_id);
+        let result = f(&session).await?;
+        session
+            .finish()
+            .await
+            .map_err(|error| AppError::Internal(format!("checkpoint commit: {error}")))?;
+        Ok(result)
+    }
+
     /// Execute a closure with system-level RLS context (DEFAULT_USER_ID, is_admin=true).
     ///
     /// Use for background jobs, startup tasks, and pre-auth operations that need
