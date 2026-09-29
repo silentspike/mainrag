@@ -812,12 +812,55 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                 if ordinal:
                     self.assertFalse(any("dual-read" in call.args[3] for call in request.call_args_list))
                 self.assertEqual(stat.S_IMODE(arguments.output.stat().st_mode), 0o600)
+                journal_path = arguments.output.with_name(arguments.output.name + ".progress.json")
+                journal = json.loads(journal_path.read_text())
+                self.assertEqual(journal["status"], "FAILED")
+                self.assertEqual(journal["phase"], phase)
+                self.assertEqual(journal["completed_queries"], 1)
+                self.assertEqual(journal["qualification_outcome"], artifact["qualification_outcome"])
+                self.assertIn(phase, journal["completed_phase_timings"])
+                self.assertGreaterEqual(journal["completed_phase_timings"][phase]["elapsed_seconds"], 0)
+                self.assertEqual(stat.S_IMODE(journal_path.stat().st_mode), 0o600)
                 for private in ("private-token", "private-response", "private-pending-body"):
                     self.assertNotIn(private, arguments.output.read_text())
+                    self.assertNotIn(private, journal_path.read_text())
                 original = arguments.output.read_bytes()
                 with self.assertRaisesRegex(RuntimeError, "output already exists"):
                     MODULE.verify(arguments, "private-token")
                 self.assertEqual(arguments.output.read_bytes(), original)
+
+    def test_progress_is_durable_before_a_request_and_keeps_earlier_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "result.json"
+            arguments = Namespace(output=output)
+            journal_path = output.with_name(output.name + ".progress.json")
+
+            def running(arguments, token, progress):
+                progress["pending_query"] = {"ordinal": 1, "kind": "gold", "id": "a" * 64,
+                    "query_sha256": "b" * 64, "current": {"content": "private-body"}}
+                progress["phase"] = "search_storage_v2"
+                journal = json.loads(journal_path.read_text())
+                self.assertEqual(journal["status"], "RUNNING")
+                self.assertEqual(journal["phase"], "search_storage_v2")
+                self.assertEqual(journal["pending_query"]["query_sha256"], "b" * 64)
+                self.assertNotIn("private-body", journal_path.read_text())
+                progress["phase"] = "qualification"
+                progress["qualification_attempted"] = True
+                progress["qualification_outcome"] = "UNKNOWN"
+                journal = json.loads(journal_path.read_text())
+                self.assertTrue(journal["qualification_attempted"])
+                self.assertEqual(journal["qualification_outcome"], "UNKNOWN")
+
+            with patch.object(MODULE, "verify_candidate", side_effect=running):
+                MODULE.verify(arguments, "private-token")
+            journal = json.loads(journal_path.read_text())
+            self.assertEqual(journal["status"], "COMPLETED")
+            original = journal_path.read_bytes()
+            with patch.object(MODULE, "verify_candidate") as candidate:
+                with self.assertRaises(FileExistsError):
+                    MODULE.verify(arguments, "private-token")
+                candidate.assert_not_called()
+            self.assertEqual(journal_path.read_bytes(), original)
 
     def test_initial_runtime_failure_retains_checkpoint_and_no_exception_message(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
