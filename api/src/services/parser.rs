@@ -332,6 +332,7 @@ impl CodeParser {
 
     /// Parse only when an actual parser is available. Recognized filenames do
     /// not imply grammar support; JSONL has its own non-tree-sitter parser.
+    #[cfg(any(feature = "storage-v2-retrieval", test))]
     pub fn parse_file_if_available(
         &self,
         path: &Path,
