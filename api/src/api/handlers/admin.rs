@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Extension, Json,
 };
@@ -50,6 +50,16 @@ pub struct ShadowSliceRequest {
     pub commit_sha: String,
     #[serde(default)]
     pub progress_id: Option<Uuid>,
+    #[serde(default)]
+    pub git_snapshot_commit_sha: Option<String>,
+    #[serde(default)]
+    pub expected_source_watermark_sha256: Option<String>,
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
+#[derive(Debug, Deserialize)]
+pub struct GitSnapshotQuery {
+    pub git_snapshot_commit_sha: Option<String>,
 }
 
 #[cfg(feature = "storage-v2-retrieval")]
@@ -59,6 +69,13 @@ pub async fn admin_run_shadow_slice(
     Path(source_id): Path<i64>,
     JsonBody(request): JsonBody<ShadowSliceRequest>,
 ) -> Result<Json<crate::services::shadow_slice::ShadowSliceResult>> {
+    if request.git_snapshot_commit_sha.is_some()
+        || request.expected_source_watermark_sha256.is_some()
+    {
+        return Err(AppError::BadRequest(
+            "Git snapshot applies only to release candidates".into(),
+        ));
+    }
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
     let commit_sha = request.commit_sha;
@@ -106,9 +123,11 @@ pub async fn admin_observe_release_watermark(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Arc<crate::auth::Claims>>,
     Path(source_id): Path<i64>,
+    Query(query): Query<GitSnapshotQuery>,
 ) -> Result<Json<crate::services::shadow_slice::ReleaseWatermarkObservation>> {
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
+    let git_snapshot_commit_sha = query.git_snapshot_commit_sha;
     state
         .rls_client
         .with_rls(user_id, true, move |transaction| {
@@ -122,14 +141,20 @@ pub async fn admin_observe_release_watermark(
                     .ok_or_else(|| AppError::NotFound(format!("Source {source_id} not found")))?;
                 let source_type: String = source.get("type");
                 let source_path: String = source.get("path");
+                if git_snapshot_commit_sha.is_some() && source_type != "git" {
+                    return Err(AppError::BadRequest(
+                        "Git snapshot requires a Git source".into(),
+                    ));
+                }
                 let observation =
-                    crate::services::shadow_slice::observe_release_watermark_configured(
+                    crate::services::shadow_slice::observe_release_watermark_configured_pinned(
                         source_id,
                         &source_type,
                         std::path::Path::new(&source_path),
                         &source
                             .get::<_, Option<serde_json::Value>>("config")
                             .unwrap_or(serde_json::Value::Null),
+                        git_snapshot_commit_sha.as_deref(),
                     )
                     .await
                     .map_err(|error| {
@@ -153,6 +178,13 @@ pub async fn admin_build_release_candidate(
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
     let commit_sha = request.commit_sha;
+    let git_snapshot_commit_sha = request.git_snapshot_commit_sha;
+    let expected_source_watermark_sha256 = request.expected_source_watermark_sha256;
+    if git_snapshot_commit_sha.is_some() != expected_source_watermark_sha256.is_some() {
+        return Err(AppError::BadRequest(
+            "Git snapshot commit and source watermark must be supplied together".into(),
+        ));
+    }
     let pack_root = state.config.storage_v2_pack_root.clone();
     let pack_io_buffer_bytes = state.config.storage_v2_pack_io_buffer_bytes;
     if request.progress_id.is_some() {
@@ -208,8 +240,13 @@ pub async fn admin_build_release_candidate(
                     .ok_or_else(|| AppError::NotFound(format!("Source {source_id} not found")))?;
                 let source_type: String = source.get("type");
                 let source_path: String = source.get("path");
+                if git_snapshot_commit_sha.is_some() && source_type != "git" {
+                    return Err(AppError::BadRequest(
+                        "Git snapshot requires a Git source".into(),
+                    ));
+                }
                 let result =
-                    crate::services::shadow_slice::run_release_candidate_build_with_progress(
+                    crate::services::shadow_slice::run_release_candidate_build_with_progress_pinned(
                         &**transaction,
                         source_id,
                         &source_type,
@@ -217,6 +254,8 @@ pub async fn admin_build_release_candidate(
                         &pack_root,
                         pack_io_buffer_bytes,
                         &commit_sha,
+                        git_snapshot_commit_sha.as_deref(),
+                        expected_source_watermark_sha256.as_deref(),
                         build_progress.as_deref(),
                     )
                     .await

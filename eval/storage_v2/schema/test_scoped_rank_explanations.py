@@ -9,6 +9,7 @@ from eval.storage_v2.schema import test_compact_lexical_vectors as vectors
 
 
 MIGRATION = schema.ROOT / "migrations/103_storage_v2_scoped_rank_explanations.sql"
+DIRECT_POSTING_MIGRATION = schema.ROOT / "migrations/104_storage_v2_direct_scoped_postings.sql"
 
 
 class ScopedRankExplanationTests(filtered.FilterBeforeRankingTests):
@@ -44,6 +45,31 @@ class ScopedRankExplanationTests(filtered.FilterBeforeRankingTests):
             self.assertEqual(self.sql(admin + query + f"FROM {helper}({broad},'alpha') rank"), expected)
             self.assertEqual(self.sql(denied + f"SELECT count(*) FROM {helper}({broad},'alpha')"), "0")
         self.file(MIGRATION)
+        queries = (
+            {"type": "term", "value": "alpha"},
+            {"type": "term", "value": "common"},
+            {"type": "and", "children": [
+                {"type": "term", "value": "alpha"}, {"type": "term", "value": "beta"}]},
+            {"type": "term", "value": "absent_fixture"},
+        )
+        filters = ({}, {"path_prefix": "/synthetic/compact-0"})
+        before = [self.exact_search(ast, selected, user_id=user)
+                  for user in (schema.ADMIN_ID, schema.WRITER_ID)
+                  for ast in queries for selected in filters]
+        identities = self.sql("SELECT count(*) FROM storage_v2_search_document; "
+                              "SELECT count(*) FROM storage_v2_search_posting; "
+                              "SELECT count(*) FROM storage_v2_compact_posting_block; "
+                              "SELECT count(*) FROM occurrence")
+        self.file(DIRECT_POSTING_MIGRATION)
+        self.file(DIRECT_POSTING_MIGRATION)
+        self.assertEqual(identities, self.sql(
+            "SELECT count(*) FROM storage_v2_search_document; "
+            "SELECT count(*) FROM storage_v2_search_posting; "
+            "SELECT count(*) FROM storage_v2_compact_posting_block; "
+            "SELECT count(*) FROM occurrence"))
+        self.assertEqual(before, [self.exact_search(ast, selected, user_id=user)
+                                  for user in (schema.ADMIN_ID, schema.WRITER_ID)
+                                  for ast in queries for selected in filters])
 
     def test_canonical_layouts_and_offset_only_source_guards(self):
         self.file(compact.MIGRATION)
