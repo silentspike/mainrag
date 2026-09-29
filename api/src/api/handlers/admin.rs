@@ -53,6 +53,8 @@ pub struct ShadowSliceRequest {
     #[serde(default)]
     pub progress_id: Option<Uuid>,
     #[serde(default)]
+    pub resume_run_id: Option<i64>,
+    #[serde(default)]
     pub git_snapshot_commit_sha: Option<String>,
     #[serde(default)]
     pub expected_source_watermark_sha256: Option<String>,
@@ -229,27 +231,37 @@ pub async fn admin_build_release_candidate(
         })
         .transpose()?;
     let build_progress = progress.clone();
-    let result = state
-        .rls_client
-        .with_rls(user_id, true, move |transaction| {
-            Box::pin(async move {
-                let source = transaction
-                    .query_opt(
-                        "SELECT type, path FROM sources WHERE id = $1",
-                        &[&source_id],
-                    )
-                    .await?
-                    .ok_or_else(|| AppError::NotFound(format!("Source {source_id} not found")))?;
-                let source_type: String = source.get("type");
-                let source_path: String = source.get("path");
-                if git_snapshot_commit_sha.is_some() && source_type != "git" {
-                    return Err(AppError::BadRequest(
-                        "Git snapshot requires a Git source".into(),
-                    ));
-                }
-                let result =
-                    crate::services::shadow_slice::run_release_candidate_build_with_progress_pinned(
-                        &**transaction,
+    let resume_run_id = request.resume_run_id;
+    let result =
+        state
+            .rls_client
+            .with_checkpointed_source(
+                user_id,
+                source_id,
+                resume_run_id,
+                pack_root.clone(),
+                move |session| {
+                    Box::pin(async move {
+                        let source = session
+                            .client()
+                            .query_opt(
+                                "SELECT type, path FROM sources WHERE id = $1",
+                                &[&source_id],
+                            )
+                            .await?
+                            .ok_or_else(|| {
+                                AppError::NotFound(format!("Source {source_id} not found"))
+                            })?;
+                        let source_type: String = source.get("type");
+                        let source_path: String = source.get("path");
+                        if git_snapshot_commit_sha.is_some() && source_type != "git" {
+                            return Err(AppError::BadRequest(
+                                "Git snapshot requires a Git source".into(),
+                            ));
+                        }
+                        let result =
+                    crate::services::shadow_slice::run_release_candidate_build_checkpointed(
+                        session,
                         source_id,
                         &source_type,
                         std::path::Path::new(&source_path),
@@ -262,6 +274,11 @@ pub async fn admin_build_release_candidate(
                     )
                     .await
                     .map_err(|error| {
+                        if let Some(progress) = build_progress.as_deref() {
+                            if progress.record_failure(&error).is_err() {
+                                tracing::error!("build failure diagnostics could not be persisted");
+                            }
+                        }
                         let error_chain = format!("{error:#}");
                         tracing::error!(
                             error = %error_chain,
@@ -271,10 +288,11 @@ pub async fn admin_build_release_candidate(
                             "storage-v2 release-candidate build failed: {error}"
                         ))
                     })?;
-                Ok(Json(result))
-            })
-        })
-        .await;
+                        Ok(Json(result))
+                    })
+                },
+            )
+            .await;
     if let Some(progress) = progress {
         if progress.finish(result.is_ok()).is_err() {
             tracing::error!(
