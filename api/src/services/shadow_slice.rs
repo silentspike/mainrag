@@ -26,7 +26,7 @@ use crate::services::generation_ingest::{ShadowIngestMeasurements, ShadowIngestS
 use crate::services::intelligence_v2::{
     generic_structural_cards, normalized_output_sha256, GENERIC_ANALYSIS_PROFILE,
 };
-use crate::services::parser::{CodeParser, ParseResult};
+use crate::services::parser::CodeParser;
 use crate::services::source_read::ReadAccounting;
 
 pub const FIXTURE_ADAPTER_PROFILE: &str = "mainrag.fs-shadow-fixture.v1";
@@ -3081,7 +3081,7 @@ mod managed_append_tests;
 
 #[cfg(test)]
 mod tests {
-    use crate::services::parser::ExtractedSymbol;
+    use crate::services::parser::{ExtractedSymbol, ParseResult};
     #[test]
     fn lexical_first_positions_preserve_repeated_unicode_identity() {
         let chunks = CharacterChunker::new(crate::services::chunker::ChunkerConfig {
