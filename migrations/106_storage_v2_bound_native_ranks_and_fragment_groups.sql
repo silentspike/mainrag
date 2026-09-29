@@ -1,0 +1,1247 @@
+-- Exhaustive occurrence scoring, with best-fragment result groups only for
+-- explicitly fragmented artifacts. Whole artifacts and logical records remain
+-- separate. Preserve scores, explanations and precise tie keys while deferring
+-- native segment tie ranks until the complete score boundary is established.
+-- Copied projection verification reads only its authorized canonical documents.
+BEGIN;
+DO $guard$ BEGIN
+    IF encode(sha256(convert_to(pg_get_functiondef('storage_v2_authorized_lexical_matches(bigint[],bigint[],text)'::regprocedure),'UTF8')),'hex') NOT IN ('f1f6d7420fb8df41288c28bb3f1424565497d55be2d06cd2c694e313b8eed6b0') THEN RAISE EXCEPTION 'native rank reader identity differs: storage_v2_authorized_lexical_matches(bigint[],bigint[],text)'; END IF;
+    IF encode(sha256(convert_to(pg_get_functiondef('storage_v2_source_segment_ranks_precise(bigint[],text)'::regprocedure),'UTF8')),'hex') NOT IN ('4accbbb78501ad1ddb446c7a8caa06ae71d84f890cc038019a43170fab15d5d6') THEN RAISE EXCEPTION 'native rank reader identity differs: storage_v2_source_segment_ranks_precise(bigint[],text)'; END IF;
+    IF encode(sha256(convert_to(pg_get_functiondef('storage_v2_search_exact(bigint,text,jsonb,jsonb,bigint)'::regprocedure),'UTF8')),'hex') NOT IN ('bdef6657bc543228bdd9348ad1709279caf87300b34fba359996560db1f17176','bf2de0ba3e96476bee5abc6aa760c83fbb8b673e506ec7f37c53c42ff472d105') THEN RAISE EXCEPTION 'native rank reader identity differs: storage_v2_search_exact(bigint,text,jsonb,jsonb,bigint)'; END IF;
+    IF encode(sha256(convert_to(pg_get_functiondef('storage_v2_search_active_unchecked(text,jsonb,jsonb,bigint,bigint,boolean)'::regprocedure),'UTF8')),'hex') NOT IN ('7326e8668a1e3f14685011035f92e3dc5a8be60cbbba99b7780815ca8beb6f0d','ba758028fb331ddd268ccebf84f34fc9ee16e18d410ab9c30a9058e42583ec61') THEN RAISE EXCEPTION 'native rank reader identity differs: storage_v2_search_active_unchecked(text,jsonb,jsonb,bigint,bigint,boolean)'; END IF;
+    IF to_regprocedure('storage_v2_authorized_lexical_candidates(bigint[],bigint[],text)') IS NOT NULL AND encode(sha256(convert_to(pg_get_functiondef(to_regprocedure('storage_v2_authorized_lexical_candidates(bigint[],bigint[],text)')),'UTF8')),'hex') <> '5ce95d6b79b2e0c72d7fe2e41d00c8d5653eadab412a79291e39cb354a0022ad' THEN RAISE EXCEPTION 'native rank candidate helper identity differs: storage_v2_authorized_lexical_candidates(bigint[],bigint[],text)'; END IF;
+    IF to_regprocedure('storage_v2_source_segment_rank_candidates(bigint[],text)') IS NOT NULL AND encode(sha256(convert_to(pg_get_functiondef(to_regprocedure('storage_v2_source_segment_rank_candidates(bigint[],text)')),'UTF8')),'hex') <> 'b35d334a4ef08fbf6e504097a5285a78501475a25aa1b1eca2b195d3eca51063' THEN RAISE EXCEPTION 'native rank candidate helper identity differs: storage_v2_source_segment_rank_candidates(bigint[],text)'; END IF;
+    IF EXISTS (SELECT 1 FROM pg_proc routine WHERE routine.oid=to_regprocedure('storage_v2_authorized_lexical_candidates(bigint[],bigint[],text)') AND (routine.proowner<>'mainrag_v2_lexical_rank_owner'::REGROLE OR EXISTS (SELECT 1 FROM aclexplode(COALESCE(routine.proacl,acldefault('f',routine.proowner))) permission WHERE permission.grantee NOT IN ('mainrag_v2_lexical_rank_owner'::REGROLE,'mainrag_v2_frontier_owner'::REGROLE) OR permission.privilege_type<>'EXECUTE' OR (permission.is_grantable AND permission.grantee<>routine.proowner)))) THEN RAISE EXCEPTION 'native rank candidate helper authority differs: storage_v2_authorized_lexical_candidates(bigint[],bigint[],text)'; END IF;
+    IF EXISTS (SELECT 1 FROM pg_proc routine WHERE routine.oid=to_regprocedure('storage_v2_source_segment_rank_candidates(bigint[],text)') AND (routine.proowner<>'mainrag_v2_frontier_owner'::REGROLE OR EXISTS (SELECT 1 FROM aclexplode(COALESCE(routine.proacl,acldefault('f',routine.proowner))) permission WHERE permission.grantee NOT IN ('mainrag_v2_frontier_owner'::REGROLE,'mainrag'::REGROLE) OR permission.privilege_type<>'EXECUTE' OR (permission.is_grantable AND permission.grantee<>routine.proowner)))) THEN RAISE EXCEPTION 'native rank candidate helper authority differs: storage_v2_source_segment_rank_candidates(bigint[],text)'; END IF;
+END $guard$;
+CREATE INDEX IF NOT EXISTS idx_storage_v2_fragmented_artifact_occurrence
+ ON public.occurrence(id) WHERE role='artifact' AND locator @> '{"fragmented":true}'::JSONB;
+DO $index_guard$ DECLARE definition TEXT; valid BOOLEAN; BEGIN
+ SELECT pg_get_indexdef(indexrelid),indisvalid AND indisready INTO definition,valid
+ FROM pg_index WHERE indexrelid='public.idx_storage_v2_fragmented_artifact_occurrence'::REGCLASS;
+ IF definition <> 'CREATE INDEX idx_storage_v2_fragmented_artifact_occurrence ON public.occurrence USING btree (id) WHERE ((role = ''artifact''::text) AND (locator @> ''{"fragmented": true}''::jsonb))'
+    OR NOT valid THEN RAISE EXCEPTION 'fragmented artifact occurrence index identity differs'; END IF;
+END $index_guard$;
+CREATE OR REPLACE FUNCTION public.storage_v2_authorized_lexical_candidates(p_occurrence_ids bigint[], p_source_ids bigint[], p_query text)
+ RETURNS TABLE(occurrence_id bigint, source_id bigint, artifact_version_id bigint, segment_order bigint, lexical_score real)
+ LANGUAGE plpgsql
+ STABLE STRICT SECURITY DEFINER
+ SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+ SET row_security TO 'on'
+ SET plan_cache_mode TO 'force_custom_plan'
+AS $function$
+DECLARE
+    v_query TSQUERY := websearch_to_tsquery('simple',p_query);
+BEGIN
+    IF cardinality(p_occurrence_ids)=0 OR cardinality(p_source_ids)=0 THEN
+        RETURN;
+    END IF;
+    RETURN QUERY
+    WITH authorized_sources AS MATERIALIZED (
+        SELECT source.id FROM public.sources source
+         WHERE source.id=ANY(p_source_ids)
+           AND public.storage_v2_can_access_source(source.id,'read')
+    ), requested AS MATERIALIZED (
+        SELECT id FROM unnest(p_occurrence_ids) AS input(id)
+    ), matching AS MATERIALIZED (
+        SELECT segment.occurrence_id,segment.source_id,segment.artifact_version_id,
+               segment.segment_order
+          FROM public.storage_v2_lexical_segment segment
+         WHERE segment.fts_vector@@v_query
+           AND segment.source_id IN (SELECT id FROM authorized_sources)
+           AND segment.source_id=ANY(p_source_ids)
+    ), eligible AS MATERIALIZED (
+        SELECT matching.* FROM matching
+          WHERE EXISTS (SELECT 1 FROM requested WHERE requested.id=matching.occurrence_id)
+    )
+    SELECT eligible.occurrence_id,eligible.source_id,eligible.artifact_version_id,
+           eligible.segment_order,0.0::REAL FROM eligible;
+    RETURN QUERY
+    WITH authorized_sources AS MATERIALIZED (
+        SELECT source.id FROM public.sources source
+         WHERE source.id=ANY(p_source_ids)
+           AND public.storage_v2_can_access_source(source.id,'read')
+    ), requested AS MATERIALIZED (
+        SELECT id FROM unnest(p_occurrence_ids) input(id)
+    ), eligible_blocks AS MATERIALIZED (
+        SELECT block.* FROM public.storage_v2_compact_lexical_block block
+         WHERE block.source_id=ANY(p_source_ids)
+           AND block.source_id IN (SELECT id FROM authorized_sources)
+           AND EXISTS (SELECT 1 FROM requested WHERE requested.id=block.occurrence_id)
+           AND CASE WHEN p_query ~ '^[[:alnum:]_]+([[:space:]]+[[:alnum:]_]+)*$'
+                         AND lower(p_query) !~ '(^|[[:space:]])or([[:space:]]|$)'
+                    THEN block.fingerprints @> public.storage_v2_posting_fingerprints(
+                             tsvector_to_array(to_tsvector('simple',p_query)))
+                    ELSE TRUE END
+    )
+    SELECT block.occurrence_id,block.source_id,block.artifact_version_id,
+           item.segment_order,0.0::REAL
+      FROM eligible_blocks block
+      CROSS JOIN LATERAL unnest(block.segment_orders,block.fts_vectors)
+          item(segment_order,fts_vector)
+     WHERE item.fts_vector@@v_query;
+END
+$function$
+;
+CREATE OR REPLACE FUNCTION public.storage_v2_source_segment_rank_candidates(p_occurrence_ids bigint[], p_query text)
+ RETURNS TABLE(occurrence_id bigint, score double precision, segment_order bigint)
+ LANGUAGE plpgsql
+ STABLE STRICT SECURITY DEFINER
+ SET search_path TO 'pg_catalog', 'public'
+ SET row_security TO 'on'
+ SET plan_cache_mode TO 'force_custom_plan'
+AS $function$
+DECLARE
+    v_query TSQUERY := websearch_to_tsquery('simple',p_query);
+    v_requested_sources BIGINT[];
+BEGIN
+    WITH requested AS MATERIALIZED (
+        SELECT id FROM unnest(p_occurrence_ids) input(id)
+    ), authorized_source AS MATERIALIZED (
+        SELECT source.id FROM sources source
+         WHERE storage_v2_can_access_source(source.id,'read')
+    )
+    SELECT array_agg(requested_source.source_id ORDER BY requested_source.source_id)
+      INTO v_requested_sources FROM (
+        SELECT occurrence_row.source_id FROM requested
+          JOIN occurrence occurrence_row ON occurrence_row.id=requested.id
+          JOIN authorized_source ON authorized_source.id=occurrence_row.source_id
+         GROUP BY occurrence_row.source_id
+      ) requested_source;
+    -- Keep the two provenance paths separate.  A single UNION plan makes the
+    -- forced-RLS lexical scan repeat for every legacy projection row.
+    RETURN QUERY
+    WITH requested AS MATERIALIZED (
+        SELECT id FROM unnest(p_occurrence_ids) AS input(id)
+    ), authorized_source AS MATERIALIZED (
+        SELECT source.id FROM sources source
+         WHERE source.id=ANY(v_requested_sources)
+           AND storage_v2_can_access_source(source.id, 'read')
+    ), requested_sources AS MATERIALIZED (
+        SELECT source_id FROM unnest(v_requested_sources) input(source_id)
+    ), query_projection AS MATERIALIZED (
+        SELECT projection.occurrence_id,projection.source_id,projection.artifact_version_id,
+               projection.legacy_chunk_id,
+               ts_rank_cd(projection.fts_vector,v_query,0)::DOUBLE PRECISION AS legacy_score
+          FROM storage_v2_legacy_lexical_segment projection
+         WHERE projection.fts_vector @@ v_query
+           AND projection.source_id=ANY(v_requested_sources)
+    ), ranked_projection AS MATERIALIZED (
+        SELECT DISTINCT ON (projection.occurrence_id)
+               projection.occurrence_id, projection.artifact_version_id,
+               (1000000.0::DOUBLE PRECISION + projection.legacy_score) AS score,
+               projection.legacy_chunk_id,occurrence_row.view_id
+          FROM requested
+          JOIN occurrence occurrence_row ON occurrence_row.id=requested.id
+          JOIN authorized_source ON authorized_source.id=occurrence_row.source_id
+          JOIN query_projection projection
+            ON projection.occurrence_id=occurrence_row.id
+           AND projection.source_id=occurrence_row.source_id
+           AND projection.artifact_version_id=occurrence_row.artifact_version_id
+
+         ORDER BY projection.occurrence_id,3 DESC,projection.legacy_chunk_id
+    )
+, authorized_projection AS MATERIALIZED (
+        SELECT projection.*, document.id AS canonical_document_id
+          FROM ranked_projection projection
+          JOIN artifact_version artifact ON artifact.id=projection.artifact_version_id
+          JOIN storage_v2_search_view_document binding
+            ON binding.view_id=projection.view_id AND binding.ordinal=0
+          JOIN storage_v2_search_document document
+            ON document.id=binding.document_id AND document.component_kind='node'
+           AND document.node_id=artifact.content_root_node_id
+    ), matching_document AS MATERIALIZED (
+        SELECT document.id FROM public.storage_v2_search_document document
+         WHERE cardinality(p_occurrence_ids)>=1024 AND document.fts_simple@@v_query
+           AND EXISTS (SELECT 1 FROM authorized_projection authorized
+                        WHERE authorized.canonical_document_id=document.id)
+    ), copied_result AS MATERIALIZED (
+    SELECT projection.occurrence_id,projection.score,projection.legacy_chunk_id
+      FROM authorized_projection projection
+     WHERE CASE WHEN cardinality(p_occurrence_ids)>=1024
+                    THEN EXISTS (SELECT 1 FROM matching_document matched
+                                  WHERE matched.id=projection.canonical_document_id)
+                    ELSE EXISTS (SELECT 1 FROM public.storage_v2_search_document document WHERE document.id=projection.canonical_document_id AND document.fts_simple@@v_query) END
+        OR storage_v2_source_legacy_segment_matches(projection.occurrence_id,p_query)
+    ), matching_legacy AS MATERIALIZED (
+        SELECT DISTINCT projection.occurrence_id FROM query_projection projection
+    ), requested_unprojected AS MATERIALIZED (
+        SELECT requested.id FROM requested
+          WHERE NOT EXISTS (SELECT 1 FROM matching_legacy projection
+                             WHERE projection.occurrence_id=requested.id)
+    ), matching_segment AS MATERIALIZED (
+        SELECT segment.*
+         FROM public.storage_v2_authorized_lexical_candidates(
+             ARRAY(SELECT id FROM requested_unprojected),
+             ARRAY(SELECT source_id FROM requested_sources),p_query
+         ) segment
+    ), requested_matches AS MATERIALIZED (
+        SELECT requested.id
+          FROM requested
+          JOIN (SELECT DISTINCT segment.occurrence_id FROM matching_segment segment) matched
+            ON matched.occurrence_id=requested.id
+    ), unprojected AS MATERIALIZED (
+        SELECT matched.id FROM requested_matches matched
+          LEFT JOIN matching_legacy projection ON projection.occurrence_id=matched.id
+         WHERE projection.occurrence_id IS NULL
+    ), requested_kind AS MATERIALIZED (
+        SELECT unprojected.id, EXISTS (
+            SELECT 1 FROM public.storage_v2_lexical_segment_all marker
+             WHERE marker.occurrence_id=unprojected.id AND marker.segment_order=0
+        ) AS generated
+          FROM unprojected
+    ), eligible AS MATERIALIZED (
+        SELECT occurrence_row.id, occurrence_row.source_id,
+               occurrence_row.artifact_version_id, requested.generated
+          FROM requested_kind requested
+          JOIN occurrence occurrence_row ON occurrence_row.id=requested.id
+          JOIN authorized_source ON authorized_source.id=occurrence_row.source_id
+          JOIN artifact_version artifact ON artifact.id=occurrence_row.artifact_version_id
+          JOIN storage_v2_search_view_document binding
+            ON binding.view_id=occurrence_row.view_id AND binding.ordinal=0
+          JOIN storage_v2_search_document document
+            ON document.id=binding.document_id AND document.component_kind='node'
+           AND document.node_id=artifact.content_root_node_id
+    ), native_result AS MATERIALIZED (
+    SELECT DISTINCT ON (segment.occurrence_id)
+           segment.occurrence_id,
+           (CASE WHEN NOT occurrence_row.generated
+                   THEN 100000.0 + segment.lexical_score
+                   ELSE LEAST(segment.lexical_score,99999.0)
+            END)::DOUBLE PRECISION,
+           segment.segment_order
+      FROM eligible occurrence_row
+      JOIN matching_segment segment
+        ON segment.occurrence_id=occurrence_row.id
+       AND segment.source_id=occurrence_row.source_id
+       AND segment.artifact_version_id=occurrence_row.artifact_version_id
+     -- Matching lexical inputs already proved the query predicate.
+     ORDER BY segment.occurrence_id, 2 DESC, segment.segment_order
+    )
+    SELECT * FROM copied_result UNION ALL SELECT * FROM native_result;
+END
+$function$
+;
+CREATE OR REPLACE FUNCTION public.storage_v2_search_exact(p_source_id bigint, p_generation_selector text, p_ast jsonb, p_filters jsonb DEFAULT '{}'::jsonb, p_limit bigint DEFAULT 20)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'pg_catalog', 'public'
+ SET row_security TO 'off'
+ SET plan_cache_mode TO 'force_custom_plan'
+ SET jit TO 'off'
+AS $function$
+DECLARE
+    v_generation source_generation;
+    v_result JSONB;
+BEGIN
+    IF NOT storage_v2_can_access_source(p_source_id, 'read') THEN
+        RAISE EXCEPTION 'authorized generation selector required' USING ERRCODE = '42501';
+    END IF;
+    IF p_ast IS NULL OR NOT storage_v2_search_ast_is_valid(p_ast)
+       OR NOT storage_v2_search_ast_has_anchor(p_ast)
+       OR p_filters IS NULL OR jsonb_typeof(p_filters) <> 'object'
+       OR EXISTS (
+           SELECT 1 FROM jsonb_object_keys(p_filters) AS filter_key(value)
+            WHERE filter_key.value NOT IN (
+                'path_prefix', 'role', 'occurred_from', 'occurred_to',
+                'graph_profile', 'semantic_profile', 'rerank_profile'
+            )
+       )
+       OR EXISTS (
+           SELECT 1 FROM jsonb_each(p_filters) AS entry(key, value)
+            WHERE jsonb_typeof(entry.value) <> 'string'
+               OR btrim(entry.value #>> '{}') = ''
+       )
+       OR p_limit IS NULL OR p_limit < 1 OR p_limit > 1000 THEN
+        RAISE EXCEPTION 'valid exact retrieval request required';
+    END IF;
+    v_generation := storage_v2_resolve_generation(p_source_id, p_generation_selector);
+
+    WITH RECURSIVE
+    ast_nodes(node, negated) AS (
+        SELECT p_ast, FALSE
+        UNION ALL
+        SELECT child.value,
+               parent.negated <> (parent.node ->> 'type' = 'not')
+          FROM ast_nodes parent
+          CROSS JOIN LATERAL jsonb_array_elements(
+              CASE WHEN jsonb_typeof(parent.node -> 'children') = 'array'
+                   THEN parent.node -> 'children' ELSE '[]'::JSONB END
+          ) child
+    ),
+    leaves AS (
+        SELECT node ->> 'type' AS kind, lower(node ->> 'value') AS value, negated
+          FROM ast_nodes
+         WHERE node ->> 'type' IN ('term', 'phrase', 'exact')
+    ),
+    query_values AS (
+        SELECT
+            COALESCE(array_agg(DISTINCT value ORDER BY value)
+                FILTER (WHERE kind = 'term'), ARRAY[]::TEXT[]) AS terms,
+            COALESCE(array_agg(DISTINCT digest(value, 'sha256'))
+                FILTER (WHERE kind = 'term'), ARRAY[]::BYTEA[]) AS term_hashes,
+            COALESCE(array_agg(DISTINCT value ORDER BY value)
+                FILTER (WHERE kind = 'term' AND NOT negated), ARRAY[]::TEXT[]) AS score_terms,
+            COALESCE(array_agg(DISTINCT digest(value, 'sha256'))
+                FILTER (WHERE kind = 'term' AND NOT negated), ARRAY[]::BYTEA[]) AS score_term_hashes,
+            COALESCE(array_agg(DISTINCT value ORDER BY value)
+                FILTER (WHERE kind = 'phrase'), ARRAY[]::TEXT[]) AS phrases,
+            COALESCE(array_agg(DISTINCT value ORDER BY value)
+                FILTER (WHERE kind = 'exact'), ARRAY[]::TEXT[]) AS exact_values
+          FROM leaves
+    ),
+    visible_occurrence AS (
+        SELECT occurrence_row.id,occurrence_row.source_id,
+               occurrence_row.artifact_version_id,occurrence_row.view_id,
+               occurrence_row.role,occurrence_row.ordinal
+          FROM occurrence occurrence_row
+          JOIN generation_item_version membership
+            ON membership.source_id = p_source_id
+           AND membership.artifact_version_id = occurrence_row.artifact_version_id
+         WHERE occurrence_row.source_id = p_source_id
+           AND membership.valid_from_seq <= v_generation.generation_seq
+           AND (membership.valid_to_seq IS NULL
+                OR membership.valid_to_seq > v_generation.generation_seq)
+           AND (COALESCE(p_filters ->> 'path_prefix', '') = ''
+                OR left(occurrence_row.source_path, char_length(p_filters ->> 'path_prefix'))
+                   = p_filters ->> 'path_prefix')
+           AND (COALESCE(p_filters ->> 'role', '') = ''
+                OR occurrence_row.role = p_filters ->> 'role')
+           AND (COALESCE(p_filters ->> 'occurred_from', '') = ''
+                OR occurrence_row.occurred_at >= (p_filters ->> 'occurred_from')::TIMESTAMPTZ)
+           AND (COALESCE(p_filters ->> 'occurred_to', '') = ''
+                OR occurrence_row.occurred_at < (p_filters ->> 'occurred_to')::TIMESTAMPTZ)
+    ),
+    scoped_binding AS MATERIALIZED (
+        SELECT visible.id AS occurrence_id,
+               binding.ordinal AS component_ordinal, binding.document_id,
+               binding.role_weight, document.token_count
+          FROM visible_occurrence visible
+          JOIN storage_v2_search_view_document binding ON binding.view_id = visible.view_id
+          JOIN storage_v2_search_document document ON document.id = binding.document_id
+    ),
+    view_stats AS (
+        SELECT occurrence_id, SUM(token_count)::DOUBLE PRECISION AS view_length
+          FROM scoped_binding GROUP BY occurrence_id
+    ),
+    corpus_stats AS (
+        SELECT COUNT(DISTINCT occurrence_id)::DOUBLE PRECISION AS view_count,
+               AVG(view_length) AS average_view_length FROM view_stats
+    ),
+    scoped_document AS MATERIALIZED (
+        SELECT DISTINCT document_id FROM scoped_binding ORDER BY document_id
+    ),
+    query_posting AS MATERIALIZED (
+        SELECT posting.document_id,posting.term,posting.term_frequency
+          FROM query_values query
+          CROSS JOIN unnest(query.terms) requested_term(value)
+          CROSS JOIN LATERAL storage_v2_scoped_term_posting(
+              ARRAY(SELECT document_id FROM scoped_document),requested_term.value
+          ) posting
+    ),
+    scoped_posting AS MATERIALIZED (
+        SELECT binding.occurrence_id, binding.component_ordinal, binding.role_weight,
+               posting.term, posting.term_frequency
+          FROM scoped_binding binding
+          JOIN query_posting posting ON posting.document_id = binding.document_id
+    ),
+    document_frequency AS (
+        SELECT term, COUNT(DISTINCT occurrence_id)::DOUBLE PRECISION AS frequency
+          FROM scoped_posting GROUP BY term
+    ),
+    term_rows AS (
+        SELECT posting.occurrence_id, posting.term, posting.component_ordinal,
+               posting.role_weight,
+               posting.role_weight
+                 * LN(1 + (stats.view_count + 1.0) / (frequency.frequency + 1.0))
+                 * posting.term_frequency
+                 / (posting.term_frequency + 0.5
+                    + 0.5 * (view_stats.view_length / NULLIF(stats.average_view_length, 0)))
+                 AS contribution
+          FROM scoped_posting posting
+          JOIN view_stats ON view_stats.occurrence_id = posting.occurrence_id
+          JOIN document_frequency frequency ON frequency.term = posting.term
+          CROSS JOIN corpus_stats stats
+          CROSS JOIN query_values query
+         WHERE posting.term = ANY(query.score_terms)
+           AND posting.occurrence_id NOT IN (SELECT occurrence_id FROM lexical_ranks copied
+              WHERE copied.score>=1000000.0 AND copied.occurrence_id IS NOT NULL)
+    ),
+    term_match_aggregate AS MATERIALIZED (
+        SELECT occurrence_id, array_agg(DISTINCT term ORDER BY term) AS matched_terms
+          FROM scoped_posting GROUP BY occurrence_id
+    ),
+    best_term AS (
+        SELECT DISTINCT ON (occurrence_id, term)
+               occurrence_id, term, component_ordinal, role_weight, contribution
+          FROM term_rows
+         ORDER BY occurrence_id, term, contribution DESC, component_ordinal
+    ),
+    term_aggregate AS MATERIALIZED (
+        SELECT occurrence_id,SUM(contribution) AS lexical_terms
+          FROM best_term GROUP BY occurrence_id
+    ),
+    phrase_aggregate AS MATERIALIZED (
+        SELECT binding.occurrence_id,
+               array_agg(DISTINCT phrase.value ORDER BY phrase.value) AS matched_phrases
+          FROM (
+              SELECT scope.occurrence_id, document.fts_simple, document.search_text
+                FROM scoped_binding scope
+                JOIN storage_v2_search_document document ON document.id = scope.document_id
+          ) binding
+          CROSS JOIN query_values query
+          CROSS JOIN unnest(query.phrases) AS phrase(value)
+         WHERE cardinality((SELECT phrases FROM query_values)) > 0 AND storage_v2_phrase_matches(binding.fts_simple, binding.search_text, phrase.value)
+         GROUP BY binding.occurrence_id
+    ),
+    exact_aggregate AS MATERIALIZED (
+        SELECT binding.occurrence_id,
+               array_agg(DISTINCT exact.value ORDER BY exact.value) AS matched_exact
+          FROM (
+              SELECT scope.occurrence_id, document.exact_identifiers
+                FROM scoped_binding scope
+                JOIN storage_v2_search_document document ON document.id = scope.document_id
+          ) binding
+          CROSS JOIN query_values query
+          CROSS JOIN unnest(query.exact_values) AS exact(value)
+         WHERE cardinality((SELECT exact_values FROM query_values)) > 0 AND exact.value = ANY(binding.exact_identifiers)
+         GROUP BY binding.occurrence_id
+    ),
+    evidence_occurrence AS MATERIALIZED (
+        SELECT occurrence_id FROM term_match_aggregate
+        UNION SELECT occurrence_id FROM phrase_aggregate
+        UNION SELECT occurrence_id FROM exact_aggregate
+        UNION SELECT occurrence_id FROM lexical_ranks
+    ),
+    matched AS MATERIALIZED (
+        SELECT visible.*, view_stats.view_length,
+               COALESCE(term_match_aggregate.matched_terms, ARRAY[]::TEXT[]) AS matched_terms,
+               COALESCE(phrase_aggregate.matched_phrases, ARRAY[]::TEXT[]) AS matched_phrases,
+               COALESCE(exact_aggregate.matched_exact, ARRAY[]::TEXT[]) AS matched_exact,
+               COALESCE(term_aggregate.lexical_terms, 0.0)
+                 + 1.5 * cardinality(COALESCE(phrase_aggregate.matched_phrases, ARRAY[]::TEXT[]))
+                 + 2.0 * cardinality(COALESCE(exact_aggregate.matched_exact, ARRAY[]::TEXT[]))
+                 AS lexical_score,
+               '[]'::JSONB AS term_detail
+          FROM visible_occurrence visible
+          JOIN evidence_occurrence evidence ON evidence.occurrence_id=visible.id
+          JOIN view_stats ON view_stats.occurrence_id = visible.id
+          LEFT JOIN term_match_aggregate ON term_match_aggregate.occurrence_id = visible.id
+          LEFT JOIN term_aggregate ON term_aggregate.occurrence_id = visible.id
+          LEFT JOIN phrase_aggregate ON phrase_aggregate.occurrence_id = visible.id
+          LEFT JOIN exact_aggregate ON exact_aggregate.occurrence_id = visible.id
+    ),
+    lexical_ranks AS MATERIALIZED (
+        SELECT ranked.*
+          FROM storage_v2_source_segment_rank_candidates(
+              (SELECT array_agg(id) FROM visible_occurrence),
+              CASE WHEN p_ast ->> 'type' = 'term' THEN p_ast ->> 'value'
+                   ELSE storage_v2_simple_and_query(p_ast) END
+          ) ranked
+    ),
+    lexical_presence AS MATERIALIZED (
+        SELECT present.occurrence_id
+          FROM storage_v2_source_segment_presence(
+              CASE WHEN storage_v2_simple_and_query(p_ast) IS NOT NULL
+                   THEN (SELECT array_agg(matched.id) FROM matched
+                         LEFT JOIN lexical_ranks ranked ON ranked.occurrence_id=matched.id
+                        WHERE ranked.occurrence_id IS NULL)
+                   ELSE NULL::BIGINT[] END
+          ) present
+    ),
+    boolean_matched AS (
+        SELECT matched.*, lexical_rank.score AS segment_score,
+               lexical_rank.segment_order AS candidate_sort_key
+          FROM matched
+          LEFT JOIN lexical_ranks lexical_rank
+            ON lexical_rank.occurrence_id = matched.id
+          LEFT JOIN lexical_presence presence
+            ON presence.occurrence_id = matched.id
+         WHERE CASE WHEN lexical_rank.occurrence_id IS NOT NULL
+                    AND (p_ast->>'type'='term' OR storage_v2_simple_and_query(p_ast) IS NOT NULL)
+                    THEN TRUE
+                    WHEN lexical_rank.occurrence_id IS NOT NULL
+                    OR cardinality(matched_terms)>0
+                    OR cardinality(matched_phrases)>0
+                    OR cardinality(matched_exact)>0 THEN
+             (storage_v2_simple_and_query(p_ast) IS NULL AND (
+                 storage_v2_search_ast_matches(
+                     p_ast, matched_terms, matched_phrases, matched_exact
+                 ) OR (p_ast ->> 'type' = 'term' AND lexical_rank.occurrence_id IS NOT NULL)
+             )) OR (storage_v2_simple_and_query(p_ast) IS NOT NULL AND (
+                 lexical_rank.occurrence_id IS NOT NULL
+                 OR (presence.occurrence_id IS NULL AND storage_v2_search_ast_matches(
+                     p_ast, matched_terms, matched_phrases, matched_exact
+                 ))
+             ))
+             ELSE FALSE END
+    ),
+    staged AS (
+        SELECT matched.*,
+               graph.status AS graph_status, COALESCE(graph.score, 0.0) AS graph_score,
+               semantic.status AS semantic_status, COALESCE(semantic.score, 0.0) AS semantic_score,
+               rerank.status AS rerank_status, COALESCE(rerank.score, 0.0) AS rerank_score
+          FROM boolean_matched matched
+          LEFT JOIN storage_v2_occurrence_score_component graph
+            ON graph.occurrence_id = matched.id AND graph.stage = 'graph'
+           AND graph.profile_id = p_filters ->> 'graph_profile' AND graph.score IS NOT NULL AND graph.score<>0
+          LEFT JOIN storage_v2_occurrence_score_component semantic
+            ON semantic.occurrence_id = matched.id AND semantic.stage = 'semantic'
+           AND semantic.profile_id = p_filters ->> 'semantic_profile' AND semantic.score IS NOT NULL AND semantic.score<>0
+          LEFT JOIN storage_v2_occurrence_score_component rerank
+            ON rerank.occurrence_id = matched.id AND rerank.stage = 'rerank'
+           AND rerank.profile_id = p_filters ->> 'rerank_profile' AND rerank.score IS NOT NULL AND rerank.score<>0
+    ),
+    ranked AS (
+        SELECT staged.*,
+               CASE WHEN staged.segment_score >= 1000000.0
+                    THEN staged.segment_score
+                    ELSE lexical_score
+               END + graph_score + semantic_score + rerank_score AS final_score
+          FROM staged
+    ),
+    fragmented_match AS MATERIALIZED (
+        SELECT ranked.id,ranked.source_id,fragment.source_path,ranked.final_score
+          FROM ranked JOIN occurrence fragment ON fragment.id=ranked.id
+         WHERE fragment.role='artifact' AND fragment.locator @> '{"fragmented":true}'::JSONB
+    ),
+    result_group_score AS (
+        SELECT ranked.final_score FROM ranked
+         WHERE NOT EXISTS (SELECT 1 FROM fragmented_match fragment WHERE fragment.id=ranked.id)
+        UNION ALL
+        SELECT max(fragment.final_score) FROM fragmented_match fragment
+         GROUP BY fragment.source_id,fragment.source_path
+    ),
+    score_boundary AS MATERIALIZED (
+        SELECT min(final_score) AS final_score FROM (
+            SELECT final_score FROM result_group_score ORDER BY final_score DESC LIMIT p_limit
+        ) top_scores
+    ),
+    bounded AS MATERIALIZED (
+        SELECT ranked.* FROM ranked CROSS JOIN score_boundary boundary
+         WHERE ranked.final_score>=boundary.final_score
+    ),
+    bounded_native_ranks AS MATERIALIZED (
+        SELECT precision.* FROM storage_v2_source_segment_ranks_precise(
+            ARRAY(SELECT id FROM bounded WHERE segment_score<1000000.0),
+            CASE WHEN p_ast->>'type'='term' THEN p_ast->>'value'
+                 ELSE storage_v2_simple_and_query(p_ast) END
+        ) precision
+    ),
+    identified AS MATERIALIZED (
+        SELECT bounded.*, COALESCE(precision.segment_order,bounded.candidate_sort_key) AS lexical_sort_key, identified_occurrence.source_path,
+               identified_occurrence.locator, source.name AS source_name, item.item_key,
+               artifact.expected_content_hash, view_row.view_digest,
+               'storage-v2:' || encode(storage_v2_hash_parts(
+                    'mainrag.external-hit.v1', ARRAY[
+                        int8send(bounded.source_id),
+                        convert_to(item.item_key, 'UTF8'),
+                        convert_to(artifact.expected_content_hash, 'UTF8'),
+                        view_row.view_digest,
+                        convert_to(bounded.role, 'UTF8'),
+                        int8send(bounded.ordinal),
+                        convert_to(identified_occurrence.locator::TEXT, 'UTF8')
+                    ]
+               ), 'hex') AS external_hit_id
+          FROM bounded
+          LEFT JOIN bounded_native_ranks precision ON precision.occurrence_id=bounded.id
+          JOIN occurrence identified_occurrence ON identified_occurrence.id=bounded.id
+          JOIN artifact_version artifact ON artifact.id = bounded.artifact_version_id
+          JOIN source_item item ON item.id = artifact.item_id
+          JOIN retrieval_view view_row ON view_row.id = bounded.view_id
+          JOIN sources source ON source.id = bounded.source_id
+    ),
+    identified_grouped AS MATERIALIZED (
+        SELECT * FROM identified
+         WHERE NOT (role='artifact' AND locator @> '{"fragmented":true}'::JSONB)
+        UNION ALL
+        SELECT * FROM (
+            SELECT DISTINCT ON (source_id,source_path) * FROM identified
+             WHERE role='artifact' AND locator @> '{"fragmented":true}'::JSONB
+             ORDER BY source_id,source_path,final_score DESC,
+                      lexical_sort_key NULLS LAST,external_hit_id,id
+        ) best_fragment
+    ),
+    ordered AS (
+        SELECT * FROM identified_grouped
+         ORDER BY final_score DESC,lexical_sort_key NULLS LAST,external_hit_id,id
+         LIMIT p_limit
+    ),
+    returned_term_rows AS (
+        SELECT posting.occurrence_id, posting.term, posting.component_ordinal,
+               posting.role_weight,
+               posting.role_weight
+                 * LN(1 + (stats.view_count + 1.0) / (frequency.frequency + 1.0))
+                 * posting.term_frequency
+                 / (posting.term_frequency + 0.5
+                    + 0.5 * (view_stats.view_length / NULLIF(stats.average_view_length, 0)))
+                 AS contribution
+          FROM scoped_posting posting
+          JOIN ordered returned ON returned.id=posting.occurrence_id
+          JOIN view_stats ON view_stats.occurrence_id = posting.occurrence_id
+          JOIN document_frequency frequency ON frequency.term = posting.term
+          CROSS JOIN corpus_stats stats
+          CROSS JOIN query_values query
+         WHERE posting.term = ANY(query.score_terms)
+    ),
+    returned_best_term AS (
+        SELECT DISTINCT ON (occurrence_id, term)
+               occurrence_id, term, component_ordinal, role_weight, contribution
+          FROM returned_term_rows
+         ORDER BY occurrence_id, term, contribution DESC, component_ordinal
+    ),
+    returned_term_aggregate AS MATERIALIZED (
+        SELECT occurrence_id,SUM(contribution) AS lexical_terms
+          FROM returned_best_term GROUP BY occurrence_id
+    ),
+    results AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'occurrence_id', id,
+            'external_hit_id', external_hit_id,
+            'view_id', view_id,
+            'source_id', source_id,
+            'source_name', source_name,
+            'source_path', source_path,
+            'locator', locator,
+            'role', role,
+            'content', (
+                SELECT string_agg(document.search_text, E'\n' ORDER BY binding.ordinal)
+                  FROM storage_v2_search_view_document binding
+                  JOIN storage_v2_search_document document ON document.id = binding.document_id
+                 WHERE binding.view_id = ordered.view_id
+            ),
+            'score', final_score,
+            'score_explanation', jsonb_build_object(
+                'lexical', CASE WHEN ordered.segment_score>=1000000.0 THEN
+                    COALESCE((SELECT lexical_terms FROM returned_term_aggregate explanation
+                               WHERE explanation.occurrence_id=ordered.id),0.0)
+                    +1.5*cardinality(ordered.matched_phrases)
+                    +2.0*cardinality(ordered.matched_exact)
+                    ELSE lexical_score END,
+                'role_weighted_terms', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                        'term', detail.term, 'component_ordinal', detail.component_ordinal,
+                        'role_weight', detail.role_weight, 'score', detail.contribution
+                    ) ORDER BY detail.term)
+                    FROM returned_best_term detail WHERE detail.occurrence_id=ordered.id
+                ),'[]'::JSONB),
+                'normalization', jsonb_build_object(
+                    'view_token_count', view_length,
+                    'scope_average_view_token_count', (SELECT average_view_length FROM corpus_stats)
+                ),
+                'graph', jsonb_build_object(
+                    'status', COALESCE((SELECT component.status
+                        FROM storage_v2_occurrence_score_component component
+                       WHERE component.occurrence_id=ordered.id AND component.stage='graph'
+                         AND component.profile_id=p_filters->>'graph_profile'),
+                        CASE WHEN p_filters ? 'graph_profile' THEN 'unavailable' ELSE 'not_requested' END),
+                    'score', graph_score
+                ),
+                'semantic', jsonb_build_object(
+                    'status', COALESCE((SELECT component.status
+                        FROM storage_v2_occurrence_score_component component
+                       WHERE component.occurrence_id=ordered.id AND component.stage='semantic'
+                         AND component.profile_id=p_filters->>'semantic_profile'),
+                        CASE WHEN p_filters ? 'semantic_profile' THEN 'unavailable' ELSE 'not_requested' END),
+                    'score', semantic_score
+                ),
+                'rerank', jsonb_build_object(
+                    'status', COALESCE((SELECT component.status
+                        FROM storage_v2_occurrence_score_component component
+                       WHERE component.occurrence_id=ordered.id AND component.stage='rerank'
+                         AND component.profile_id=p_filters->>'rerank_profile'),
+                        CASE WHEN p_filters ? 'rerank_profile' THEN 'unavailable' ELSE 'not_requested' END),
+                    'score', rerank_score
+                ),
+                'execution', 'complete_scoped_view_evaluation',
+                'pruning', 'disabled_unsafe_bounds'
+            ),
+            'legacy_successors', COALESCE((
+                SELECT jsonb_agg(jsonb_build_object(
+                    'old_hit_id', mapping.old_hit_id,
+                    'ordinal', mapping.ordinal,
+                    'relation_kind', mapping.relation_kind
+                ) ORDER BY mapping.old_hit_id, mapping.ordinal)
+                  FROM legacy_hit_mapping mapping WHERE mapping.occurrence_id = ordered.id
+            ), '[]'::JSONB)
+        ) ORDER BY final_score DESC, lexical_sort_key NULLS LAST, external_hit_id, id) AS value FROM ordered
+    )
+    SELECT jsonb_build_object(
+        'generation_seq', v_generation.generation_seq,
+        'execution', 'complete_scoped_view_evaluation',
+        'fully_scored_views', (SELECT COUNT(*) FROM view_stats),
+        'total', (SELECT COUNT(*) FROM ranked),
+        'results', COALESCE((SELECT value FROM results), '[]'::JSONB)
+    ) INTO v_result;
+
+    IF EXISTS (
+        SELECT 1 FROM occurrence occurrence_row
+        JOIN artifact_version artifact ON artifact.id = occurrence_row.artifact_version_id
+        JOIN generation_item_version membership
+          ON membership.source_id = p_source_id
+         AND membership.source_item_id = artifact.item_id
+         AND membership.artifact_version_id = artifact.id
+       WHERE occurrence_row.source_id = p_source_id
+         AND membership.valid_from_seq <= v_generation.generation_seq
+         AND (membership.valid_to_seq IS NULL
+              OR membership.valid_to_seq > v_generation.generation_seq)
+         AND (COALESCE(p_filters ->> 'path_prefix', '') = ''
+              OR left(occurrence_row.source_path, char_length(p_filters ->> 'path_prefix'))
+                 = p_filters ->> 'path_prefix')
+         AND (COALESCE(p_filters ->> 'role', '') = ''
+              OR occurrence_row.role = p_filters ->> 'role')
+         AND (COALESCE(p_filters ->> 'occurred_from', '') = ''
+              OR occurrence_row.occurred_at >= (p_filters ->> 'occurred_from')::TIMESTAMPTZ)
+         AND (COALESCE(p_filters ->> 'occurred_to', '') = ''
+              OR occurrence_row.occurred_at < (p_filters ->> 'occurred_to')::TIMESTAMPTZ)
+         AND NOT EXISTS (
+             SELECT 1 FROM storage_v2_search_view_document binding
+              WHERE binding.view_id = occurrence_row.view_id
+         )
+    ) THEN
+        RAISE EXCEPTION 'required lexical search document missing';
+    END IF;
+    RETURN v_result;
+END
+$function$
+;
+CREATE OR REPLACE FUNCTION public.storage_v2_search_active_unchecked(p_manifest_sha256 text, p_ast jsonb, p_filters jsonb DEFAULT '{}'::jsonb, p_limit bigint DEFAULT 20, p_source_id bigint DEFAULT NULL::bigint, p_include_test boolean DEFAULT false)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'pg_catalog', 'public'
+ SET row_security TO 'off'
+ SET plan_cache_mode TO 'force_custom_plan'
+ SET jit TO 'off'
+AS $function$
+DECLARE
+    v_receipt storage_v2_activation_set_evidence;
+    v_result JSONB;
+BEGIN
+    IF p_manifest_sha256 IS NULL OR p_manifest_sha256 !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION 'exact activated manifest digest is required';
+    END IF;
+    SELECT * INTO v_receipt FROM storage_v2_activation_set_evidence
+     ORDER BY created_at DESC, id DESC LIMIT 1;
+    IF NOT FOUND OR v_receipt.manifest_sha256 <> p_manifest_sha256
+       OR v_receipt.source_count <> (SELECT COUNT(*) FROM sources)
+       OR v_receipt.source_count <> (SELECT COUNT(*) FROM logical_source)
+       OR v_receipt.source_classification_sha256 IS DISTINCT FROM (
+           SELECT encode(digest(convert_to(COALESCE(jsonb_agg(jsonb_build_object(
+               'source_id', source.id, 'is_test', source.is_test
+           ) ORDER BY source.id), '[]'::JSONB)::TEXT, 'UTF8'), 'sha256'), 'hex')
+             FROM sources source
+       )
+       OR EXISTS (
+           SELECT 1 FROM logical_source pointer
+           LEFT JOIN source_generation active_generation
+             ON active_generation.id = pointer.active_generation_id
+            AND active_generation.source_id = pointer.id
+           WHERE active_generation.id IS NULL OR active_generation.status <> 'active'
+       ) THEN
+        RAISE EXCEPTION 'complete activated source set and exact receipt are required';
+    END IF;
+    IF p_include_test AND NOT storage_v2_is_admin() THEN
+        RAISE EXCEPTION 'test scope requires administrator authority' USING ERRCODE = '42501';
+    END IF;
+    IF p_source_id IS NOT NULL THEN
+        PERFORM storage_v2_require_test_scope(p_source_id, p_include_test);
+    END IF;
+    IF p_ast IS NULL OR NOT storage_v2_search_ast_is_valid(p_ast)
+       OR NOT storage_v2_search_ast_has_anchor(p_ast)
+       OR p_filters IS NULL OR jsonb_typeof(p_filters) <> 'object'
+       OR EXISTS (
+           SELECT 1 FROM jsonb_object_keys(p_filters) AS filter_key(value)
+            WHERE filter_key.value NOT IN (
+                'path_prefix', 'role', 'occurred_from', 'occurred_to',
+                'graph_profile', 'semantic_profile', 'rerank_profile'
+            )
+       )
+       OR EXISTS (
+           SELECT 1 FROM jsonb_each(p_filters) AS entry(key, value)
+            WHERE jsonb_typeof(entry.value) <> 'string'
+               OR btrim(entry.value #>> '{}') = ''
+       )
+       OR p_limit IS NULL OR p_limit < 1 OR p_limit > 1000 THEN
+        RAISE EXCEPTION 'valid exact retrieval request required';
+    END IF;
+
+    WITH RECURSIVE
+    eligible_source AS MATERIALIZED (
+        SELECT source.id, source.name, active_generation.generation_seq
+          FROM sources source
+          JOIN logical_source pointer ON pointer.id = source.id
+          JOIN source_generation active_generation
+            ON active_generation.id = pointer.active_generation_id
+           AND active_generation.source_id = pointer.id
+           AND active_generation.status = 'active'
+         WHERE (p_source_id IS NULL OR source.id = p_source_id)
+           AND storage_v2_can_access_source(source.id, 'read')
+           AND (p_include_test OR NOT source.is_test)
+    ),
+    ast_nodes(node, negated) AS (
+        SELECT p_ast, FALSE
+        UNION ALL
+        SELECT child.value,
+               parent.negated <> (parent.node ->> 'type' = 'not')
+          FROM ast_nodes parent
+          CROSS JOIN LATERAL jsonb_array_elements(
+              CASE WHEN jsonb_typeof(parent.node -> 'children') = 'array'
+                   THEN parent.node -> 'children' ELSE '[]'::JSONB END
+          ) child
+    ),
+    leaves AS (
+        SELECT node ->> 'type' AS kind, lower(node ->> 'value') AS value, negated
+          FROM ast_nodes
+         WHERE node ->> 'type' IN ('term', 'phrase', 'exact')
+    ),
+    query_values AS (
+        SELECT
+            COALESCE(array_agg(DISTINCT value ORDER BY value)
+                FILTER (WHERE kind = 'term'), ARRAY[]::TEXT[]) AS terms,
+            COALESCE(array_agg(DISTINCT digest(value, 'sha256'))
+                FILTER (WHERE kind = 'term'), ARRAY[]::BYTEA[]) AS term_hashes,
+            COALESCE(array_agg(DISTINCT value ORDER BY value)
+                FILTER (WHERE kind = 'term' AND NOT negated), ARRAY[]::TEXT[]) AS score_terms,
+            COALESCE(array_agg(DISTINCT digest(value, 'sha256'))
+                FILTER (WHERE kind = 'term' AND NOT negated), ARRAY[]::BYTEA[]) AS score_term_hashes,
+            COALESCE(array_agg(DISTINCT value ORDER BY value)
+                FILTER (WHERE kind = 'phrase'), ARRAY[]::TEXT[]) AS phrases,
+            COALESCE(array_agg(DISTINCT value ORDER BY value)
+                FILTER (WHERE kind = 'exact'), ARRAY[]::TEXT[]) AS exact_values
+          FROM leaves
+    ),
+    visible_occurrence AS (
+        SELECT occurrence_row.id,occurrence_row.source_id,
+               occurrence_row.artifact_version_id,occurrence_row.view_id,
+               occurrence_row.role,occurrence_row.ordinal, source.name AS source_name, source.generation_seq
+          FROM occurrence occurrence_row
+          JOIN eligible_source source ON source.id = occurrence_row.source_id
+          JOIN generation_item_version membership
+            ON membership.source_id = occurrence_row.source_id
+           AND membership.artifact_version_id = occurrence_row.artifact_version_id
+         WHERE membership.valid_from_seq <= source.generation_seq
+           AND (membership.valid_to_seq IS NULL
+                OR membership.valid_to_seq > source.generation_seq)
+           AND (COALESCE(p_filters ->> 'path_prefix', '') = ''
+                OR left(occurrence_row.source_path, char_length(p_filters ->> 'path_prefix'))
+                   = p_filters ->> 'path_prefix')
+           AND (COALESCE(p_filters ->> 'role', '') = ''
+                OR occurrence_row.role = p_filters ->> 'role')
+           AND (COALESCE(p_filters ->> 'occurred_from', '') = ''
+                OR occurrence_row.occurred_at >= (p_filters ->> 'occurred_from')::TIMESTAMPTZ)
+           AND (COALESCE(p_filters ->> 'occurred_to', '') = ''
+                OR occurrence_row.occurred_at < (p_filters ->> 'occurred_to')::TIMESTAMPTZ)
+    ),
+    scoped_binding AS MATERIALIZED (
+        SELECT visible.id AS occurrence_id,
+               binding.ordinal AS component_ordinal, binding.document_id,
+               binding.role_weight, document.token_count
+          FROM visible_occurrence visible
+          JOIN storage_v2_search_view_document binding ON binding.view_id = visible.view_id
+          JOIN storage_v2_search_document document ON document.id = binding.document_id
+    ),
+    view_stats AS (
+        SELECT occurrence_id, SUM(token_count)::DOUBLE PRECISION AS view_length
+          FROM scoped_binding GROUP BY occurrence_id
+    ),
+    corpus_stats AS (
+        SELECT COUNT(DISTINCT occurrence_id)::DOUBLE PRECISION AS view_count,
+               AVG(view_length) AS average_view_length FROM view_stats
+    ),
+    scoped_document AS MATERIALIZED (
+        SELECT DISTINCT document_id FROM scoped_binding ORDER BY document_id
+    ),
+    query_posting AS MATERIALIZED (
+        SELECT posting.document_id,posting.term,posting.term_frequency
+          FROM query_values query
+          CROSS JOIN unnest(query.terms) requested_term(value)
+          CROSS JOIN LATERAL storage_v2_scoped_term_posting(
+              ARRAY(SELECT document_id FROM scoped_document),requested_term.value
+          ) posting
+    ),
+    scoped_posting AS MATERIALIZED (
+        SELECT binding.occurrence_id, binding.component_ordinal, binding.role_weight,
+               posting.term, posting.term_frequency
+          FROM scoped_binding binding
+          JOIN query_posting posting ON posting.document_id = binding.document_id
+    ),
+    document_frequency AS (
+        SELECT term, COUNT(DISTINCT occurrence_id)::DOUBLE PRECISION AS frequency
+          FROM scoped_posting GROUP BY term
+    ),
+    term_rows AS (
+        SELECT posting.occurrence_id, posting.term, posting.component_ordinal,
+               posting.role_weight,
+               posting.role_weight
+                 * LN(1 + (stats.view_count + 1.0) / (frequency.frequency + 1.0))
+                 * posting.term_frequency
+                 / (posting.term_frequency + 0.5
+                    + 0.5 * (view_stats.view_length / NULLIF(stats.average_view_length, 0)))
+                 AS contribution
+          FROM scoped_posting posting
+          JOIN view_stats ON view_stats.occurrence_id = posting.occurrence_id
+          JOIN document_frequency frequency ON frequency.term = posting.term
+          CROSS JOIN corpus_stats stats
+          CROSS JOIN query_values query
+         WHERE posting.term = ANY(query.score_terms)
+           AND posting.occurrence_id NOT IN (SELECT occurrence_id FROM lexical_ranks copied
+              WHERE copied.score>=1000000.0 AND copied.occurrence_id IS NOT NULL)
+    ),
+    term_match_aggregate AS MATERIALIZED (
+        SELECT occurrence_id, array_agg(DISTINCT term ORDER BY term) AS matched_terms
+          FROM scoped_posting GROUP BY occurrence_id
+    ),
+    best_term AS (
+        SELECT DISTINCT ON (occurrence_id, term)
+               occurrence_id, term, component_ordinal, role_weight, contribution
+          FROM term_rows
+         ORDER BY occurrence_id, term, contribution DESC, component_ordinal
+    ),
+    term_aggregate AS MATERIALIZED (
+        SELECT occurrence_id,SUM(contribution) AS lexical_terms
+          FROM best_term GROUP BY occurrence_id
+    ),
+    phrase_aggregate AS MATERIALIZED (
+        SELECT binding.occurrence_id,
+               array_agg(DISTINCT phrase.value ORDER BY phrase.value) AS matched_phrases
+          FROM (
+              SELECT scope.occurrence_id, document.fts_simple, document.search_text
+                FROM scoped_binding scope
+                JOIN storage_v2_search_document document ON document.id = scope.document_id
+          ) binding
+          CROSS JOIN query_values query
+          CROSS JOIN unnest(query.phrases) AS phrase(value)
+         WHERE cardinality((SELECT phrases FROM query_values)) > 0 AND storage_v2_phrase_matches(binding.fts_simple, binding.search_text, phrase.value)
+         GROUP BY binding.occurrence_id
+    ),
+    exact_aggregate AS MATERIALIZED (
+        SELECT binding.occurrence_id,
+               array_agg(DISTINCT exact.value ORDER BY exact.value) AS matched_exact
+          FROM (
+              SELECT scope.occurrence_id, document.exact_identifiers
+                FROM scoped_binding scope
+                JOIN storage_v2_search_document document ON document.id = scope.document_id
+          ) binding
+          CROSS JOIN query_values query
+          CROSS JOIN unnest(query.exact_values) AS exact(value)
+         WHERE cardinality((SELECT exact_values FROM query_values)) > 0 AND exact.value = ANY(binding.exact_identifiers)
+         GROUP BY binding.occurrence_id
+    ),
+    evidence_occurrence AS MATERIALIZED (
+        SELECT occurrence_id FROM term_match_aggregate
+        UNION SELECT occurrence_id FROM phrase_aggregate
+        UNION SELECT occurrence_id FROM exact_aggregate
+        UNION SELECT occurrence_id FROM lexical_ranks
+    ),
+    matched AS MATERIALIZED (
+        SELECT visible.*, view_stats.view_length,
+               COALESCE(term_match_aggregate.matched_terms, ARRAY[]::TEXT[]) AS matched_terms,
+               COALESCE(phrase_aggregate.matched_phrases, ARRAY[]::TEXT[]) AS matched_phrases,
+               COALESCE(exact_aggregate.matched_exact, ARRAY[]::TEXT[]) AS matched_exact,
+               COALESCE(term_aggregate.lexical_terms, 0.0)
+                 + 1.5 * cardinality(COALESCE(phrase_aggregate.matched_phrases, ARRAY[]::TEXT[]))
+                 + 2.0 * cardinality(COALESCE(exact_aggregate.matched_exact, ARRAY[]::TEXT[]))
+                 AS lexical_score,
+               '[]'::JSONB AS term_detail
+          FROM visible_occurrence visible
+          JOIN evidence_occurrence evidence ON evidence.occurrence_id=visible.id
+          JOIN view_stats ON view_stats.occurrence_id = visible.id
+          LEFT JOIN term_match_aggregate ON term_match_aggregate.occurrence_id = visible.id
+          LEFT JOIN term_aggregate ON term_aggregate.occurrence_id = visible.id
+          LEFT JOIN phrase_aggregate ON phrase_aggregate.occurrence_id = visible.id
+          LEFT JOIN exact_aggregate ON exact_aggregate.occurrence_id = visible.id
+    ),
+    lexical_ranks AS MATERIALIZED (
+        SELECT ranked.*
+          FROM storage_v2_source_segment_rank_candidates(
+              (SELECT array_agg(id) FROM visible_occurrence),
+              CASE WHEN p_ast ->> 'type' = 'term' THEN p_ast ->> 'value'
+                   ELSE storage_v2_simple_and_query(p_ast) END
+          ) ranked
+    ),
+    lexical_presence AS MATERIALIZED (
+        SELECT present.occurrence_id
+          FROM storage_v2_source_segment_presence(
+              CASE WHEN storage_v2_simple_and_query(p_ast) IS NOT NULL
+                   THEN (SELECT array_agg(matched.id) FROM matched
+                         LEFT JOIN lexical_ranks ranked ON ranked.occurrence_id=matched.id
+                        WHERE ranked.occurrence_id IS NULL)
+                   ELSE NULL::BIGINT[] END
+          ) present
+    ),
+    boolean_matched AS (
+        SELECT matched.*, lexical_rank.score AS segment_score,
+               lexical_rank.segment_order AS candidate_sort_key
+          FROM matched
+          LEFT JOIN lexical_ranks lexical_rank
+            ON lexical_rank.occurrence_id = matched.id
+          LEFT JOIN lexical_presence presence
+            ON presence.occurrence_id = matched.id
+         WHERE CASE WHEN lexical_rank.occurrence_id IS NOT NULL
+                    AND (p_ast->>'type'='term' OR storage_v2_simple_and_query(p_ast) IS NOT NULL)
+                    THEN TRUE
+                    WHEN lexical_rank.occurrence_id IS NOT NULL
+                    OR cardinality(matched_terms)>0
+                    OR cardinality(matched_phrases)>0
+                    OR cardinality(matched_exact)>0 THEN
+             (storage_v2_simple_and_query(p_ast) IS NULL AND (
+                 storage_v2_search_ast_matches(
+                     p_ast, matched_terms, matched_phrases, matched_exact
+                 ) OR (p_ast ->> 'type' = 'term' AND lexical_rank.occurrence_id IS NOT NULL)
+             )) OR (storage_v2_simple_and_query(p_ast) IS NOT NULL AND (
+                 lexical_rank.occurrence_id IS NOT NULL
+                 OR (presence.occurrence_id IS NULL AND storage_v2_search_ast_matches(
+                     p_ast, matched_terms, matched_phrases, matched_exact
+                 ))
+             ))
+             ELSE FALSE END
+    ),
+    staged AS (
+        SELECT matched.*,
+               graph.status AS graph_status, COALESCE(graph.score, 0.0) AS graph_score,
+               semantic.status AS semantic_status, COALESCE(semantic.score, 0.0) AS semantic_score,
+               rerank.status AS rerank_status, COALESCE(rerank.score, 0.0) AS rerank_score
+          FROM boolean_matched matched
+          LEFT JOIN storage_v2_occurrence_score_component graph
+            ON graph.occurrence_id = matched.id AND graph.stage = 'graph'
+           AND graph.profile_id = p_filters ->> 'graph_profile' AND graph.score IS NOT NULL AND graph.score<>0
+          LEFT JOIN storage_v2_occurrence_score_component semantic
+            ON semantic.occurrence_id = matched.id AND semantic.stage = 'semantic'
+           AND semantic.profile_id = p_filters ->> 'semantic_profile' AND semantic.score IS NOT NULL AND semantic.score<>0
+          LEFT JOIN storage_v2_occurrence_score_component rerank
+            ON rerank.occurrence_id = matched.id AND rerank.stage = 'rerank'
+           AND rerank.profile_id = p_filters ->> 'rerank_profile' AND rerank.score IS NOT NULL AND rerank.score<>0
+    ),
+    ranked AS (
+        SELECT staged.*,
+               CASE WHEN staged.segment_score >= 1000000.0
+                    THEN staged.segment_score
+                    ELSE lexical_score
+               END + graph_score + semantic_score + rerank_score AS final_score
+          FROM staged
+    ),
+    fragmented_match AS MATERIALIZED (
+        SELECT ranked.id,ranked.source_id,fragment.source_path,ranked.final_score
+          FROM ranked JOIN occurrence fragment ON fragment.id=ranked.id
+         WHERE fragment.role='artifact' AND fragment.locator @> '{"fragmented":true}'::JSONB
+    ),
+    result_group_score AS (
+        SELECT ranked.final_score FROM ranked
+         WHERE NOT EXISTS (SELECT 1 FROM fragmented_match fragment WHERE fragment.id=ranked.id)
+        UNION ALL
+        SELECT max(fragment.final_score) FROM fragmented_match fragment
+         GROUP BY fragment.source_id,fragment.source_path
+    ),
+    score_boundary AS MATERIALIZED (
+        SELECT min(final_score) AS final_score FROM (
+            SELECT final_score FROM result_group_score ORDER BY final_score DESC LIMIT p_limit
+        ) top_scores
+    ),
+    bounded AS MATERIALIZED (
+        SELECT ranked.* FROM ranked CROSS JOIN score_boundary boundary
+         WHERE ranked.final_score>=boundary.final_score
+    ),
+    bounded_native_ranks AS MATERIALIZED (
+        SELECT precision.* FROM storage_v2_source_segment_ranks_precise(
+            ARRAY(SELECT id FROM bounded WHERE segment_score<1000000.0),
+            CASE WHEN p_ast->>'type'='term' THEN p_ast->>'value'
+                 ELSE storage_v2_simple_and_query(p_ast) END
+        ) precision
+    ),
+    identified AS MATERIALIZED (
+        SELECT bounded.*, COALESCE(precision.segment_order,bounded.candidate_sort_key) AS lexical_sort_key, identified_occurrence.source_path,
+               identified_occurrence.locator, item.item_key,
+               artifact.expected_content_hash, view_row.view_digest,
+               'storage-v2:' || encode(storage_v2_hash_parts(
+                    'mainrag.external-hit.v1', ARRAY[
+                        int8send(bounded.source_id),
+                        convert_to(item.item_key, 'UTF8'),
+                        convert_to(artifact.expected_content_hash, 'UTF8'),
+                        view_row.view_digest,
+                        convert_to(bounded.role, 'UTF8'),
+                        int8send(bounded.ordinal),
+                        convert_to(identified_occurrence.locator::TEXT, 'UTF8')
+                    ]
+               ), 'hex') AS external_hit_id
+          FROM bounded
+          LEFT JOIN bounded_native_ranks precision ON precision.occurrence_id=bounded.id
+          JOIN occurrence identified_occurrence ON identified_occurrence.id=bounded.id
+          JOIN artifact_version artifact ON artifact.id = bounded.artifact_version_id
+          JOIN source_item item ON item.id = artifact.item_id
+          JOIN retrieval_view view_row ON view_row.id = bounded.view_id
+    ),
+    identified_grouped AS MATERIALIZED (
+        SELECT * FROM identified
+         WHERE NOT (role='artifact' AND locator @> '{"fragmented":true}'::JSONB)
+        UNION ALL
+        SELECT * FROM (
+            SELECT DISTINCT ON (source_id,source_path) * FROM identified
+             WHERE role='artifact' AND locator @> '{"fragmented":true}'::JSONB
+             ORDER BY source_id,source_path,final_score DESC,
+                      lexical_sort_key NULLS LAST,external_hit_id,id
+        ) best_fragment
+    ),
+    ordered AS (
+        SELECT * FROM identified_grouped
+         ORDER BY final_score DESC,lexical_sort_key NULLS LAST,external_hit_id,id
+         LIMIT p_limit
+    ),
+    returned_term_rows AS (
+        SELECT posting.occurrence_id, posting.term, posting.component_ordinal,
+               posting.role_weight,
+               posting.role_weight
+                 * LN(1 + (stats.view_count + 1.0) / (frequency.frequency + 1.0))
+                 * posting.term_frequency
+                 / (posting.term_frequency + 0.5
+                    + 0.5 * (view_stats.view_length / NULLIF(stats.average_view_length, 0)))
+                 AS contribution
+          FROM scoped_posting posting
+          JOIN ordered returned ON returned.id=posting.occurrence_id
+          JOIN view_stats ON view_stats.occurrence_id = posting.occurrence_id
+          JOIN document_frequency frequency ON frequency.term = posting.term
+          CROSS JOIN corpus_stats stats
+          CROSS JOIN query_values query
+         WHERE posting.term = ANY(query.score_terms)
+    ),
+    returned_best_term AS (
+        SELECT DISTINCT ON (occurrence_id, term)
+               occurrence_id, term, component_ordinal, role_weight, contribution
+          FROM returned_term_rows
+         ORDER BY occurrence_id, term, contribution DESC, component_ordinal
+    ),
+    returned_term_aggregate AS MATERIALIZED (
+        SELECT occurrence_id,SUM(contribution) AS lexical_terms
+          FROM returned_best_term GROUP BY occurrence_id
+    ),
+    results AS (
+        SELECT jsonb_agg(jsonb_build_object(
+            'occurrence_id', id,
+            'external_hit_id', external_hit_id,
+            'view_id', view_id,
+            'source_id', source_id,
+            'generation_seq', generation_seq,
+            'source_name', source_name,
+            'source_path', source_path,
+            'locator', locator,
+            'role', role,
+            'content', (
+                SELECT string_agg(document.search_text, E'\n' ORDER BY binding.ordinal)
+                  FROM storage_v2_search_view_document binding
+                  JOIN storage_v2_search_document document ON document.id = binding.document_id
+                 WHERE binding.view_id = ordered.view_id
+            ),
+            'score', final_score,
+            'score_explanation', jsonb_build_object(
+                'lexical', CASE WHEN ordered.segment_score>=1000000.0 THEN
+                    COALESCE((SELECT lexical_terms FROM returned_term_aggregate explanation
+                               WHERE explanation.occurrence_id=ordered.id),0.0)
+                    +1.5*cardinality(ordered.matched_phrases)
+                    +2.0*cardinality(ordered.matched_exact)
+                    ELSE lexical_score END,
+                'role_weighted_terms', COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                        'term', detail.term, 'component_ordinal', detail.component_ordinal,
+                        'role_weight', detail.role_weight, 'score', detail.contribution
+                    ) ORDER BY detail.term)
+                    FROM returned_best_term detail WHERE detail.occurrence_id=ordered.id
+                ),'[]'::JSONB),
+                'normalization', jsonb_build_object(
+                    'view_token_count', view_length,
+                    'scope_average_view_token_count', (SELECT average_view_length FROM corpus_stats)
+                ),
+                'graph', jsonb_build_object(
+                    'status', COALESCE((SELECT component.status
+                        FROM storage_v2_occurrence_score_component component
+                       WHERE component.occurrence_id=ordered.id AND component.stage='graph'
+                         AND component.profile_id=p_filters->>'graph_profile'),
+                        CASE WHEN p_filters ? 'graph_profile' THEN 'unavailable' ELSE 'not_requested' END),
+                    'score', graph_score
+                ),
+                'semantic', jsonb_build_object(
+                    'status', COALESCE((SELECT component.status
+                        FROM storage_v2_occurrence_score_component component
+                       WHERE component.occurrence_id=ordered.id AND component.stage='semantic'
+                         AND component.profile_id=p_filters->>'semantic_profile'),
+                        CASE WHEN p_filters ? 'semantic_profile' THEN 'unavailable' ELSE 'not_requested' END),
+                    'score', semantic_score
+                ),
+                'rerank', jsonb_build_object(
+                    'status', COALESCE((SELECT component.status
+                        FROM storage_v2_occurrence_score_component component
+                       WHERE component.occurrence_id=ordered.id AND component.stage='rerank'
+                         AND component.profile_id=p_filters->>'rerank_profile'),
+                        CASE WHEN p_filters ? 'rerank_profile' THEN 'unavailable' ELSE 'not_requested' END),
+                    'score', rerank_score
+                ),
+                'execution', 'complete_scoped_view_evaluation',
+                'pruning', 'disabled_unsafe_bounds'
+            ),
+            'legacy_successors', COALESCE((
+                SELECT jsonb_agg(jsonb_build_object(
+                    'old_hit_id', mapping.old_hit_id,
+                    'ordinal', mapping.ordinal,
+                    'relation_kind', mapping.relation_kind
+                ) ORDER BY mapping.old_hit_id, mapping.ordinal)
+                  FROM legacy_hit_mapping mapping WHERE mapping.occurrence_id = ordered.id
+            ), '[]'::JSONB)
+        ) ORDER BY final_score DESC, lexical_sort_key NULLS LAST, external_hit_id, id) AS value FROM ordered
+    )
+    SELECT jsonb_build_object(
+        'generation_seq', NULL,
+        'execution', 'complete_scoped_view_evaluation',
+        'fully_scored_views', (SELECT COUNT(*) FROM view_stats),
+        'total', (SELECT COUNT(*) FROM ranked),
+        'results', COALESCE((SELECT value FROM results), '[]'::JSONB)
+    ) INTO v_result;
+
+    IF EXISTS (
+        SELECT 1 FROM occurrence occurrence_row
+        JOIN artifact_version artifact ON artifact.id = occurrence_row.artifact_version_id
+        JOIN sources source ON source.id = occurrence_row.source_id
+        JOIN logical_source pointer ON pointer.id = source.id
+        JOIN source_generation active_generation
+          ON active_generation.id = pointer.active_generation_id
+         AND active_generation.source_id = pointer.id
+         AND active_generation.status = 'active'
+        JOIN generation_item_version membership
+          ON membership.source_id = occurrence_row.source_id
+         AND membership.source_item_id = artifact.item_id
+         AND membership.artifact_version_id = artifact.id
+       WHERE (p_source_id IS NULL OR occurrence_row.source_id = p_source_id)
+           AND storage_v2_can_access_source(occurrence_row.source_id, 'read')
+           AND (p_include_test OR NOT source.is_test)
+         AND membership.valid_from_seq <= active_generation.generation_seq
+         AND (membership.valid_to_seq IS NULL
+              OR membership.valid_to_seq > active_generation.generation_seq)
+         AND (COALESCE(p_filters ->> 'path_prefix', '') = ''
+              OR left(occurrence_row.source_path, char_length(p_filters ->> 'path_prefix'))
+                 = p_filters ->> 'path_prefix')
+         AND (COALESCE(p_filters ->> 'role', '') = ''
+              OR occurrence_row.role = p_filters ->> 'role')
+         AND (COALESCE(p_filters ->> 'occurred_from', '') = ''
+              OR occurrence_row.occurred_at >= (p_filters ->> 'occurred_from')::TIMESTAMPTZ)
+         AND (COALESCE(p_filters ->> 'occurred_to', '') = ''
+              OR occurrence_row.occurred_at < (p_filters ->> 'occurred_to')::TIMESTAMPTZ)
+         AND NOT EXISTS (
+             SELECT 1 FROM storage_v2_search_view_document binding
+              WHERE binding.view_id = occurrence_row.view_id
+         )
+    ) THEN
+        RAISE EXCEPTION 'required lexical search document missing';
+    END IF;
+    RETURN v_result;
+END
+$function$
+;
+ALTER FUNCTION storage_v2_authorized_lexical_candidates(BIGINT[],BIGINT[],TEXT)
+ OWNER TO mainrag_v2_lexical_rank_owner;
+REVOKE ALL ON FUNCTION storage_v2_authorized_lexical_candidates(BIGINT[],BIGINT[],TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION storage_v2_authorized_lexical_candidates(BIGINT[],BIGINT[],TEXT)
+ TO mainrag_v2_frontier_owner;
+ALTER FUNCTION storage_v2_source_segment_rank_candidates(BIGINT[],TEXT)
+ OWNER TO mainrag_v2_frontier_owner;
+REVOKE ALL ON FUNCTION storage_v2_source_segment_rank_candidates(BIGINT[],TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION storage_v2_source_segment_rank_candidates(BIGINT[],TEXT) TO mainrag;
+COMMIT;

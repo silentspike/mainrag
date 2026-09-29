@@ -1723,8 +1723,26 @@ where
                     measurements.analysis_retries = measurements.analysis_retries.saturating_add(1);
                     controlled_retry_done = true;
                 }
-                let parsed = parser.parse_file(Path::new(path), text)?;
-                let analysis_result = analysis_cache::encode(&parsed, content_digest)?;
+                let parsed = parser.parse_file_if_available(Path::new(path), text)?;
+                let parser_available = parsed.is_some();
+                let parsed = parsed.unwrap_or_default();
+                let mut analysis_result = analysis_cache::encode(&parsed, content_digest)?;
+                if !parser_available {
+                    // Body, search text and locators remain complete. Missing
+                    // grammar support provides unknown intelligence, not a
+                    // successful claim that this input has no symbols.
+                    analysis_result
+                        .as_object_mut()
+                        .context("analysis cache must be an object")?
+                        .insert(
+                            "parser_availability".into(),
+                            json!({
+                                "status": "unavailable",
+                                "reason": "no_registered_parser",
+                                "recognized_language": crate::services::parser::Lang::from_path(Path::new(path)).to_string(),
+                            }),
+                        );
+                }
                 generation_ingest::finish_analysis_attempt(
                     client,
                     content_digest,
@@ -1734,8 +1752,10 @@ where
                 )
                 .await?;
                 cached_analyses.insert(content_digest.to_vec(), analysis_result);
-                measurements.parser_passes = measurements.parser_passes.saturating_add(1);
-                (parsed, 1_i16)
+                measurements.parser_passes = measurements
+                    .parser_passes
+                    .saturating_add(u64::from(parser_available));
+                (parsed, i16::from(parser_available))
             };
             let cards = generic_structural_cards(item_key, &parsed)?;
             measurements.record_stage(ShadowIngestStage::Analysis, analysis_started.elapsed());
