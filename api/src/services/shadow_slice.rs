@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crate::db::{content_body, generation_ingest};
 use crate::plugins;
+use crate::services::analysis_cache;
 use crate::services::chunker::character::CharacterChunker;
 use crate::services::chunker::{Chunk, Chunker};
 use crate::services::content_store::{
@@ -25,7 +26,7 @@ use crate::services::generation_ingest::{ShadowIngestMeasurements, ShadowIngestS
 use crate::services::intelligence_v2::{
     generic_structural_cards, normalized_output_sha256, GENERIC_ANALYSIS_PROFILE,
 };
-use crate::services::parser::{CodeParser, ExtractedCall, ExtractedSymbol, ParseResult};
+use crate::services::parser::{CodeParser, ParseResult};
 use crate::services::source_read::ReadAccounting;
 
 pub const FIXTURE_ADAPTER_PROFILE: &str = "mainrag.fs-shadow-fixture.v1";
@@ -1524,18 +1525,7 @@ where
             let cached_analysis = cached_analyses.get(content_digest).cloned();
             let (parsed, parser_pass_count) = if let Some(result) = cached_analysis {
                 measurements.reused_analysis = measurements.reused_analysis.saturating_add(1);
-                (
-                    ParseResult {
-                        symbols: serde_json::from_value::<Vec<ExtractedSymbol>>(
-                            result["symbols"].clone(),
-                        )?,
-                        calls: serde_json::from_value::<Vec<ExtractedCall>>(
-                            result["calls"].clone(),
-                        )?,
-                        language: result["language"].as_str().unwrap_or("text").to_string(),
-                    },
-                    0_i16,
-                )
+                (analysis_cache::decode(result, content_digest)?, 0_i16)
             } else {
                 generation_ingest::begin_analysis_attempt(
                     client,
@@ -1563,11 +1553,7 @@ where
                     controlled_retry_done = true;
                 }
                 let parsed = parser.parse_file(Path::new(path), text)?;
-                let analysis_result = json!({
-                    "symbols": &parsed.symbols,
-                    "calls": &parsed.calls,
-                    "language": &parsed.language,
-                });
+                let analysis_result = analysis_cache::encode(&parsed, content_digest)?;
                 generation_ingest::finish_analysis_attempt(
                     client,
                     content_digest,
@@ -1754,24 +1740,28 @@ where
                     }
                 }
             }
-            // A bounded card group retains the scalar writer's validation and
-            // collision checks, while requiring one round trip for up to 64 cards.
-            for card_batch in cards.chunks(64) {
-                let values = card_batch.iter().map(|card| -> Result<serde_json::Value> {
-                    Ok(json!({
-                        "symbol_key": &card.symbol_key, "language": &card.language,
-                        "symbol_kind": &card.symbol_kind, "qualified_name": &card.qualified_name,
-                        "signature": &card.signature, "documentation": &card.documentation,
-                        "visibility": &card.visibility, "structure": &card.structure,
-                        "source_span": &card.source_span,
-                        "analysis_profile_id": &card.analysis_profile_id,
-                        "output_sha256": hex::encode(normalized_output_sha256(card)?),
-                        "generic": {"name": &card.name, "qualified_name": &card.qualified_name,
-                                    "symbol_kind": &card.symbol_kind, "language": &card.language},
-                        "domain": &card.domain, "provenance": &card.field_provenance,
-                    }))
-                }).collect::<Result<Vec<_>>>()?;
-                let grouped = serde_json::Value::Array(values);
+            // Bound both item count and serialized bytes; long source lines can
+            // otherwise overflow a JSONB array even when it has only 64 cards.
+            let values = cards.iter().map(|card| -> Result<serde_json::Value> {
+                Ok(json!({
+                    "symbol_key": &card.symbol_key, "language": &card.language,
+                    "symbol_kind": &card.symbol_kind, "qualified_name": &card.qualified_name,
+                    "signature": &card.signature, "documentation": &card.documentation,
+                    "visibility": &card.visibility, "structure": &card.structure,
+                    "source_span": &card.source_span,
+                    "analysis_profile_id": &card.analysis_profile_id,
+                    "output_sha256": hex::encode(normalized_output_sha256(card)?),
+                    "generic": {"name": &card.name, "qualified_name": &card.qualified_name,
+                                "symbol_kind": &card.symbol_kind, "language": &card.language},
+                    "domain": &card.domain, "provenance": &card.field_provenance,
+                }))
+            });
+            for grouped in analysis_cache::JsonGroups::new(values) {
+                let grouped = grouped?;
+                let expected = grouped
+                    .as_array()
+                    .context("card group must be an array")?
+                    .len();
                 let rows = client
                     .query(
                         "SELECT bundle.id FROM jsonb_array_elements($4::JSONB) card \
@@ -1790,7 +1780,7 @@ where
                         ],
                     )
                     .await?;
-                if rows.len() != card_batch.len() {
+                if rows.len() != expected {
                     bail!("structural card group was not staged completely");
                 }
                 measurements.structural_card_batch_calls += 1;
@@ -3091,6 +3081,7 @@ mod managed_append_tests;
 
 #[cfg(test)]
 mod tests {
+    use crate::services::parser::ExtractedSymbol;
     #[test]
     fn lexical_first_positions_preserve_repeated_unicode_identity() {
         let chunks = CharacterChunker::new(crate::services::chunker::ChunkerConfig {
