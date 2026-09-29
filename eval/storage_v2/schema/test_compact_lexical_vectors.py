@@ -9,6 +9,7 @@ import uuid
 from eval.storage_v2.schema import test_compact_exact_postings as compact
 from eval.storage_v2.schema import test_shadow_ingest_schema as schema
 from eval.storage_v2.schema import test_filter_before_ranking as filter_schema
+from eval.storage_v2 import test_candidate_projection_restore as restore
 
 
 MIGRATION = schema.ROOT / "migrations/102_storage_v2_compact_lexical_vectors.sql"
@@ -85,6 +86,12 @@ class CompactLexicalVectorTests(filter_schema.FilterBeforeRankingTests):
                                      f"WHERE occurrence_id={occurrence}")), (len(texts) + 63) // 64)
         self.assertEqual(self.sql("SELECT count(*) FROM storage_v2_lexical_segment_all "
                                  f"WHERE occurrence_id={occurrence}"), str(len(texts)))
+        db = restore.M["Database"](self.database, False)
+        db.command += ["--host", str(self.socket)]
+        frozen = db.query(restore.M["snapshot_statement"](source, generation))[0]
+        self.assertEqual(frozen["lexical_relation"], "storage_v2_lexical_segment_all")
+        projection_plan = {"original": frozen}
+        self.assertEqual(db.query(restore.M["member_query"](projection_plan, 0))[0]["segment_count"], len(texts))
         reference = "SELECT count(*) FROM unnest(" + orders + "," + array(texts, "TEXT") + "," + \
             array([p + 1 for p in positions], "BIGINT") + ") expected(segment_order,text,text_start) " + \
             "FULL JOIN storage_v2_lexical_segment_all actual ON actual.occurrence_id=" + \
@@ -161,6 +168,7 @@ class CompactLexicalVectorTests(filter_schema.FilterBeforeRankingTests):
         proof = json.loads(self.sql(writer + f"SELECT storage_v2_verify_lexical_segments({generation})"))
         self.assertEqual(proof["segment_count"], len(texts) + 2)
         self.assertEqual(proof["invalid_count"], 0)
+        self.assertEqual(db.query(restore.M["member_query"](projection_plan, 0))[0]["segment_count"], len(texts) + 2)
         self.file(MIGRATION)
         self.assertEqual(before, searches())
         weakened = self.command("--command", "BEGIN; ALTER POLICY storage_v2_compact_lexical_source "

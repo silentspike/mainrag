@@ -1043,7 +1043,11 @@ blocks of at most 64 rows. Character boundaries, overlap, first-match locators,
 digests, context, chunk types and weighted vectors remain unchanged. Existing
 flat projections are not rewritten. `storage_v2_lexical_segment_all` provides
 the complete logical relation under invoker security and forced source RLS.
-Projection restoration counts this logical relation rather than physical rows.
+Projection restoration freezes the available lexical relation in its original
+package snapshot: older schemas retain the flat relation, while migration 102
+uses the complete logical relation rather than physical rows. A layout change
+invalidates the frozen plan before any write; it never silently falls back to
+flat-only counts when compact rows exist.
 
 Block fingerprints are only a candidate filter for plain positive queries.
 Every match and rank uses the full original vector. Queries with other syntax
