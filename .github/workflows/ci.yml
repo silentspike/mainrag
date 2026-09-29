@@ -430,6 +430,7 @@ jobs:
               'eval.storage_v2.schema.test_candidate_projection_restore_schema.CandidateProjectionSchemaTests',
               'eval.storage_v2.schema.test_byte_located_lexical_segments.ByteLocatedLexicalTests',
               'eval.storage_v2.schema.test_compact_exact_postings.CompactExactPostingTests',
+              'eval.storage_v2.schema.test_managed_frontier_lock.ManagedFrontierLockTests',
               'eval.storage_v2.schema.test_active_set_search.ActiveSetSearchTests',
           ])
           assert suite.countTestCases() >= 32, 'Expected search, pack reader-fence, append frontier and lexical window regressions'

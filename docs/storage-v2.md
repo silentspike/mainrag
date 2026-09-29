@@ -1016,6 +1016,12 @@ rollback must retain compatible mixed-layout readers; removing their blocks or
 restoring flat-only readers would discard required logical postings. Data
 removal remains subject to the governing manifest and integrity gates.
 
+Managed prefix reuse locks its trusted frontier through a source-authorized
+function owned by the dedicated non-login frontier owner. The prefix copier
+keeps its ordinary ingest ownership and all generation, prefix, analysis and
+immutable reuse checks. Direct frontier changes remain forbidden to the API
+role; the lock helper does not publish or modify a frontier.
+
 Interactive exact and active reads materialize the shared narrow corpus binding
 once and disable JIT only inside those two functions. Full corpus normalization,
 query classes, authorization and complete result envelopes remain unchanged.
