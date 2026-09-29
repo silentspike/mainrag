@@ -34,6 +34,30 @@ impl Drop for CloneStaging {
     }
 }
 
+struct SnapshotWorktree {
+    cache: PathBuf,
+    path: PathBuf,
+}
+
+impl Drop for SnapshotWorktree {
+    fn drop(&mut self) {
+        // The path is unique to this request. Remove Git's worktree metadata
+        // together with the checkout even when the caller is cancelled.
+        let result = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.cache)
+            .args(["worktree", "remove", "--force", "--"])
+            .arg(&self.path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if !result.is_ok_and(|status| status.success()) {
+            warn!("owned Git snapshot worktree needs cleanup");
+        }
+    }
+}
+
 struct GitProcess {
     child: Child,
     group: Option<u32>,
@@ -315,6 +339,61 @@ impl GitPlugin {
         Ok(cache_path)
     }
 
+    async fn sync_pinned_commit(
+        &self,
+        source_path: &str,
+        source_name: &str,
+        commit_sha: &str,
+    ) -> anyhow::Result<SyncResult> {
+        if commit_sha.len() != 40
+            || !commit_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || commit_sha.bytes().any(|byte| byte.is_ascii_uppercase())
+        {
+            anyhow::bail!("Git snapshot commit must be an exact lowercase SHA-1");
+        }
+        let cache = self.sync_repo(source_path, source_name).await?;
+        let cache_for_check = cache.clone();
+        let source_for_check = source_path.to_string();
+        let requested = commit_sha.to_string();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let (_, current) = cached_identity(&cache_for_check, &source_for_check)?;
+            let repo = Repository::open(&cache_for_check)?;
+            let target = git2::Oid::from_str(&requested)?;
+            let commit = repo.find_commit(target)?;
+            if target != current && !repo.graph_descendant_of(current, target)? {
+                anyhow::bail!("Git snapshot is outside the current source history");
+            }
+            if commit.tree()?.get_path(Path::new(".gitmodules")).is_ok() {
+                anyhow::bail!("Git snapshot with submodules requires a separate adapter proof");
+            }
+            Ok(())
+        })
+        .await??;
+        let path = self
+            .cache_dir
+            .join(format!(".{source_name}-snapshot-{}", uuid::Uuid::new_v4()));
+        let owned = SnapshotWorktree {
+            cache: cache.clone(),
+            path: path.clone(),
+        };
+        run_git(
+            Command::new("git")
+                .arg("-C")
+                .arg(&cache)
+                .args(["worktree", "add", "--detach", "--"])
+                .arg(&path)
+                .arg(commit_sha),
+            GIT_TRANSPORT_TIMEOUT,
+        )
+        .await?;
+        let files = self.collect_files(&path).await?;
+        drop(owned);
+        Ok(SyncResult {
+            files,
+            errors: vec![],
+        })
+    }
+
     /// Walk directory and collect files
     async fn collect_files(&self, root_path: &Path) -> anyhow::Result<Vec<RawFile>> {
         let mut files = vec![];
@@ -442,6 +521,28 @@ impl SourcePlugin for GitPlugin {
         })
     }
 
+    async fn sync_for_storage_v2_snapshot_observed(
+        &self,
+        source_path: &str,
+        git_commit: Option<&str>,
+    ) -> anyhow::Result<super::ObservedSyncResult> {
+        let Some(commit) = git_commit else {
+            return self.sync_for_storage_v2_observed(source_path).await;
+        };
+        let source_name = source_path
+            .split('/')
+            .next_back()
+            .unwrap_or("repo")
+            .trim_end_matches(".git");
+        let result = self
+            .sync_pinned_commit(source_path, source_name, commit)
+            .await?;
+        Ok(super::ObservedSyncResult {
+            result,
+            application_read_bytes: None,
+        })
+    }
+
     fn source_type(&self) -> &'static str {
         "git"
     }
@@ -500,6 +601,13 @@ mod tests {
         let first = plugin.sync(source_path).await.unwrap();
         assert_eq!(first.files.len(), 1);
         assert_eq!(first.files[0].content, "fn first() {}\n");
+        let first_head = Repository::open(&source)
+            .unwrap()
+            .head()
+            .unwrap()
+            .target()
+            .unwrap()
+            .to_string();
 
         std::fs::write(source.join("src/a.rs"), "fn second() {}\n").unwrap();
         git(&source, &["add", "."]);
@@ -518,6 +626,24 @@ mod tests {
         let second = plugin.sync(source_path).await.unwrap();
         assert_eq!(second.files.len(), 1);
         assert_eq!(second.files[0].content, "fn second() {}\n");
+        let pinned = plugin
+            .sync_for_storage_v2_snapshot_observed(source_path, Some(&first_head))
+            .await
+            .unwrap();
+        assert_eq!(pinned.result.files.len(), 1);
+        assert_eq!(pinned.result.files[0].content, "fn first() {}\n");
+        assert_eq!(
+            std::fs::read_to_string(directory.0.join("cache/source/src/a.rs")).unwrap(),
+            "fn second() {}\n"
+        );
+        assert_eq!(
+            std::fs::read_dir(directory.0.join("cache"))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().contains("snapshot"))
+                .count(),
+            0
+        );
 
         let cache_root = directory.0.join("cache/source");
         let cache_head = Repository::open(&cache_root)

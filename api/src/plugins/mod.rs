@@ -96,6 +96,20 @@ pub trait SourcePlugin: Send + Sync {
         })
     }
 
+    /// Read an immutable Git commit for a release candidate while the live
+    /// branch may advance. Other adapters must reject a Git snapshot request.
+    #[allow(dead_code)]
+    async fn sync_for_storage_v2_snapshot_observed(
+        &self,
+        source_path: &str,
+        git_commit: Option<&str>,
+    ) -> anyhow::Result<ObservedSyncResult> {
+        if git_commit.is_some() {
+            anyhow::bail!("Git snapshot requested for a non-Git adapter");
+        }
+        self.sync_for_storage_v2_observed(source_path).await
+    }
+
     /// Discover source items for storage-v2 construction. Implementations may
     /// return `source_path` without eagerly materializing `content` so a full
     /// source never has to reside in memory at once.
