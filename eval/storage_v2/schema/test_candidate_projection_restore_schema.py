@@ -77,6 +77,7 @@ class CandidateProjectionSchemaTests(unittest.TestCase):
         db = M["Database"](self.database, False)
         db.command += ["--host", str(self.socket)]
         snap = M["snapshot"](db, 31, generation)
+        self.assertEqual(snap["lexical_relation"], "storage_v2_lexical_segment")
         plan = {"schema_version": "mainrag.storage-v2.projection-restore-plan.v1", "original": snap,
                 "captured_at_unix": int(time.time()), "source_observation": {
                     "source_id": 31, "item_count": 2, "source_watermark_sha256": "c" * 64,
