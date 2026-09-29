@@ -277,7 +277,7 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             (SELECT count(*) FROM occurrence WHERE source_id=165) AS occurrences", &[]).await?;
         ensure!(counts.get::<_,i64>("generations")==1 && counts.get::<_,i64>("occurrences")==257,
             "resume duplicated semantic rows");
-        let unavailable = client.query_one("SELECT cache.result,convert_from(body.inline_bytes,'UTF8') AS bytes \
+        let unavailable = client.query_one("SELECT cache.result,body.id AS body_id \
             FROM occurrence occurrence_row JOIN artifact_version artifact \
               ON artifact.id=occurrence_row.artifact_version_id \
             JOIN content_node node ON node.id=artifact.content_root_node_id \
@@ -285,7 +285,9 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             JOIN storage_v2_analysis_cache cache ON cache.content_identity_sha256=body.digest \
             WHERE occurrence_row.source_id=165 AND occurrence_row.source_path LIKE '%/Dockerfile.txt'",&[]).await?;
         let analysis: serde_json::Value=unavailable.get("result");
-        ensure!(unavailable.get::<_,String>("bytes")==dockerfile
+        let stored = find_and_verify_existing_body(&client,&packs,dockerfile.as_bytes(),4096)
+            .await?.context("unavailable grammar body is missing")?;
+        ensure!(stored.id==unavailable.get::<_,i64>("body_id")
             && analysis["parser_availability"]["status"]=="unavailable"
             && analysis["parser_availability"]["recognized_language"]=="dockerfile"
             && analysis["symbols"]==json!([]) && analysis["calls"]==json!([]),
