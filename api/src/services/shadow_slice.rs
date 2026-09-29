@@ -1665,7 +1665,8 @@ where
                             text.get(chunk.start_byte..chunk.end_byte) == Some(chunk.text.as_str())
                         });
                     if complete {
-                        let character_starts = lexical_first_character_positions(text, &chunks)?;
+                        let (character_starts, byte_starts) =
+                            lexical_first_positions(text, &chunks)?;
                         for (batch_index, batch) in chunks.chunks(256).enumerate() {
                             let start = batch_index
                                 .checked_mul(256)
@@ -1686,6 +1687,7 @@ where
                                 .map(|chunk| chunk.chunk_type.to_string())
                                 .collect::<Vec<_>>();
                             let starts = &character_starts[start..start + batch.len()];
+                            let byte_starts = &byte_starts[start..start + batch.len()];
                             let max_length = batch
                                 .iter()
                                 .map(|chunk| chunk.text.chars().count() as i64)
@@ -1696,8 +1698,8 @@ where
                                 + max_length;
                             let staged_count: i64 = if window_bound <= 8388608 {
                                 client.query_one(
-                                    "SELECT storage_v2_put_lexical_segments_at($1,$2,$3,$4,$5,$6,$7)",
-                                    &[&staged.occurrence_id,&staged.artifact_version_id,&orders,&texts,&prefixes,&types,&starts],
+                                    "SELECT storage_v2_put_lexical_segments_located($1,$2,$3,$4,$5,$6,$7,$8)",
+                                    &[&staged.occurrence_id,&staged.artifact_version_id,&orders,&texts,&prefixes,&types,&starts,&byte_starts],
                                 ).await?.get(0)
                             } else {
                                 client
@@ -2066,7 +2068,7 @@ where
 
 /// Preserve the established first-match locator, including repeated text. Byte
 /// searches are followed by one shared UTF-8 walk, not one prefix count per chunk.
-fn lexical_first_character_positions(text: &str, chunks: &[Chunk]) -> Result<Vec<i64>> {
+fn lexical_first_positions(text: &str, chunks: &[Chunk]) -> Result<(Vec<i64>, Vec<i64>)> {
     let mut positions = chunks
         .iter()
         .enumerate()
@@ -2076,6 +2078,14 @@ fn lexical_first_character_positions(text: &str, chunks: &[Chunk]) -> Result<Vec
                 .context("lexical text is absent from source")
         })
         .collect::<Result<Vec<_>>>()?;
+    let mut byte_starts = vec![0; chunks.len()];
+    for &(offset, index) in &positions {
+        byte_starts[index] = i64::try_from(
+            offset
+                .checked_add(1)
+                .context("lexical byte offset overflow")?,
+        )?;
+    }
     positions.sort_unstable();
     let mut output = vec![0; chunks.len()];
     let mut next = 0;
@@ -2091,7 +2101,7 @@ fn lexical_first_character_positions(text: &str, chunks: &[Chunk]) -> Result<Vec
     if output.contains(&0) {
         bail!("lexical first-match offset is not a character boundary");
     }
-    Ok(output)
+    Ok((output, byte_starts))
 }
 
 fn source_read_bytes(files: &[SliceFile]) -> Result<u64> {
@@ -3090,8 +3100,8 @@ mod tests {
         })
         .chunk("é🙂xé🙂x", None);
         assert_eq!(
-            lexical_first_character_positions("é🙂xé🙂x", &chunks).unwrap(),
-            vec![1, 1]
+            lexical_first_positions("é🙂xé🙂x", &chunks).unwrap(),
+            (vec![1, 1], vec![1, 1])
         );
         let unique = CharacterChunker::new(crate::services::chunker::ChunkerConfig {
             max_chars: Some(3),
@@ -3100,8 +3110,8 @@ mod tests {
         })
         .chunk("é🙂x甲Ωz", None);
         assert_eq!(
-            lexical_first_character_positions("é🙂x甲Ωz", &unique).unwrap(),
-            vec![1, 4]
+            lexical_first_positions("é🙂x甲Ωz", &unique).unwrap(),
+            (vec![1, 4], vec![1, 8])
         );
     }
     use super::*;

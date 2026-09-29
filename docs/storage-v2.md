@@ -984,15 +984,43 @@ rank tuples; immutable hit identities are hydrated only at the exact score and
 tie-key boundary. Corpus normalization, complete scoped evaluation, authorization,
 final total order and latency limits remain unchanged.
 
-Immutable lexical fallback first identifies matching requested occurrences
-through query and source predicates. A source index supports those probes
-alongside the lexical GIN index. The matching expression stays inline so the
-planner can use indexed occurrence lookups instead of repeatedly scanning a
-materialized vector set. Its FTS predicate is evaluated at that input boundary.
-A query with no lexical match avoids visiting every segment of every requested
-document. Both rank surfaces retain
-their source/artifact checks, copied/generated tiers and complete tie order.
-The migration validates the index identity and supports replay.
+Immutable lexical fallback gathers matching requested occurrences once through
+query and authorized source predicates. A dedicated non-login definer has a
+narrow SELECT policy for the lexical GIN lookup; ordinary policies and forced
+RLS remain enabled. Its private caller binds requested occurrence membership,
+source/artifact identity and immutable root-document checks. Matching rows
+materialize identities and scalar ranks rather than complete vectors. Both
+rank surfaces preserve copied/generated tiers, precision and complete tie order.
+The role, policy and source index identities are validated on migration replay.
+
+Exact and active reads evaluate complete Boolean evidence before hydrating
+matching occurrences. Complete corpus normalization and numeric term scores
+remain unchanged; detailed score explanations are serialized only for returned
+rows. Large scoped posting queries choose a term-index membership plan while
+small scopes retain document-key probes. Plan selection does not truncate
+postings or change the logical corpus.
+
+New search documents store exact postings in immutable blocks of at most 256
+terms. Each block keeps complete term strings and BIGINT frequencies in
+canonical byte order. A GIN index on 16-bit fingerprints only selects candidate
+blocks: every match must also pass the complete term comparison. Oversized
+terms and fingerprint collisions therefore preserve their exact meaning.
+Existing flat documents retain their identities and postings. Named search,
+active search and candidate query evidence share complete mixed-layout reads,
+including the scoped fallback when the bounded global probe overflows.
+
+New searchable text, exact identifiers, FTS vectors and posting arrays use LZ4
+column compression. This does not rewrite existing immutable values or establish
+physical reclamation. After compact documents have been written, a binary
+rollback must retain compatible mixed-layout readers; removing their blocks or
+restoring flat-only readers would discard required logical postings. Data
+removal remains subject to the governing manifest and integrity gates.
+
+Managed prefix reuse locks its trusted frontier through a source-authorized
+function owned by the dedicated non-login frontier owner. The prefix copier
+keeps its ordinary ingest ownership and all generation, prefix, analysis and
+immutable reuse checks. Direct frontier changes remain forbidden to the API
+role; the lock helper does not publish or modify a frontier.
 
 Interactive exact and active reads materialize the shared narrow corpus binding
 once and disable JIT only inside those two functions. Full corpus normalization,
