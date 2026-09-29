@@ -664,6 +664,8 @@ where
         commit_sha,
         SliceMode::PublicFixture,
         None,
+        None,
+        None,
     )
     .await
 }
@@ -692,11 +694,13 @@ where
         commit_sha,
         SliceMode::ReleaseCandidate,
         None,
+        None,
+        None,
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 pub async fn run_release_candidate_build_with_progress<C>(
     client: &C,
     source_id: i64,
@@ -705,6 +709,37 @@ pub async fn run_release_candidate_build_with_progress<C>(
     pack_root: &Path,
     io_buffer_bytes: usize,
     commit_sha: &str,
+    progress: Option<&super::build_progress::BuildProgressRecorder>,
+) -> Result<ShadowSliceResult>
+where
+    C: GenericClient + Sync,
+{
+    run_release_candidate_build_with_progress_pinned(
+        client,
+        source_id,
+        source_type,
+        source_path,
+        pack_root,
+        io_buffer_bytes,
+        commit_sha,
+        None,
+        None,
+        progress,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_release_candidate_build_with_progress_pinned<C>(
+    client: &C,
+    source_id: i64,
+    source_type: &str,
+    source_path: &Path,
+    pack_root: &Path,
+    io_buffer_bytes: usize,
+    commit_sha: &str,
+    git_snapshot_commit_sha: Option<&str>,
+    expected_source_watermark_sha256: Option<&str>,
     progress: Option<&super::build_progress::BuildProgressRecorder>,
 ) -> Result<ShadowSliceResult>
 where
@@ -719,6 +754,8 @@ where
         io_buffer_bytes,
         commit_sha,
         SliceMode::ReleaseCandidate,
+        git_snapshot_commit_sha,
+        expected_source_watermark_sha256,
         progress,
     )
     .await
@@ -761,6 +798,17 @@ pub async fn observe_release_watermark_configured(
     source_path: &Path,
     config: &serde_json::Value,
 ) -> Result<ReleaseWatermarkObservation> {
+    observe_release_watermark_configured_pinned(source_id, source_type, source_path, config, None)
+        .await
+}
+
+pub async fn observe_release_watermark_configured_pinned(
+    source_id: i64,
+    source_type: &str,
+    source_path: &Path,
+    config: &serde_json::Value,
+    git_snapshot_commit_sha: Option<&str>,
+) -> Result<ReleaseWatermarkObservation> {
     observe_configured_watermark_with_prefix(
         source_id,
         source_type,
@@ -768,6 +816,7 @@ pub async fn observe_release_watermark_configured(
         config,
         None,
         true,
+        git_snapshot_commit_sha,
     )
     .await
 }
@@ -788,6 +837,7 @@ pub async fn observe_release_watermark_with_prefix(
         &serde_json::Value::Null,
         trusted_prefix,
         full_comparison,
+        None,
     )
     .await
 }
@@ -799,9 +849,15 @@ async fn observe_configured_watermark_with_prefix(
     config: &serde_json::Value,
     trusted_prefix: Option<&plugins::managed_append::TrustedPrefix>,
     full_comparison: bool,
+    git_snapshot_commit_sha: Option<&str>,
 ) -> Result<ReleaseWatermarkObservation> {
     if source_id <= 0 {
         bail!("release watermark requires a registered positive source id");
+    }
+    if git_snapshot_commit_sha.is_some()
+        && (source_type != "git" || !git_snapshot_commit_sha.is_some_and(is_git_sha))
+    {
+        bail!("exact Git snapshot commit requires a Git source");
     }
     let source_path = source_path
         .to_str()
@@ -816,7 +872,9 @@ async fn observe_configured_watermark_with_prefix(
         let plugin = plugins::get_configured_plugin(source_type, config)?
             .context("release source adapter is unavailable")?;
         (
-            plugin.sync_for_storage_v2_observed(source_path).await?,
+            plugin
+                .sync_for_storage_v2_snapshot_observed(source_path, git_snapshot_commit_sha)
+                .await?,
             None,
             plugin.filesystem_cut(),
         )
@@ -895,6 +953,8 @@ async fn run_storage_v2_slice<C>(
     io_buffer_bytes: usize,
     commit_sha: &str,
     mode: SliceMode,
+    git_snapshot_commit_sha: Option<&str>,
+    expected_source_watermark_sha256: Option<&str>,
     progress: Option<&super::build_progress::BuildProgressRecorder>,
 ) -> Result<ShadowSliceResult>
 where
@@ -904,6 +964,15 @@ where
         || !is_git_sha(commit_sha)
     {
         bail!("shadow slice requires a supported fixture adapter and an exact commit SHA");
+    }
+    if git_snapshot_commit_sha.is_some() != expected_source_watermark_sha256.is_some()
+        || (git_snapshot_commit_sha.is_some()
+            && (mode != SliceMode::ReleaseCandidate
+                || source_type != "git"
+                || !git_snapshot_commit_sha.is_some_and(is_git_sha)
+                || !expected_source_watermark_sha256.is_some_and(is_sha256)))
+    {
+        bail!("exact Git snapshot commit and source watermark are required together");
     }
     if !(4096..=1024 * 1024).contains(&io_buffer_bytes) {
         bail!("shadow slice I/O buffer must be between 4096 and 1048576 bytes");
@@ -1019,7 +1088,11 @@ where
     } else {
         let observed = match mode {
             SliceMode::PublicFixture => plugin.sync_observed(source_path).await?,
-            SliceMode::ReleaseCandidate => plugin.sync_for_storage_v2_observed(source_path).await?,
+            SliceMode::ReleaseCandidate => {
+                plugin
+                    .sync_for_storage_v2_snapshot_observed(source_path, git_snapshot_commit_sha)
+                    .await?
+            }
         };
         (observed, None)
     };
@@ -1071,6 +1144,10 @@ where
             release_source_watermark(source_type, source_path, &adapter_profile, &fixture_sha256)
         }
     };
+    if expected_source_watermark_sha256.is_some_and(|expected| expected != source_watermark_sha256)
+    {
+        bail!("Git snapshot source watermark differs before generation allocation");
+    }
     let witness_kind = match mode {
         SliceMode::PublicFixture => "public-fixture",
         SliceMode::ReleaseCandidate => "release-candidate-build",
@@ -1091,6 +1168,9 @@ where
         "is_test": is_test,
         "adapter_profile_id": adapter_profile,
     });
+    if let Some(git_commit) = git_snapshot_commit_sha {
+        witness["git_snapshot_commit_sha"] = json!(git_commit);
+    }
     if let Some(cut) = &filesystem_cut {
         witness["filesystem_cut"] = serde_json::to_value(cut)?;
     }
@@ -1833,7 +1913,11 @@ where
     } else {
         let observed = match mode {
             SliceMode::PublicFixture => plugin.sync_observed(source_path).await?,
-            SliceMode::ReleaseCandidate => plugin.sync_for_storage_v2_observed(source_path).await?,
+            SliceMode::ReleaseCandidate => {
+                plugin
+                    .sync_for_storage_v2_snapshot_observed(source_path, git_snapshot_commit_sha)
+                    .await?
+            }
         };
         (observed, None)
     };
