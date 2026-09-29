@@ -124,6 +124,11 @@ jobs:
       - run: cargo check --workspace --all-targets
       - name: Check storage-v2 API routes with features enabled
         run: cargo check -p mainrag-api --features storage-v2-retrieval --bin mainrag-api
+      - name: Verify lossless analysis cache and byte bounded card groups
+        shell: bash
+        run: |
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib services::analysis_cache::tests -- --nocapture | tee analysis-cache-tests.log
+          python3 -c 'from pathlib import Path; assert "4 passed; 0 failed; 0 ignored;" in Path("analysis-cache-tests.log").read_text(), "Expected all lossless cache and card group regressions to execute"'
       - name: Verify final storage-v2 source read accounting
         shell: bash
         run: |
@@ -432,6 +437,7 @@ jobs:
               'eval.storage_v2.schema.test_compact_exact_postings.CompactExactPostingTests',
               'eval.storage_v2.schema.test_filter_before_ranking.FilterBeforeRankingTests',
               'eval.storage_v2.schema.test_compact_lexical_vectors.CompactLexicalVectorTests',
+              'eval.storage_v2.schema.test_scoped_rank_explanations.ScopedRankExplanationTests',
               'eval.storage_v2.schema.test_managed_frontier_lock.ManagedFrontierLockTests',
               'eval.storage_v2.schema.test_active_set_search.ActiveSetSearchTests',
           ])

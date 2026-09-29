@@ -120,9 +120,65 @@ def atomic_private_json(path: Path, value: object, *, replace: bool = True) -> N
             # Create-only publication keeps an earlier build checkpoint intact
             # even when another process creates it after the preflight check.
             os.link(temporary_name, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         if os.path.exists(temporary_name):
             os.unlink(temporary_name)
+
+
+class VerificationProgress(dict[str, Any]):
+    """Persist bounded phase timing while preserving the full failure evidence.
+
+    A running journal describes the last observed phase, not process liveness.
+    Retain it alongside the owned qualification attempt until evidence expires.
+    """
+
+    def __init__(self, output: Path) -> None:
+        super().__init__(phase="checkpoint", query_results=[], comparisons=[], query_coverage=[],
+                         qualification_attempted=False, qualification_outcome="NOT_ATTEMPTED")
+        self.path = output.with_name(output.name + ".progress.json")
+        self.owner = str(uuid.uuid4())
+        self.started = self.phase_started = time.monotonic()
+        self.phase_started_at_unix = time.time()
+        self.completed: dict[str, dict[str, float | int]] = {}
+        self.flush("RUNNING", replace=False)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if key == "phase":
+            self.close_phase()
+            self.phase_started = time.monotonic()
+            self.phase_started_at_unix = time.time()
+        super().__setitem__(key, value)
+        if key in {"phase", "qualification_attempted", "qualification_outcome"}:
+            self.flush("RUNNING")
+
+    def close_phase(self) -> None:
+        phase = self.completed.setdefault(self["phase"], {"visits": 0, "elapsed_seconds": 0.0})
+        phase["visits"] += 1
+        phase["elapsed_seconds"] += time.monotonic() - self.phase_started
+
+    def flush(self, status: str, *, replace: bool = True) -> None:
+        pending = self.get("pending_query", {})
+        atomic_private_json(self.path, {
+            "schema_version": "mainrag.storage-v2.qualification-progress.v1",
+            "owner": self.owner, "pid": os.getpid(), "status": status,
+            "phase": self["phase"], "phase_started_at_unix": self.phase_started_at_unix,
+            "updated_at_unix": time.time(), "elapsed_seconds": time.monotonic() - self.started,
+            "completed_phase_timings": self.completed,
+            "completed_queries": len(self["query_results"]),
+            "pending_query": {key: pending[key] for key in ("ordinal", "kind", "id", "query_sha256")
+                              if key in pending},
+            "qualification_attempted": self["qualification_attempted"],
+            "qualification_outcome": self["qualification_outcome"],
+        }, replace=replace)
+
+    def finish(self, status: str) -> None:
+        self.close_phase()
+        self.flush(status)
 
 
 def source_state(api_url: str, token: str, source_id: int, generation: int) -> dict[str, Any]:
@@ -1041,10 +1097,7 @@ def verify_intelligence(api_url: str, token: str, source_id: int, generation: in
 def verify(arguments: argparse.Namespace, token: str) -> None:
     if arguments.output.exists():
         raise RuntimeError("verification output already exists; retain it and choose a new attempt")
-    progress: dict[str, Any] = {
-        "phase": "checkpoint", "query_results": [], "comparisons": [], "query_coverage": [],
-        "qualification_attempted": False, "qualification_outcome": "NOT_ATTEMPTED",
-    }
+    progress = VerificationProgress(arguments.output)
     try:
         verify_candidate(arguments, token, progress)
     except Exception as error:
@@ -1064,7 +1117,10 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
                 **progress, "status": "FAIL", "failed_gate": progress["phase"],
                 "error": failure,
             })
+        progress.finish("FAILED")
         raise
+    else:
+        progress.finish("COMPLETED")
 
 
 def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[str, Any]) -> None:

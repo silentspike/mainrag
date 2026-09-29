@@ -1036,6 +1036,42 @@ ranking and recover every returned hit's original status afterward, including
 available zero scores, unavailable and failed stages. These changes do not
 relax the latency or quality gates.
 
+### Scoped ranks and deferred explanations
+
+Migration 103 bounds copied-projection authorization to the requested sources
+and carries the already authorized immutable view through ranking. Complete
+canonical flat and compact projections are rejected by the offset fallback
+before fetching body text or weighted vectors. Noncanonical restored offsets
+retain the original source, root, digest, RLS and vector checks.
+
+Copied projections supply their complete lexical ranking tier before the
+result limit. Their term contributions and explanations are calculated for
+the returned rows afterward, using the original corpus normalization and
+component tie rules. Generated and unprojected rows remain completely scored
+before pruning. Scores, statuses, explanations and external identities retain
+the same result contract.
+
+Verification now writes a private `<output>.progress.json` at phase boundaries.
+It contains phase timestamps, cumulative phase durations, completed query
+counts and opaque pending-query identities. A lost qualification response
+remains `UNKNOWN`; a running journal is not proof that its process is alive.
+Each journal belongs to one attempt and is retained with that attempt's
+evidence. An existing journal requires a new output name.
+
+Large parser cache entries retain every symbol, call, signature and source
+span in a lossless Zstandard envelope. Serialization streams borrowed parser
+fields into compression, avoiding an intermediate expanded JSON array. The
+envelope binds the source digest, complete serialized size, compressed digest
+and complete result digest. Cache reads retain the old inline representation
+and validate every new envelope before reuse. Parser and analysis profiles,
+card identities and normalized outputs are unchanged.
+
+Structural-card groups are bounded by both 64 records and an 8 MiB serialized
+target. An indivisible larger record is submitted alone. Records and fields
+are never trimmed or dropped. Once encoded entries exist, native ingest
+requires a producer that understands this cache format; retain a compatible
+package for operational recovery.
+
 ### Lossless generated lexical blocks
 
 Migration 102 stores newly generated canonical segment groups in immutable
