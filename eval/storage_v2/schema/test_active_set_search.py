@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -29,11 +30,17 @@ class ActiveSetSearchTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.stack = ExitStack()
-        temporary = cls.stack.enter_context(tempfile.TemporaryDirectory(prefix="mainrag-active-search-"))
-        postgres = cls.stack.enter_context(TemporaryPostgres(Path(temporary)))
-        cls.socket = postgres.socket
+        configured_socket = os.environ.get("STORAGE_V2_TEST_SOCKET")
+        if configured_socket:
+            cls.socket = Path(configured_socket)
+        else:
+            temporary = cls.stack.enter_context(tempfile.TemporaryDirectory(prefix="mainrag-active-search-"))
+            postgres = cls.stack.enter_context(TemporaryPostgres(Path(temporary)))
+            cls.socket = postgres.socket
         cls.database = "storage_v2_active_" + uuid.uuid4().hex
-        cls.command("postgres", "CREATE ROLE mainrag")
+        cls.command("postgres", "DO $$ BEGIN "
+                    "IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='mainrag') "
+                    "THEN CREATE ROLE mainrag; END IF; END $$;")
         subprocess.run(
             ["createdb", "--host", str(cls.socket), cls.database],
             check=True, capture_output=True, text=True,
