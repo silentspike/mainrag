@@ -437,6 +437,7 @@ jobs:
               'eval.storage_v2.schema.test_compact_exact_postings.CompactExactPostingTests',
               'eval.storage_v2.schema.test_filter_before_ranking.FilterBeforeRankingTests',
               'eval.storage_v2.schema.test_compact_lexical_vectors.CompactLexicalVectorTests',
+              'eval.storage_v2.schema.test_source_scoped_lexical_lock.SourceScopedLexicalLockTests',
               'eval.storage_v2.schema.test_scoped_rank_explanations.ScopedRankExplanationTests',
               'eval.storage_v2.schema.test_managed_frontier_lock.ManagedFrontierLockTests',
               'eval.storage_v2.schema.test_active_set_search.ActiveSetSearchTests',

@@ -194,12 +194,13 @@ pub struct StageDocument<'a> {
     pub score_profile: &'a str,
     pub score_evidence: &'a Value,
     pub score_stages: &'a [String],
+    pub copy_legacy_lexical: bool,
 }
 
 pub async fn stage_shadow_document<C>(
     client: &C,
     item: &StageDocument<'_>,
-) -> Result<StagedItemRecord, Error>
+) -> Result<(StagedItemRecord, i64), Error>
 where
     C: GenericClient + Sync,
 {
@@ -226,7 +227,12 @@ where
             SELECT count(storage_v2_put_occurrence_score_component( \
                 item.occurrence_id,stage,$20,'unavailable',NULL,$21)) \
               FROM item CROSS JOIN unnest($22::TEXT[]) stage CROSS JOIN binding \
-         ) SELECT item.* FROM item CROSS JOIN binding CROSS JOIN scores",
+         ), lexical AS MATERIALIZED ( \
+            SELECT CASE WHEN $23::BOOLEAN THEN \
+                storage_v2_copy_legacy_lexical_segments(item.occurrence_id,item.artifact_version_id) \
+                ELSE 0::BIGINT END AS copied_segments \
+              FROM item CROSS JOIN binding CROSS JOIN scores \
+         ) SELECT item.*,lexical.copied_segments FROM item CROSS JOIN lexical",
             &[
                 &item.run_id,
                 &item.item_key,
@@ -250,10 +256,14 @@ where
                 &item.score_profile,
                 item.score_evidence,
                 &item.score_stages,
+                &item.copy_legacy_lexical,
             ],
         )
         .await
-        .map(StagedItemRecord::from)
+        .map(|row| {
+            let copied = row.get("copied_segments");
+            (StagedItemRecord::from(row), copied)
+        })
 }
 
 pub async fn begin_analysis_attempt<C>(

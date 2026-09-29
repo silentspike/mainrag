@@ -14,6 +14,36 @@ use uuid::Uuid;
 use super::generation_ingest::ShadowIngestMeasurements;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BuildFailure {
+    pub category: String,
+    pub sqlstate: Option<String>,
+}
+
+impl BuildFailure {
+    fn from_error(error: &anyhow::Error) -> Self {
+        let sqlstate = error.chain().find_map(|cause| {
+            cause
+                .downcast_ref::<tokio_postgres::Error>()
+                .and_then(|error| error.code())
+                .map(|code| code.code().to_owned())
+        });
+        let category = match sqlstate.as_deref() {
+            Some("53100" | "53200" | "53300" | "53400") => "database_resource_exhausted",
+            Some("54000" | "54001" | "54011") => "database_limit_exceeded",
+            Some("57014") => "database_query_cancelled",
+            Some("42501") => "database_access_denied",
+            Some(code) if code.starts_with("23") => "database_integrity_failure",
+            Some(_) => "database_failure",
+            None => "build_failure",
+        };
+        Self {
+            category: category.into(),
+            sqlstate,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BuildProgress {
     pub schema_version: String,
     pub attempt_id: Uuid,
@@ -32,6 +62,10 @@ pub struct BuildProgress {
     pub elapsed_seconds: f64,
     pub observed_at_unix_ms: u128,
     pub transaction_committed: bool,
+    #[serde(default)]
+    pub committed_items: usize,
+    #[serde(default)]
+    pub failure: Option<BuildFailure>,
 }
 
 struct Inner {
@@ -99,6 +133,8 @@ impl BuildProgressRecorder {
             elapsed_seconds: 0.0,
             observed_at_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
             transaction_committed: false,
+            committed_items: 0,
+            failure: None,
         };
         let mut output = OpenOptions::new()
             .write(true)
@@ -201,12 +237,44 @@ impl BuildProgressRecorder {
         Ok(())
     }
 
+    pub fn checkpoint(&self, committed_items: usize) -> Result<()> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("progress lock poisoned"))?;
+        if committed_items < inner.value.committed_items
+            || committed_items > inner.value.staged_items
+        {
+            bail!("committed checkpoint count exceeds or reverses staged work");
+        }
+        inner.value.committed_items = committed_items;
+        self.persist(&mut inner)
+    }
+
+    /// Store only classified diagnostics; database messages can contain source text.
+    pub fn record_failure(&self, error: &anyhow::Error) -> Result<()> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("progress lock poisoned"))?;
+        inner.value.failure = Some(BuildFailure::from_error(error));
+        self.persist(&mut inner)
+    }
+
     pub fn finish(&self, committed: bool) -> Result<()> {
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("progress lock poisoned"))?;
         inner.value.transaction_committed = committed;
+        if committed {
+            inner.value.committed_items = inner.value.staged_items;
+        } else if inner.value.failure.is_none() {
+            inner.value.failure = Some(BuildFailure {
+                category: "build_or_commit_failure".into(),
+                sqlstate: None,
+            });
+        }
         inner.value.status = if committed {
             "committed"
         } else {
@@ -269,7 +337,17 @@ mod tests {
         assert!(BuildProgressRecorder::create(&root, 7, &commit, Uuid::new_v4(), attempt).is_err());
         assert!(progress.advance(31, &measurements, true).is_err());
         assert!(progress.advance(101, &measurements, true).is_err());
+        progress.checkpoint(16)?;
+        assert!(progress.checkpoint(15).is_err());
+        assert!(progress.checkpoint(33).is_err());
+        progress.record_failure(&anyhow::anyhow!(
+            "private-source-text-must-not-be-published"
+        ))?;
         progress.finish(false)?;
+        let failed = read(&root, 7, &commit, attempt)?;
+        assert_eq!(failed.committed_items, 16);
+        assert_eq!(failed.failure.as_ref().unwrap().category, "build_failure");
+        assert!(!serde_json::to_string(&failed)?.contains("private-source-text"));
         assert_eq!(
             read(&root, 7, &commit, attempt)?.status,
             "failed_requires_reconciliation"

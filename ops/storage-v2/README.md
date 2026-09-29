@@ -923,18 +923,44 @@ and marks the missing original capacity observation explicitly. Qualification
 still rechecks current resource reserve, generation identity, restart, search,
 intelligence, integrity, and source drift before promotion.
 
-### Live candidate build progress
+### Durable candidate build progress
 
 `release-candidate.py build` saves a private `<checkpoint>.progress.json` before
 starting its write. The attempt UUID and exact build commit bind the supported
-progress endpoint to this POST. It reports source observation, content store,
-staging, final watermark, membership/sealing and transaction-pending phases.
-Staged items are not committed items or qualification. A confirmed build response
-records committed item count and generation, while the original staged cursor is
-retained. Reuse the protected checkpoint/witness after interruption; an existing
-attempt record prevents an automatic second write. `source-batch.py` retains live
-observations independently of its completed-item result and keeps draining the
-owned phase when an observation is missing or invalid.
+progress endpoint to this POST. `staged_items` counts work in the current attempt;
+`committed_items` reports complete items observed after a database commit.
+`transaction_committed` becomes true only after the final verified generation
+transaction commits. A full staged count alone is not qualification evidence.
+
+The supported candidate endpoint uses a dedicated connection and retains a
+source advisory lock across transactions. Each checkpoint restores transaction-
+local authorization and rechecks source configuration, active pointer and access.
+A shared maintenance lock excludes native pack replacement/removal while the
+builder is using pack locations. A dropped connection cannot return session
+locks or transaction state to the application pool.
+
+The content-store phase commits published immutable bodies and the building
+run. Complete items then commit after at most 128 new items, 32 MiB of item
+input, or 30 seconds checked at item boundaries. A single expensive item can
+exceed those thresholds. Membership transitions, sealing and verification stay
+in the final transaction; partially built generations never become active.
+
+For a reconciled interrupted build, use a new checkpoint path and
+`--resume-run-id RUN_ID`. The backend rejects a different run derived from the
+source watermark, profile or build identity. It checks persisted item identities
+against the observed input and skips their complete projections. Keep the old
+attempt receipts. A lost observation alone does not establish that a writer
+stopped; the source lock also rejects concurrent attempts.
+
+Failure receipts retain the last phase, counts, classified database failure and
+SQLSTATE without copying database messages or source content. The monitor makes
+one final authorized observation after a failed POST, including failures before
+the first periodic poll. Missing diagnostics still require reconciliation.
+
+Migration 105 bounds lexical constructor locks by source while preserving the
+shared flat/compact identity exclusion. Its replay guard validates the original
+function body even after migration, so later body drift cannot be silently
+accepted as an idempotent replay.
 
 ### Source-backed expectations and bounded rank projection
 
