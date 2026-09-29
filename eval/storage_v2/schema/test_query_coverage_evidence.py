@@ -1058,6 +1058,7 @@ SELECT node_id || ':' || id || ':' || encode(digest,'hex') FROM view_row;
             self.assertEqual(self.sql(self.actor(schema.OTHER_ID, denied)), "")
             self.assertEqual(json.loads(self.sql(self.admin(proof_sql.replace(
                 f"ARRAY[{boundary_chunk}]::BIGINT[]", "ARRAY[]::BIGINT[]")))), portable_proof)
+
         self.assertEqual(self.sql(
             "SELECT count(*) FROM logical_source WHERE active_generation_id IS NOT NULL"), "0")
         self.sql("DROP INDEX idx_storage_v2_lexical_segment_source; "
@@ -1071,3 +1072,106 @@ SELECT node_id || ':' || id || ':' || encode(digest,'hex') FROM view_row;
         self.sql("DROP INDEX idx_storage_v2_lexical_segment_source")
         self.file(schema.ROOT / "migrations/096_storage_v2_query_scoped_lexical_inputs.sql")
         self.assertEqual([self.sql(request) for request in requests], scoped_before)
+
+        # Materialized query matches and the positive-evidence guard retain
+        # complete envelopes, scalar rank precision and every source boundary.
+        boolean_queries = [
+            {"type": "term", "value": "alpha"},
+            {"type": "term", "value": "synthetic_no_lexical_matches"},
+            {"type": "phrase", "value": "alpha beta"},
+            {"type": "exact", "value": "exact_key"},
+            {"type": "and", "children": [
+                {"type": "term", "value": "alpha"},
+                {"type": "not", "children": [
+                    {"type": "term", "value": "forbidden"}]}]},
+            {"type": "or", "children": [
+                {"type": "term", "value": "entry0"},
+                {"type": "term", "value": "entry1"}]},
+            {"type": "group", "children": [{"type": "or", "children": [
+                {"type": "phrase", "value": "alpha beta"},
+                {"type": "exact", "value": "exact_key"}]}]},
+        ]
+        boolean_filters = [{}, {"path_prefix": "/synthetic/late-000"},
+                           {"occurred_from": "2100-01-01T00:00:00Z"}]
+        boolean_before = [self.exact_search(query, filters, source_id=15)
+                          for query in boolean_queries for filters in boolean_filters]
+        for _ in range(2):
+            self.file(schema.ROOT / "migrations/098_storage_v2_materialized_lexical_matches.sql")
+            self.assertEqual([self.sql(request) for request in requests], scoped_before)
+            self.assertEqual(self.sql(changed_metadata), scoped_authority)
+            self.assertEqual([self.sql(request) for request in scoped_rank_requests], scoped_ranks)
+            self.assertEqual([self.exact_search(query, filters, source_id=15)
+                              for query in boolean_queries for filters in boolean_filters],
+                             boolean_before)
+            self.assertEqual(self.exact_search(boundary_ast, source_id=23), boundary_result)
+            self.assertEqual(self.exact_search(new_conjunction, source_id=22), added)
+            self.assertEqual(self.sql(self.actor(schema.OTHER_ID, denied)), "")
+            self.assertEqual(self.sql(precision_prefix+order_probe+" ROLLBACK;").splitlines(),
+                             ["9001", "9002"])
+
+        helper = "storage_v2_authorized_lexical_matches(bigint[],bigint[],text)"
+        self.assertEqual(self.sql(
+            "SELECT relrowsecurity::TEXT||':'||relforcerowsecurity::TEXT "
+            "FROM pg_class WHERE oid='storage_v2_lexical_segment'::REGCLASS"), "true:true")
+        self.assertEqual(self.sql(
+            "SELECT rolcanlogin::TEXT||':'||rolbypassrls::TEXT||':'||rolsuper::TEXT "
+            "FROM pg_roles WHERE rolname='mainrag_v2_lexical_rank_owner'"), "false:false:false")
+        self.assertEqual(self.sql(
+            f"SELECT has_function_privilege('mainrag','{helper}','EXECUTE')::TEXT "
+            f"||':'||has_function_privilege('mainrag_v2_frontier_owner','{helper}','EXECUTE')::TEXT"
+        ), "false:true")
+        self.assert_sql_fails(
+            "SET SESSION AUTHORIZATION mainrag; SET ROLE mainrag_v2_lexical_rank_owner;",
+            "permission denied")
+        self.assert_sql_fails(self.actor(schema.OTHER_ID,
+            "SET ROLE mainrag; SELECT * FROM storage_v2_authorized_lexical_matches("
+            f"ARRAY[{boundary_occurrence}]::BIGINT[],ARRAY[23]::BIGINT[],'alpha');"),
+            "permission denied")
+        # Even the trusted definer rejects forged source hints under a denied
+        # actor; callers cannot turn the role-specific policy into source access.
+        self.assertEqual(self.sql(self.actor(schema.OTHER_ID,
+            "SET ROLE mainrag_v2_frontier_owner; SELECT * FROM "
+            "storage_v2_authorized_lexical_matches("
+            f"ARRAY[{boundary_occurrence}]::BIGINT[],ARRAY[23]::BIGINT[],'alpha');")), "")
+        spoofed_authority = (
+            "BEGIN; CREATE TEMP TABLE sources(id BIGINT); "
+            "CREATE TEMP TABLE users(id UUID,is_admin BOOLEAN); "
+            f"INSERT INTO users VALUES('{schema.OTHER_ID}',TRUE); "
+            "GRANT SELECT ON users,sources TO mainrag_v2_lexical_rank_owner; "
+            + self.actor(schema.OTHER_ID,
+                "SET ROLE mainrag_v2_frontier_owner; SELECT count(*) FROM "
+                "storage_v2_authorized_lexical_matches("
+                f"ARRAY[{boundary_occurrence}]::BIGINT[],ARRAY[23]::BIGINT[],'alpha');")
+            + " RESET ROLE; ROLLBACK;"
+        )
+        self.assertEqual(self.sql(spoofed_authority), "0")
+        scoped_documents = (
+            "SELECT DISTINCT binding.document_id FROM occurrence occurrence_row "
+            "JOIN storage_v2_search_view_document binding "
+            "ON binding.view_id=occurrence_row.view_id WHERE occurrence_row.source_id=15"
+        )
+        for term_value in ("alpha", "synthetic_no_lexical_matches", "exact_key"):
+            reference = self.sql(
+                "SELECT COALESCE(jsonb_agg(jsonb_build_array(document_id,term,term_frequency) "
+                "ORDER BY document_id),'[]'::JSONB) FROM storage_v2_search_posting "
+                f"WHERE document_id IN ({scoped_documents}) AND term='{term_value}'"
+            )
+            for documents in (
+                f"ARRAY({scoped_documents})",
+                "ARRAY(SELECT document_id FROM (" + scoped_documents + ") scope "
+                "CROSS JOIN generate_series(1,5001))",
+            ):
+                self.assertEqual(self.sql(
+                    "SELECT COALESCE(jsonb_agg(jsonb_build_array(document_id,term,term_frequency) "
+                    "ORDER BY document_id),'[]'::JSONB) FROM storage_v2_scoped_term_posting("
+                    f"{documents},'{term_value}')"), reference)
+        before_guard = self.sql(changed_metadata)
+        try:
+            self.sql("ALTER ROLE mainrag_v2_lexical_rank_owner LOGIN")
+            rejected = self.command("--file", str(schema.ROOT /
+                "migrations/098_storage_v2_materialized_lexical_matches.sql"), check=False)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("lexical rank owner authority differs", rejected.stderr)
+            self.assertEqual(self.sql(changed_metadata), before_guard)
+        finally:
+            self.sql("ALTER ROLE mainrag_v2_lexical_rank_owner NOLOGIN")

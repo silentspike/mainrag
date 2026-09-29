@@ -428,6 +428,10 @@ jobs:
               'eval.storage_v2.schema.test_shadow_ingest_schema.ShadowIngestSchemaTests.test_filesystem_cut_qualification_binds_original_build_and_current_full_manifest',
               'eval.storage_v2.schema.benchmark_staging_projection_reuse.StagingProjectionBenchmark.test_projection_reuse_at_two_document_sizes',
               'eval.storage_v2.schema.test_candidate_projection_restore_schema.CandidateProjectionSchemaTests',
+              'eval.storage_v2.schema.test_byte_located_lexical_segments.ByteLocatedLexicalTests',
+              'eval.storage_v2.schema.test_compact_exact_postings.CompactExactPostingTests',
+              'eval.storage_v2.schema.test_managed_frontier_lock.ManagedFrontierLockTests',
+              'eval.storage_v2.schema.test_active_set_search.ActiveSetSearchTests',
           ])
           assert suite.countTestCases() >= 32, 'Expected search, pack reader-fence, append frontier and lexical window regressions'
           result = unittest.TextTestRunner(verbosity=2).run(suite)

@@ -126,51 +126,6 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
              GRANT mainrag TO mainrag_v2_frontier_owner; \
              GRANT SELECT ON ALL TABLES IN SCHEMA public TO mainrag;"
         ).await?;
-        let lexical = Command::new("psql")
-            .arg("-X").arg("--no-psqlrc")
-            .arg("--set=ON_ERROR_STOP=1")
-            .arg("--host=127.0.0.1").arg("--username=fixture")
-            .arg("--dbname").arg(&database)
-            .arg("--file").arg(project.join("migrations/068_storage_v2_lexical_segments.sql"))
-            .env("PGPASSWORD", "fixture_only")
-            .output()?;
-        ensure!(lexical.status.success(), "managed fixture lexical migration failed: {}",
-            String::from_utf8_lossy(&lexical.stderr));
-        let conjunction = Command::new("psql")
-            .arg("-X").arg("--no-psqlrc")
-            .arg("--set=ON_ERROR_STOP=1")
-            .arg("--host=127.0.0.1").arg("--username=fixture")
-            .arg("--dbname").arg(&database)
-            .arg("--file").arg(project.join("migrations/069_storage_v2_conjunctive_lexical_parity.sql"))
-            .env("PGPASSWORD", "fixture_only")
-            .output()?;
-        ensure!(conjunction.status.success(), "managed fixture conjunction migration failed: {}",
-            String::from_utf8_lossy(&conjunction.stderr));
-        let lexical_rls = Command::new("psql")
-            .arg("-X").arg("--no-psqlrc")
-            .arg("--set=ON_ERROR_STOP=1")
-            .arg("--host=127.0.0.1").arg("--username=fixture")
-            .arg("--dbname").arg(&database)
-            .arg("--file").arg(project.join("migrations/070_storage_v2_lexical_segment_rls.sql"))
-            .env("PGPASSWORD", "fixture_only")
-            .output()?;
-        ensure!(lexical_rls.status.success(), "managed fixture lexical RLS migration failed: {}",
-            String::from_utf8_lossy(&lexical_rls.stderr));
-        let lexical_batches = Command::new("psql")
-            .arg("-X").arg("--no-psqlrc")
-            .arg("--set=ON_ERROR_STOP=1")
-            .arg("--host=127.0.0.1").arg("--username=fixture")
-            .arg("--dbname").arg(&database)
-            .arg("--file").arg(project.join("migrations/077_storage_v2_batched_lexical_segments.sql"))
-            .env("PGPASSWORD", "fixture_only")
-            .output()?;
-        ensure!(lexical_batches.status.success(), "managed fixture lexical batch migration failed: {}",
-            String::from_utf8_lossy(&lexical_batches.stderr));
-        let positioned = Command::new("psql").arg("-X").arg("--set=ON_ERROR_STOP=1")
-            .arg("--host=127.0.0.1").arg("--username=fixture").arg("--dbname").arg(&database)
-            .arg("--file").arg(project.join("migrations/085_storage_v2_positioned_lexical_segments.sql"))
-            .env("PGPASSWORD","fixture_only").output()?;
-        ensure!(positioned.status.success(),"positioned lexical migration failed: {}",String::from_utf8_lossy(&positioned.stderr));
         client.batch_execute(&format!(
             "CREATE TABLE users(id UUID PRIMARY KEY, is_admin BOOLEAN NOT NULL); \
              INSERT INTO users VALUES ('{PRINCIPAL}', TRUE); \
@@ -178,6 +133,65 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
              RETURNS BOOLEAN LANGUAGE SQL STABLE SECURITY DEFINER SET search_path=pg_catalog,public \
              AS $$ SELECT EXISTS(SELECT 1 FROM users WHERE id=p_user_id AND is_admin) $$;"
         )).await?;
+        // Match persistent table and routine ownership before installing the controlled
+        // definers. SELECT alone cannot authorize their checked FOR UPDATE
+        // publishers; the production role owns this pre-frontier schema.
+        client
+            .batch_execute(
+                r#"DO $fixture_owner$
+                DECLARE relation RECORD; routine REGPROCEDURE;
+                BEGIN
+                    FOR relation IN
+                        SELECT c.relname,c.relkind FROM pg_class c
+                        JOIN pg_namespace n ON n.oid=c.relnamespace
+                        WHERE n.nspname='public' AND c.relkind IN ('r','p')
+                    LOOP
+                        EXECUTE format('ALTER TABLE public.%I OWNER TO mainrag',relation.relname);
+                    END LOOP;
+                    FOR routine IN
+                        SELECT oid::REGPROCEDURE FROM pg_proc
+                        WHERE pronamespace='public'::REGNAMESPACE
+                          AND proowner=current_user::REGROLE
+                          AND (proname LIKE 'storage_v2_%' OR proname='user_can_access_source')
+                    LOOP
+                        EXECUTE format('ALTER FUNCTION %s OWNER TO mainrag',routine);
+                    END LOOP;
+                END $fixture_owner$;"#,
+            )
+            .await?;
+        // Run the actual native producer/delta/full path with the complete
+        // current schema, including the located writer and compact readers.
+        let migrations = std::fs::read_dir(project.join("migrations"))?
+            .map(|entry| entry.map(|value| value.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        for number in 66..=100 {
+            let prefix = format!("{number:03}_");
+            let matching = migrations
+                .iter()
+                .filter(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+                })
+                .collect::<Vec<_>>();
+            ensure!(matching.len() == 1, "one current fixture migration required");
+            let installed = Command::new("psql")
+                .arg("-X")
+                .arg("--no-psqlrc")
+                .arg("--set=ON_ERROR_STOP=1")
+                .arg("--host=127.0.0.1")
+                .arg("--username=fixture")
+                .arg("--dbname")
+                .arg(&database)
+                .arg("--file")
+                .arg(matching[0])
+                .env("PGPASSWORD", "fixture_only")
+                .output()?;
+            ensure!(
+                installed.status.success(),
+                "current fixture migration failed: {}",
+                String::from_utf8_lossy(&installed.stderr)
+            );
+        }
         client.execute(
             "INSERT INTO sources(id,name,type,path,is_test) VALUES (63,'managed-fixture','managed_append',$1,TRUE)",
             &[&root.to_str().context("managed fixture path is not UTF-8")?],
@@ -318,10 +332,19 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         let old_path = root.join("segments").join(old_name);
         std::fs::set_permissions(&old_path, std::fs::Permissions::from_mode(0o600))?;
         std::fs::write(&old_path, b"{\"event\":\"other\"}\n")?;
-        client.execute(
-            "UPDATE storage_v2_managed_append_frontier SET appends_since_full=31 WHERE source_id=63",
-            &[],
-        ).await?;
+        // The fixture owner schedules the next complete comparison through
+        // the dedicated non-login table owner; ordinary clients retain the
+        // production prohibition on direct frontier mutation.
+        let schedule = client.transaction().await?;
+        schedule
+            .batch_execute(&format!(
+                "SET LOCAL app.user_id='{PRINCIPAL}'; \
+                 SET LOCAL ROLE mainrag_v2_frontier_owner; \
+                 UPDATE storage_v2_managed_append_frontier \
+                 SET appends_since_full=31 WHERE source_id=63"
+            ))
+            .await?;
+        schedule.commit().await?;
         std::fs::write(&input, b"{\"event\":\"third\"}\n")?;
         producer(&script, "append", &root, Some(&input))?;
         let replacement = Box::pin(run(&mut client, &root, &packs))
