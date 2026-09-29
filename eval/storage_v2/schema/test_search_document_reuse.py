@@ -20,6 +20,12 @@ PROFILE = "indexed-reuse-fixture-v1"
 class SearchDocumentReuseTests(schema.ShadowIngestSchemaTests):
     """Run the complete inherited ingest/retrieval gate plus reuse regressions."""
 
+    def constructor_postings(self, identity: int) -> str:
+        return self.sql(
+            "SELECT string_agg(term || ':' || term_frequency, ',' ORDER BY term) "
+            f"FROM storage_v2_search_posting WHERE document_id={identity}"
+        )
+
     def start_client(self, application: str, statement: str) -> subprocess.Popen[str]:
         return subprocess.Popen(
             ["psql", "-X", "--no-psqlrc", "--quiet", "--set=ON_ERROR_STOP=1",
@@ -108,10 +114,8 @@ COMMIT;
                             "SELECT search_text || ':' || array_to_string(exact_identifiers, ',') "
                             f"FROM storage_v2_search_document WHERE id={identity}"
                         ), "concurrent fixture:concurrent_key")
-                        self.assertEqual(self.sql(
-                            "SELECT string_agg(term || ':' || term_frequency, ',' ORDER BY term) "
-                            f"FROM storage_v2_search_posting WHERE document_id={identity}"
-                        ), "concurrent:1,fixture:1")
+                        self.assertEqual(self.constructor_postings(identity),
+                                         "concurrent:1,fixture:1")
                     finally:
                         # Both clients belong to this disposable fixture. Always
                         # release its barrier and reap them, including failures.
