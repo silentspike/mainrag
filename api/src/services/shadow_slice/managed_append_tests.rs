@@ -178,6 +178,39 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
              RETURNS BOOLEAN LANGUAGE SQL STABLE SECURITY DEFINER SET search_path=pg_catalog,public \
              AS $$ SELECT EXISTS(SELECT 1 FROM users WHERE id=p_user_id AND is_admin) $$;"
         )).await?;
+        // Run the actual native producer/delta/full path with the complete
+        // current schema, including the located writer and compact readers.
+        let migrations = std::fs::read_dir(project.join("migrations"))?
+            .map(|entry| entry.map(|value| value.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        for number in 66..=99 {
+            let prefix = format!("{number:03}_");
+            let matching = migrations
+                .iter()
+                .filter(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+                })
+                .collect::<Vec<_>>();
+            ensure!(matching.len() == 1, "one current fixture migration required");
+            let installed = Command::new("psql")
+                .arg("-X")
+                .arg("--no-psqlrc")
+                .arg("--set=ON_ERROR_STOP=1")
+                .arg("--host=127.0.0.1")
+                .arg("--username=fixture")
+                .arg("--dbname")
+                .arg(&database)
+                .arg("--file")
+                .arg(matching[0])
+                .env("PGPASSWORD", "fixture_only")
+                .output()?;
+            ensure!(
+                installed.status.success(),
+                "current fixture migration failed: {}",
+                String::from_utf8_lossy(&installed.stderr)
+            );
+        }
         client.execute(
             "INSERT INTO sources(id,name,type,path,is_test) VALUES (63,'managed-fixture','managed_append',$1,TRUE)",
             &[&root.to_str().context("managed fixture path is not UTF-8")?],
