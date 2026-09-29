@@ -1,10 +1,10 @@
+#[cfg(feature = "storage-v2-retrieval")]
+use axum::extract::Query;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     Extension, Json,
 };
-#[cfg(feature = "storage-v2-retrieval")]
-use axum::extract::Query;
 use serde::{Deserialize, Serialize};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
