@@ -285,8 +285,11 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             JOIN storage_v2_analysis_cache cache ON cache.content_identity_sha256=body.digest \
             WHERE occurrence_row.source_id=165 AND occurrence_row.source_path LIKE '%/Dockerfile.txt'",&[]).await?;
         let analysis: serde_json::Value=unavailable.get("result");
-        let stored = find_and_verify_existing_body(&client,&packs,dockerfile.as_bytes(),4096)
+        let verification = client.transaction().await?;
+        verification.batch_execute(&format!("SET LOCAL app.user_id='{PRINCIPAL}'")).await?;
+        let stored = find_and_verify_existing_body(&verification,&packs,dockerfile.as_bytes(),4096)
             .await?.context("unavailable grammar body is missing")?;
+        verification.commit().await?;
         ensure!(stored.id==unavailable.get::<_,i64>("body_id")
             && analysis["parser_availability"]["status"]=="unavailable"
             && analysis["parser_availability"]["recognized_language"]=="dockerfile"
