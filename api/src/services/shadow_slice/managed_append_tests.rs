@@ -126,51 +126,6 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
              GRANT mainrag TO mainrag_v2_frontier_owner; \
              GRANT SELECT ON ALL TABLES IN SCHEMA public TO mainrag;"
         ).await?;
-        let lexical = Command::new("psql")
-            .arg("-X").arg("--no-psqlrc")
-            .arg("--set=ON_ERROR_STOP=1")
-            .arg("--host=127.0.0.1").arg("--username=fixture")
-            .arg("--dbname").arg(&database)
-            .arg("--file").arg(project.join("migrations/068_storage_v2_lexical_segments.sql"))
-            .env("PGPASSWORD", "fixture_only")
-            .output()?;
-        ensure!(lexical.status.success(), "managed fixture lexical migration failed: {}",
-            String::from_utf8_lossy(&lexical.stderr));
-        let conjunction = Command::new("psql")
-            .arg("-X").arg("--no-psqlrc")
-            .arg("--set=ON_ERROR_STOP=1")
-            .arg("--host=127.0.0.1").arg("--username=fixture")
-            .arg("--dbname").arg(&database)
-            .arg("--file").arg(project.join("migrations/069_storage_v2_conjunctive_lexical_parity.sql"))
-            .env("PGPASSWORD", "fixture_only")
-            .output()?;
-        ensure!(conjunction.status.success(), "managed fixture conjunction migration failed: {}",
-            String::from_utf8_lossy(&conjunction.stderr));
-        let lexical_rls = Command::new("psql")
-            .arg("-X").arg("--no-psqlrc")
-            .arg("--set=ON_ERROR_STOP=1")
-            .arg("--host=127.0.0.1").arg("--username=fixture")
-            .arg("--dbname").arg(&database)
-            .arg("--file").arg(project.join("migrations/070_storage_v2_lexical_segment_rls.sql"))
-            .env("PGPASSWORD", "fixture_only")
-            .output()?;
-        ensure!(lexical_rls.status.success(), "managed fixture lexical RLS migration failed: {}",
-            String::from_utf8_lossy(&lexical_rls.stderr));
-        let lexical_batches = Command::new("psql")
-            .arg("-X").arg("--no-psqlrc")
-            .arg("--set=ON_ERROR_STOP=1")
-            .arg("--host=127.0.0.1").arg("--username=fixture")
-            .arg("--dbname").arg(&database)
-            .arg("--file").arg(project.join("migrations/077_storage_v2_batched_lexical_segments.sql"))
-            .env("PGPASSWORD", "fixture_only")
-            .output()?;
-        ensure!(lexical_batches.status.success(), "managed fixture lexical batch migration failed: {}",
-            String::from_utf8_lossy(&lexical_batches.stderr));
-        let positioned = Command::new("psql").arg("-X").arg("--set=ON_ERROR_STOP=1")
-            .arg("--host=127.0.0.1").arg("--username=fixture").arg("--dbname").arg(&database)
-            .arg("--file").arg(project.join("migrations/085_storage_v2_positioned_lexical_segments.sql"))
-            .env("PGPASSWORD","fixture_only").output()?;
-        ensure!(positioned.status.success(),"positioned lexical migration failed: {}",String::from_utf8_lossy(&positioned.stderr));
         client.batch_execute(&format!(
             "CREATE TABLE users(id UUID PRIMARY KEY, is_admin BOOLEAN NOT NULL); \
              INSERT INTO users VALUES ('{PRINCIPAL}', TRUE); \
