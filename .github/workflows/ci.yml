@@ -155,6 +155,11 @@ jobs:
           python3 -c 'from pathlib import Path; assert "3 passed; 0 failed; 0 ignored;" in Path("character-tests.log").read_text(), "Expected all character chunker regressions to execute"'
           cargo test -p mainrag-api --features storage-v2-retrieval --lib services::build_progress::tests -- --nocapture | tee build-progress-tests.log
           python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("build-progress-tests.log").read_text(), "Expected durable progress regression to execute"'
+      - name: Verify unavailable grammar distinction and supported parser failures
+        shell: bash
+        run: |
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib services::parser::tests::optional_parser_distinguishes_unavailable_grammars_and_custom_jsonl -- --exact --nocapture | tee parser-availability-tests.log
+          python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("parser-availability-tests.log").read_text(), "Expected grammar availability regression to execute"'
       - name: Verify canonical segment positions for repeated Unicode text
         shell: bash
         run: |
@@ -438,6 +443,7 @@ jobs:
               'eval.storage_v2.schema.test_filter_before_ranking.FilterBeforeRankingTests',
               'eval.storage_v2.schema.test_compact_lexical_vectors.CompactLexicalVectorTests',
               'eval.storage_v2.schema.test_source_scoped_lexical_lock.SourceScopedLexicalLockTests',
+              'eval.storage_v2.schema.test_bound_native_rank_work.BoundNativeRankTests',
               'eval.storage_v2.schema.test_scoped_rank_explanations.ScopedRankExplanationTests',
               'eval.storage_v2.schema.test_managed_frontier_lock.ManagedFrontierLockTests',
               'eval.storage_v2.schema.test_active_set_search.ActiveSetSearchTests',

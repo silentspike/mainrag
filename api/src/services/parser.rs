@@ -330,6 +330,21 @@ impl CodeParser {
         Ok(Self { parsers })
     }
 
+    /// Parse only when an actual parser is available. Recognized filenames do
+    /// not imply grammar support; JSONL has its own non-tree-sitter parser.
+    pub fn parse_file_if_available(
+        &self,
+        path: &Path,
+        content: &str,
+    ) -> Result<Option<ParseResult>> {
+        let lang = Lang::from_path(path);
+        if lang == Lang::Jsonl || self.parsers.contains_key(&lang) {
+            self.parse_file(path, content).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Parse a file and extract symbols + call graph.
     /// Thread-safe: only locks the parser for the specific language being parsed.
     pub fn parse_file(&self, path: &Path, content: &str) -> Result<ParseResult> {
@@ -1392,6 +1407,43 @@ mod tests {
         assert_eq!(Lang::from_extension("py"), Lang::Python);
         assert_eq!(Lang::from_extension("ts"), Lang::TypeScript);
         assert_eq!(Lang::from_extension("unknown"), Lang::Unknown);
+    }
+
+    #[test]
+    fn optional_parser_distinguishes_unavailable_grammars_and_custom_jsonl() {
+        let parser = CodeParser::new().unwrap();
+        for name in [
+            "Dockerfile",
+            "Dockerfile.release",
+            "image.dockerfile",
+            "notes.unknown",
+        ] {
+            assert!(parser
+                .parse_file_if_available(Path::new(name), "FROM scratch\n")
+                .unwrap()
+                .is_none());
+        }
+        let rust = parser
+            .parse_file_if_available(Path::new("source.rs"), "pub fn present() {}\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(rust.symbols[0].name, "present");
+        assert!(
+            parser
+                .parse_file_if_available(Path::new("messages.jsonl"), "{}\n")
+                .unwrap()
+                .is_some(),
+            "custom JSONL parsing does not require a registered grammar"
+        );
+        // Supported parser failures remain failures, rather than being
+        // silently treated as unavailable analysis.
+        let mut guarded = CodeParser::new().unwrap();
+        guarded
+            .parsers
+            .insert(Lang::Rust, Mutex::new(Parser::new()));
+        assert!(guarded
+            .parse_file_if_available(Path::new("source.rs"), "pub fn present() {}")
+            .is_err());
     }
 
     #[test]
