@@ -224,10 +224,14 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         // progress receipt. Resume must use database evidence and the same run.
         let resume_root = directory.0.join("resume-source");
         std::fs::create_dir(&resume_root)?;
-        for index in 0..257 {
+        for index in 0..256 {
             std::fs::write(resume_root.join(format!("item-{index:04}.txt")),
                 format!("checkpoint fixture item {index} alpha beta"))?;
         }
+        let unavailable_root = resume_root.join("z-unavailable-grammar");
+        std::fs::create_dir(&unavailable_root)?;
+        let dockerfile = "FROM scratch\nRUN echo checkpoint availability\n";
+        std::fs::write(unavailable_root.join("Dockerfile"), dockerfile)?;
         client.execute("INSERT INTO sources(id,name,type,path,is_test) VALUES \
             (165,'checkpoint-fixture','fs',$1,TRUE)",
             &[&resume_root.to_str().context("fixture path is not UTF-8")?]).await?;
@@ -271,6 +275,19 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             (SELECT count(*) FROM occurrence WHERE source_id=165) AS occurrences", &[]).await?;
         ensure!(counts.get::<_,i64>("generations")==1 && counts.get::<_,i64>("occurrences")==257,
             "resume duplicated semantic rows");
+        let unavailable = client.query_one("SELECT cache.result,convert_from(body.inline_bytes,'UTF8') AS bytes \
+            FROM occurrence occurrence_row JOIN artifact_version artifact \
+              ON artifact.id=occurrence_row.artifact_version_id \
+            JOIN content_node node ON node.id=artifact.content_root_node_id \
+            JOIN content_body body ON body.id=node.body_id \
+            JOIN storage_v2_analysis_cache cache ON cache.content_identity_sha256=body.digest \
+            WHERE occurrence_row.source_id=165 AND occurrence_row.source_path LIKE '%/Dockerfile'",&[]).await?;
+        let analysis: serde_json::Value=unavailable.get("result");
+        ensure!(unavailable.get::<_,String>("bytes")==dockerfile
+            && analysis["parser_availability"]["status"]=="unavailable"
+            && analysis["parser_availability"]["recognized_language"]=="dockerfile"
+            && analysis["symbols"]==json!([]) && analysis["calls"]==json!([]),
+            "unavailable grammar lost source bytes or fabricated intelligence");
         let receipt = crate::services::build_progress::read(&packs,165,COMMIT,resumed_progress_id)?;
         ensure!(receipt.committed_items==257 && receipt.transaction_committed,
             "resume progress omitted the observed final commit");
