@@ -133,13 +133,13 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
              RETURNS BOOLEAN LANGUAGE SQL STABLE SECURITY DEFINER SET search_path=pg_catalog,public \
              AS $$ SELECT EXISTS(SELECT 1 FROM users WHERE id=p_user_id AND is_admin) $$;"
         )).await?;
-        // Match persistent table ownership before installing the controlled
+        // Match persistent table and routine ownership before installing the controlled
         // definers. SELECT alone cannot authorize their checked FOR UPDATE
         // publishers; the production role owns this pre-frontier schema.
         client
             .batch_execute(
                 r#"DO $fixture_owner$
-                DECLARE relation RECORD;
+                DECLARE relation RECORD; routine REGPROCEDURE;
                 BEGIN
                     FOR relation IN
                         SELECT c.relname,c.relkind FROM pg_class c
@@ -148,8 +148,15 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
                     LOOP
                         EXECUTE format('ALTER TABLE public.%I OWNER TO mainrag',relation.relname);
                     END LOOP;
-                END $fixture_owner$;
-                ALTER FUNCTION user_can_access_source(UUID,BIGINT,TEXT) OWNER TO mainrag;"#,
+                    FOR routine IN
+                        SELECT oid::REGPROCEDURE FROM pg_proc
+                        WHERE pronamespace='public'::REGNAMESPACE
+                          AND proowner=current_user::REGROLE
+                          AND (proname LIKE 'storage_v2_%' OR proname='user_can_access_source')
+                    LOOP
+                        EXECUTE format('ALTER FUNCTION %s OWNER TO mainrag',routine);
+                    END LOOP;
+                END $fixture_owner$;"#,
             )
             .await?;
         // Run the actual native producer/delta/full path with the complete
@@ -325,10 +332,19 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         let old_path = root.join("segments").join(old_name);
         std::fs::set_permissions(&old_path, std::fs::Permissions::from_mode(0o600))?;
         std::fs::write(&old_path, b"{\"event\":\"other\"}\n")?;
-        client.execute(
-            "UPDATE storage_v2_managed_append_frontier SET appends_since_full=31 WHERE source_id=63",
-            &[],
-        ).await?;
+        // The fixture owner schedules the next complete comparison through
+        // the dedicated non-login table owner; ordinary clients retain the
+        // production prohibition on direct frontier mutation.
+        let schedule = client.transaction().await?;
+        schedule
+            .batch_execute(&format!(
+                "SET LOCAL app.user_id='{PRINCIPAL}'; \
+                 SET LOCAL ROLE mainrag_v2_frontier_owner; \
+                 UPDATE storage_v2_managed_append_frontier \
+                 SET appends_since_full=31 WHERE source_id=63"
+            ))
+            .await?;
+        schedule.commit().await?;
         std::fs::write(&input, b"{\"event\":\"third\"}\n")?;
         producer(&script, "append", &root, Some(&input))?;
         let replacement = Box::pin(run(&mut client, &root, &packs))
