@@ -1013,3 +1013,55 @@ The source batch tool accepts the `candidate-projections` phase and requires
 mandatory. All temporary database tables belong to their transaction and drop at
 commit or rollback; private plans and states belong to the operational evidence
 owner and follow its retention manifest.
+
+### Filter lexical work before ranking
+
+Migration 101 retains complete scoped evaluation and exact result identity.
+Broad posting lookups use array membership semi-joins. Native lexical matches
+retain the GIN-selected identities, apply requested membership, and fetch their
+vectors by the complete segment primary key before computing ranks. Matching
+copied projections retain their original provenance and ranking tiers.
+
+Broad copied-projection reads resolve their document predicate through the
+existing document GIN index once, while retaining complete source/artifact
+identity checks and the verified segment fallback. Source aggregation groups
+the small authorized source set before sorting it. Small scopes retain their
+bounded document reads; duplicate and null requested identities retain the
+same result semantics.
+
+Corpus normalization uses a covering token-count index. Large intermediate
+rows carry only scoring identities; immutable paths and locators are fetched
+after the complete score boundary. Optional stages join nonzero scores during
+ranking and recover every returned hit's original status afterward, including
+available zero scores, unavailable and failed stages. These changes do not
+relax the latency or quality gates.
+
+### Lossless generated lexical blocks
+
+Migration 102 stores newly generated canonical segment groups in immutable
+blocks of at most 64 rows. Character boundaries, overlap, first-match locators,
+digests, context, chunk types and weighted vectors remain unchanged. Existing
+flat projections are not rewritten. `storage_v2_lexical_segment_all` provides
+the complete logical relation under invoker security and forced source RLS.
+Projection restoration counts this logical relation rather than physical rows.
+
+Block fingerprints are only a candidate filter for plain positive queries.
+Every match and rank uses the full original vector. Queries with other syntax
+retain complete scoped evaluation without an unsafe fingerprint shortcut.
+Canonical located writes, noncanonical flat writes and old constructor replays
+serialize by occurrence and reject conflicting immutable identities. A replay
+through an old constructor does not duplicate an already compact row.
+
+Migration replay checks the column layout, generated fingerprint expression,
+payload constraints, composite identity, required indexes, forced source
+policies and immutable trigger. Lexical verification materializes the visible
+generation's complete logical segments and prevents nested rescans of its
+segment and chunk sets. It retains every original digest, weighted-vector and
+missing-projection check.
+
+Installing these migrations does not qualify, activate or retire a generation.
+After compact rows exist, rolling the SQL schema back to a reader that only
+understands flat projections is forbidden. Keep compatible readers and verified
+backups. Capacity admission must include measured database/index growth, packs,
+retained WAL/archive growth, backup growth and the final-delta reserve. A small
+vector compression result alone is not a full-source resource gate.

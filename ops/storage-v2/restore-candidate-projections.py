@@ -153,7 +153,7 @@ def member_query(plan: dict, after: int, pending: list[dict] | None = None) -> s
 WITH selected AS MATERIALIZED (
  SELECT o.id occurrence_id,o.artifact_version_id,document.id document_id,
         artifact.expected_content_hash,octet_length(document.search_text) body_bytes,
-        (SELECT count(*) FROM storage_v2_lexical_segment WHERE occurrence_id=o.id) segment_count
+        (SELECT count(*) FROM storage_v2_lexical_segment_all WHERE occurrence_id=o.id) segment_count
  FROM occurrence o JOIN generation_item_version membership
    ON membership.source_id=o.source_id AND membership.artifact_version_id=o.artifact_version_id
  JOIN artifact_version artifact ON artifact.id=o.artifact_version_id
