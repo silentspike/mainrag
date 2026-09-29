@@ -648,6 +648,64 @@ mainrag search 'alpha AND "beta gamma" NOT decoy' \
 Omitting the selector keeps the current path. Storage-v2 generation and filter
 arguments are rejected on the current path rather than silently ignored.
 
+### Fragmented artifact result groups
+
+Native filesystem inputs can represent one physical file with several immutable
+artifact occurrences. The adapter marks these occurrences with the Boolean
+locator field `fragmented=true`. Ordinary storage-v2 search returns the best
+matching fragment per authorized `(source_id, source_path)` group, alongside
+individual unfragmented occurrences. Only occurrences with `role=artifact` and
+that Boolean flag participate. Conversation and other logical records remain
+separate even when they share a path or carry the flag.
+
+This is an explicit result-unit policy for fragmented artifacts. It does not
+claim unchanged occurrence Top-K for those inputs. Each group retains its best
+fully scored matching occurrence, ordered by final score, precise segment tie
+key, stable external-hit identity and occurrence identity. The retained hit keeps
+its original content, locator, score, explanation and successor mappings; no
+new or synthetic hit identity is introduced.
+
+The complete evaluator still scores every authorized matching view, including
+all later graph, semantic and rerank contributions. The score boundary is drawn
+from the complete result-group population, not a fixed oversampling window.
+Every occurrence at that boundary remains available for exact tie resolution
+before selecting the best fragment. Ordinary inputs preserve the complete
+response. `total` counts matching occurrences and `fully_scored_views` counts
+all evaluated scoped views; grouping changes returned result slots, not these
+work and coverage counters.
+
+The exhaustive reference first orders all matching occurrences, retains the
+first occurrence of each fragmented-artifact group, keeps other records
+separate, and then takes Top-K. Tests compare complete responses against that
+reference for named and active reads, including ties, ordinary same-path
+artifacts and same-path conversation records. Frozen quality expectations are
+not changed to accommodate this policy.
+
+### Bounded native rank work
+
+Native lexical matching establishes query membership without calculating every
+segment rank. The complete view score still determines the score boundary.
+Precise native segment ranks are restored for every native occurrence at that
+boundary, including all ties, before the existing external-hit ordering.
+Copied projection ranks and all returned score explanations are preserved.
+
+Copied canonical-document verification uses only authorized canonical document
+identities. Separately materialized provenance branches share the copied query
+projection so forced-RLS reads are not repeated per projection row. Migration
+replay accepts only exact predecessor or successor definitions and rejects
+unexpected helper bodies, owners, executor grants and fragment-index identity.
+
+### Unavailable code grammars
+
+A recognized filename does not establish that a compatible grammar is
+registered. Candidate ingestion preserves the complete body, search text and
+locator for such inputs while recording `parser_availability.status=unavailable`
+in the analysis cache. It does not fabricate symbols or calls or count this as
+a parser pass. The custom JSONL parser remains available independently of
+tree-sitter registration. Errors from a registered parser still fail explicitly.
+Checkpoint resume exercises an unavailable Dockerfile grammar after a durable
+prefix and verifies the same generation, exact bytes and unknown intelligence.
+
 ## Migration and authority phases
 
 Storage v2 is additive until cleanup. The required phase order is:
