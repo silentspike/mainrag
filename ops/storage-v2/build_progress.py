@@ -24,6 +24,10 @@ def validate_observation(value: dict, source_id: int, commit: str, attempt: str)
             or type(value.get("transaction_committed")) is not bool \
             or not isinstance(value.get("phase"), str):
         raise ValueError("progress count or transaction state is invalid")
+    committed = value.get("committed_items", staged if value["transaction_committed"] else 0)
+    if type(committed) is not int or not 0 <= committed <= staged \
+            or (value["transaction_committed"] and committed != staged):
+        raise ValueError("committed progress is inconsistent")
     for key in ("elapsed_seconds", "db_staging_ms"):
         number = value.get(key)
         if type(number) not in (int, float) or not math.isfinite(number) or number < 0:
@@ -42,9 +46,29 @@ def monitored_build(arguments, token: str, request, write, *, interval: float = 
     write(path, state, replace=False)
     endpoint = f"/api/v1/admin/sources/{arguments.source_id}/storage-v2-release-candidate"
     body = {"commit_sha": arguments.commit_sha, "progress_id": attempt}
+    if getattr(arguments, "resume_run_id", None) is not None:
+        body["resume_run_id"] = arguments.resume_run_id
     if getattr(arguments, "git_snapshot_commit_sha", None) is not None:
         body["git_snapshot_commit_sha"] = arguments.git_snapshot_commit_sha
         body["expected_source_watermark_sha256"] = arguments.expected_source_watermark_sha256
+    def record_request_failure():
+        # One final authorized read captures backend failure classification even
+        # when the POST failed before the first periodic observation. A failed
+        # transport does not prove that its backend writer has stopped.
+        try:
+            observation = request(arguments.api_url, token, "GET",
+                endpoint + f"-progress?attempt_id={attempt}&commit_sha={arguments.commit_sha}",
+                timeout_seconds=15)
+            validate_observation(observation, arguments.source_id, arguments.commit_sha, attempt)
+            previous = state["progress"]
+            if previous is not None and observation["staged_items"] < previous["staged_items"]:
+                raise ValueError("progress reversed within the same attempt")
+            state["progress"] = observation
+        except (OSError, RuntimeError, ValueError):
+            pass
+        state.update(status="request_failed_requires_reconciliation", observed_at_unix=int(time.time()))
+        write(path, state)
+
     invalid = False
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="owned-candidate-build") as executor:
         future = executor.submit(request, arguments.api_url, token, "POST", endpoint + "-build",
@@ -58,8 +82,7 @@ def monitored_build(arguments, token: str, request, write, *, interval: float = 
                     try:
                         result = future.result()
                     except BaseException:
-                        state.update(status="request_failed_requires_reconciliation", observed_at_unix=int(time.time()))
-                        write(path, state)
+                        record_request_failure()
                         raise
                     break
                 try:
@@ -83,8 +106,7 @@ def monitored_build(arguments, token: str, request, write, *, interval: float = 
                 state["observed_at_unix"] = int(time.time())
                 write(path, state)
             except BaseException:
-                state.update(status="request_failed_requires_reconciliation", observed_at_unix=int(time.time()))
-                write(path, state)
+                record_request_failure()
                 raise
     state.update(status="response_received" if not invalid else "identity_error_requires_reconciliation",
                  observed_at_unix=int(time.time()), generation_id=result.get("generation_id"),

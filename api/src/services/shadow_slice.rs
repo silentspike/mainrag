@@ -666,6 +666,7 @@ where
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -693,6 +694,7 @@ where
         io_buffer_bytes,
         commit_sha,
         SliceMode::ReleaseCandidate,
+        None,
         None,
         None,
         None,
@@ -757,6 +759,37 @@ where
         git_snapshot_commit_sha,
         expected_source_watermark_sha256,
         progress,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_release_candidate_build_checkpointed(
+    session: &crate::db::build_checkpoint::BuildCheckpointSession,
+    source_id: i64,
+    source_type: &str,
+    source_path: &Path,
+    pack_root: &Path,
+    io_buffer_bytes: usize,
+    commit_sha: &str,
+    git_snapshot_commit_sha: Option<&str>,
+    expected_source_watermark_sha256: Option<&str>,
+    progress: Option<&super::build_progress::BuildProgressRecorder>,
+) -> Result<ShadowSliceResult> {
+    run_storage_v2_slice(
+        session.client(),
+        source_id,
+        source_type,
+        source_path,
+        pack_root,
+        io_buffer_bytes,
+        commit_sha,
+        SliceMode::ReleaseCandidate,
+        git_snapshot_commit_sha,
+        expected_source_watermark_sha256,
+        progress,
+        Some(session),
     )
     .await
 }
@@ -956,10 +989,14 @@ async fn run_storage_v2_slice<C>(
     git_snapshot_commit_sha: Option<&str>,
     expected_source_watermark_sha256: Option<&str>,
     progress: Option<&super::build_progress::BuildProgressRecorder>,
+    checkpoints: Option<&crate::db::build_checkpoint::BuildCheckpointSession>,
 ) -> Result<ShadowSliceResult>
 where
     C: GenericClient + Sync,
 {
+    if let Some(session) = checkpoints {
+        session.validate_source(source_id)?;
+    }
     if (mode == SliceMode::PublicFixture && !matches!(source_type, "fs" | "managed_append"))
         || !is_git_sha(commit_sha)
     {
@@ -1168,6 +1205,9 @@ where
         "is_test": is_test,
         "adapter_profile_id": adapter_profile,
     });
+    if checkpoints.is_some() {
+        witness["checkpoint_protocol"] = json!("complete-items-v1");
+    }
     if let Some(git_commit) = git_snapshot_commit_sha {
         witness["git_snapshot_commit_sha"] = json!(git_commit);
     }
@@ -1198,6 +1238,9 @@ where
         false,
     )
     .await?;
+    if let Some(session) = checkpoints {
+        session.validate_run(run.id)?;
+    }
     if let Some(progress) = progress {
         progress.phase("content_store", None, Some((run.id, run.generation_id)))?;
     }
@@ -1329,7 +1372,46 @@ where
     }
 
     let mut copied_keys = BTreeSet::new();
-    if !managed_full_comparison {
+    if checkpoints.is_some() {
+        let persisted_witness: serde_json::Value = client
+            .query_one(
+                "SELECT witness FROM source_generation WHERE id=$1",
+                &[&run.generation_id],
+            )
+            .await?
+            .get(0);
+        if persisted_witness["checkpoint_protocol"] != "complete-items-v1" {
+            bail!("building generation lacks the complete-item checkpoint protocol");
+        }
+        let observed = files
+            .iter()
+            .map(|file| (file.item_key.as_str(), file))
+            .collect::<BTreeMap<_, _>>();
+        for row in client
+            .query(
+                "SELECT source_item.item_key,item.content_identity_sha256,item.byte_length \
+             FROM storage_v2_ingest_run_item item \
+             JOIN source_item ON source_item.id=item.source_item_id WHERE item.run_id=$1",
+                &[&run.id],
+            )
+            .await?
+        {
+            let key: String = row.get("item_key");
+            let file = observed
+                .get(key.as_str())
+                .context("checkpoint item missing from source")?;
+            let digest: Vec<u8> = row.get("content_identity_sha256");
+            let length: i64 = row.get("byte_length");
+            if file.content_sha256.as_ref().map(|value| value.as_slice()) != Some(digest.as_slice())
+                || i64::try_from(file.logical_length)? != length
+                || !copied_keys.insert(key)
+            {
+                bail!("checkpoint item identity differs from the observed source");
+            }
+        }
+    }
+    let mut committed_items = copied_keys.len();
+    if !managed_full_comparison && copied_keys.is_empty() {
         if let (Some(frontier), Some((_, _, identities))) =
             (managed_frontier.as_ref(), managed_identity.as_ref())
         {
@@ -1497,10 +1579,7 @@ where
              JOIN content_body body ON body.id=node.body_id \
              JOIN content_pack pack ON pack.id=body.pack_id \
              WHERE item.run_id=$1 ORDER BY body.pack_id LIMIT 1",
-                &[&managed_frontier
-                    .as_ref()
-                    .context("copied prefix lacks frontier")?
-                    .last_run_id],
+                &[&run.id],
             )
             .await?;
         if let Some(row) = prior_pack {
@@ -1527,6 +1606,18 @@ where
     measurements.peak_buffer_bytes = managed_writer_peak(io_buffer_bytes)?;
     measurements.writer_concurrency = 1;
     measurements.record_stage(ShadowIngestStage::ContentStore, content_started.elapsed());
+    if let Some(session) = checkpoints {
+        // Published immutable bodies can be reused after interruption. They
+        // become graph roots as complete items are committed below.
+        session.checkpoint().await?;
+        committed_items = copied_keys.len();
+        if let Some(progress) = progress {
+            progress.advance(committed_items, &measurements, true)?;
+            progress.checkpoint(committed_items)?;
+        }
+    }
+    let mut checkpoint_started = Instant::now();
+    let mut checkpoint_bytes = 0_u64;
 
     let parser = CodeParser::new()?;
     let mut controlled_retry_count = 0_usize;
@@ -1669,7 +1760,7 @@ where
             });
             let expected_content_hash = hex::encode(&body.digest);
             let identifiers = search_exact_identifiers(text);
-            let staged = generation_ingest::stage_shadow_document(
+            let (staged, copied) = generation_ingest::stage_shadow_document(
                 client,
                 &generation_ingest::StageDocument {
                     run_id: run.id,
@@ -1706,19 +1797,12 @@ where
                     score_profile,
                     score_evidence: &score_evidence,
                     score_stages: &score_stages,
+                    copy_legacy_lexical: mode == SliceMode::ReleaseCandidate,
                 },
             )
             .await?;
             measurements.db_staging_round_trips += 1;
             if mode == SliceMode::ReleaseCandidate {
-                let copied: i64 = client
-                    .query_one(
-                        "SELECT storage_v2_copy_legacy_lexical_segments($1, $2)",
-                        &[&staged.occurrence_id, &staged.artifact_version_id],
-                    )
-                    .await?
-                    .get(0);
-                measurements.db_staging_round_trips += 1;
                 if copied > 0 {
                     measurements.lexical_segments_copied = measurements
                         .lexical_segments_copied
@@ -1871,9 +1955,34 @@ where
             if let Some(progress) = progress {
                 progress.advance(staged_items, &measurements, false)?;
             }
+            checkpoint_bytes = checkpoint_bytes.saturating_add(file.logical_length);
+            if let Some(session) = checkpoints {
+                if staged_items.saturating_sub(committed_items) >= 128
+                    || checkpoint_bytes >= 32 * 1024 * 1024
+                    || checkpoint_started.elapsed().as_secs() >= 30
+                {
+                    session.checkpoint().await?;
+                    committed_items = staged_items;
+                    checkpoint_bytes = 0;
+                    checkpoint_started = Instant::now();
+                    if let Some(progress) = progress {
+                        progress.advance(staged_items, &measurements, true)?;
+                        progress.checkpoint(committed_items)?;
+                    }
+                }
+            }
         }
     }
 
+    if let Some(session) = checkpoints {
+        if staged_items > committed_items {
+            session.checkpoint().await?;
+        }
+        if let Some(progress) = progress {
+            progress.advance(staged_items, &measurements, true)?;
+            progress.checkpoint(staged_items)?;
+        }
+    }
     if let Some(progress) = progress {
         progress.advance(staged_items, &measurements, true)?;
         progress.phase("final_watermark", None, None)?;

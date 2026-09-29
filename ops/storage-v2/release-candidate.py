@@ -1510,6 +1510,7 @@ def main() -> int:
     parser.add_argument("--source-id", type=int, required=True)
     parser.add_argument("--commit-sha", required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--resume-run-id", type=int, help="Require the exact persisted build run; use a new checkpoint path")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--pack-root", type=Path, default=Path("/data/mainrag/storage-v2-66/packs"))
     parser.add_argument("--minimum-free-bytes", type=int, default=40 * 1024**3)

@@ -164,7 +164,7 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         let migrations = std::fs::read_dir(project.join("migrations"))?
             .map(|entry| entry.map(|value| value.path()))
             .collect::<std::io::Result<Vec<_>>>()?;
-        for number in 66..=102 {
+        for number in 66..=105 {
             let prefix = format!("{number:03}_");
             let matching = migrations
                 .iter()
@@ -219,6 +219,63 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             && grouped.telemetry["ablauf"]["db_staging_round_trips"].as_u64().is_some_and(|calls| calls<10),
             "bounded card projection did not reduce round trips or retain all symbols");
         println!("{}",json!({"fixture":"bounded-card-projection","items":grouped.item_count,"symbols":grouped.symbol_count,"telemetry":grouped.telemetry}));
+
+        // Interrupt after the first complete-item commit but before the
+        // progress receipt. Resume must use database evidence and the same run.
+        let resume_root = directory.0.join("resume-source");
+        std::fs::create_dir(&resume_root)?;
+        for index in 0..257 {
+            std::fs::write(resume_root.join(format!("item-{index:04}.txt")),
+                format!("checkpoint fixture item {index} alpha beta"))?;
+        }
+        client.execute("INSERT INTO sources(id,name,type,path,is_test) VALUES \
+            (165,'checkpoint-fixture','fs',$1,TRUE)",
+            &[&resume_root.to_str().context("fixture path is not UTF-8")?]).await?;
+        let manager = deadpool_postgres::Manager::new(config.clone(), NoTls);
+        let pool = deadpool_postgres::Pool::builder(manager).max_size(3).build()?;
+        let principal = Uuid::parse_str(PRINCIPAL)?;
+        let session = crate::db::build_checkpoint::BuildCheckpointSession::open(
+            &pool, principal, 165, &packs).await?;
+        session.fail_after_checkpoints(2);
+        ensure!(crate::db::build_checkpoint::BuildCheckpointSession::open(
+            &pool, principal, 165, &packs).await.is_err(), "concurrent source writer was admitted");
+        let maintenance = std::fs::OpenOptions::new().read(true).write(true)
+            .open(packs.join(".maintenance.lock"))?;
+        ensure!(maintenance.try_lock().is_err(), "pack maintenance bypassed an active build");
+        let interrupted = Box::pin(run_release_candidate_build_checkpointed(
+            &session, 165, "fs", &resume_root, &packs, 4096, COMMIT, None, None, None)).await;
+        ensure!(interrupted.unwrap_err().to_string().contains("controlled interruption"),
+            "fixture did not stop at the durable checkpoint");
+        drop(session);
+        let saved = client.query_one("SELECT r.id,r.generation_id, \
+            (SELECT count(*) FROM storage_v2_ingest_run_item WHERE run_id=r.id) AS items \
+            FROM storage_v2_ingest_run r WHERE source_id=165 AND status='building'", &[]).await?;
+        let saved_run: i64 = saved.get("id");
+        let saved_generation: i64 = saved.get("generation_id");
+        ensure!(saved.get::<_, i64>("items") == 128, "complete-item checkpoint was not retained");
+        let resumed_progress_id = Uuid::new_v4();
+        let resumed_progress = crate::services::build_progress::BuildProgressRecorder::create(
+            &packs,165,COMMIT,Uuid::new_v4(),resumed_progress_id)?;
+        let session = crate::db::build_checkpoint::BuildCheckpointSession::open(
+            &pool, principal, 165, &packs).await?;
+        let session = session.expect_run(Some(saved_run));
+        let resumed = Box::pin(run_release_candidate_build_checkpointed(
+            &session,165,"fs",&resume_root,&packs,4096,COMMIT,None,None,Some(&resumed_progress))).await?;
+        session.finish().await?;
+        drop(session);
+        resumed_progress.finish(true)?;
+        ensure!(resumed.run_id==saved_run && resumed.generation_id==saved_generation && resumed.item_count==257,
+            "resume changed generation identity or omitted items");
+        let counts = client.query_one("SELECT \
+            (SELECT count(*) FROM source_generation WHERE source_id=165) AS generations, \
+            (SELECT count(*) FROM occurrence WHERE source_id=165) AS occurrences", &[]).await?;
+        ensure!(counts.get::<_,i64>("generations")==1 && counts.get::<_,i64>("occurrences")==257,
+            "resume duplicated semantic rows");
+        let receipt = crate::services::build_progress::read(&packs,165,COMMIT,resumed_progress_id)?;
+        ensure!(receipt.committed_items==257 && receipt.transaction_committed,
+            "resume progress omitted the observed final commit");
+        println!("{}",json!({"fixture":"durable-item-resume","committed_before_interruption":128,
+            "final_items":257,"same_generation":true,"duplicate_occurrences":0}));
 
         let initial = Box::pin(run(&mut client, &root, &packs)).await?;
         ensure!(initial.item_count == 1 && !initial.reused_generation,
