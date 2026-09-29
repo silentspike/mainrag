@@ -164,7 +164,7 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         let migrations = std::fs::read_dir(project.join("migrations"))?
             .map(|entry| entry.map(|value| value.path()))
             .collect::<std::io::Result<Vec<_>>>()?;
-        for number in 66..=100 {
+        for number in 66..=102 {
             let prefix = format!("{number:03}_");
             let matching = migrations
                 .iter()
