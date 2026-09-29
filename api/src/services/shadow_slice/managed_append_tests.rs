@@ -133,6 +133,25 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
              RETURNS BOOLEAN LANGUAGE SQL STABLE SECURITY DEFINER SET search_path=pg_catalog,public \
              AS $$ SELECT EXISTS(SELECT 1 FROM users WHERE id=p_user_id AND is_admin) $$;"
         )).await?;
+        // Match persistent table ownership before installing the controlled
+        // definers. SELECT alone cannot authorize their checked FOR UPDATE
+        // publishers; the production role owns this pre-frontier schema.
+        client
+            .batch_execute(
+                r#"DO $fixture_owner$
+                DECLARE relation RECORD;
+                BEGIN
+                    FOR relation IN
+                        SELECT c.relname,c.relkind FROM pg_class c
+                        JOIN pg_namespace n ON n.oid=c.relnamespace
+                        WHERE n.nspname='public' AND c.relkind IN ('r','p')
+                    LOOP
+                        EXECUTE format('ALTER TABLE public.%I OWNER TO mainrag',relation.relname);
+                    END LOOP;
+                END $fixture_owner$;
+                ALTER FUNCTION user_can_access_source(UUID,BIGINT,TEXT) OWNER TO mainrag;"#,
+            )
+            .await?;
         // Run the actual native producer/delta/full path with the complete
         // current schema, including the located writer and compact readers.
         let migrations = std::fs::read_dir(project.join("migrations"))?
