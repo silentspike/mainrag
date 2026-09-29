@@ -510,6 +510,43 @@ ALTER TABLE storage_v2_activation_set_evidence
             self.assertEqual([self.search(ADMIN,digest),self.search(READER,digest),
                               self.search(ADMIN,digest,include_test=True),self.search(ADMIN,digest,source=1)],before)
             self.assertEqual(self.sql(metadata_sql),authority)
+        # Apply the complete lexical/materialized/compact read chain to the
+        # same activated generations and activation receipt. The unrelated
+        # 4097-document term population forces the scoped overflow branch.
+        for number in range(94,100):
+            self.command(self.database,file=next((ROOT/"migrations").glob(f"{number:03}_*.sql")))
+        before=[self.search(ADMIN,digest),self.search(READER,digest),
+                self.search(ADMIN,digest,include_test=True),self.search(ADMIN,digest,source=1)]
+        # Only this disposable fixture is converted; the production migration
+        # leaves all existing flat rows and document identities untouched.
+        compact_document=int(self.sql("SELECT binding.document_id FROM occurrence occurrence_row "
+            "JOIN logical_source pointer ON pointer.id=occurrence_row.source_id "
+            "JOIN source_generation generation ON generation.id=pointer.active_generation_id "
+            "JOIN generation_item_version membership ON membership.source_id=occurrence_row.source_id "
+            "AND membership.artifact_version_id=occurrence_row.artifact_version_id "
+            "AND membership.valid_from_seq<=generation.generation_seq "
+            "AND (membership.valid_to_seq IS NULL OR membership.valid_to_seq>generation.generation_seq) "
+            "JOIN storage_v2_search_view_document binding ON binding.view_id=occurrence_row.view_id "
+            "WHERE occurrence_row.source_id=1 ORDER BY binding.document_id LIMIT 1"))
+        self.sql("""
+WITH numbered AS (
+ SELECT document_id,term,term_frequency,
+        (row_number() OVER (ORDER BY term COLLATE "C")-1)/256 block_order
+ FROM storage_v2_search_posting WHERE document_id="""+str(compact_document)+"""
+)
+INSERT INTO storage_v2_compact_posting_block(document_id,block_order,terms,term_frequencies)
+ SELECT document_id,block_order,array_agg(term ORDER BY term COLLATE "C"),
+        array_agg(term_frequency ORDER BY term COLLATE "C")
+ FROM numbered GROUP BY document_id,block_order;
+ALTER TABLE storage_v2_search_posting DISABLE TRIGGER storage_v2_search_posting_immutable;
+DELETE FROM storage_v2_search_posting WHERE document_id="""+str(compact_document)+""";
+ALTER TABLE storage_v2_search_posting ENABLE TRIGGER storage_v2_search_posting_immutable;
+""")
+        self.assertEqual([self.search(ADMIN,digest),self.search(READER,digest),
+                          self.search(ADMIN,digest,include_test=True),self.search(ADMIN,digest,source=1)],before)
+        self.command(self.database,file=ROOT/"migrations/099_storage_v2_compact_exact_postings.sql")
+        self.assertEqual([self.search(ADMIN,digest),self.search(READER,digest),
+                          self.search(ADMIN,digest,include_test=True),self.search(ADMIN,digest,source=1)],before)
         self.sql("INSERT INTO sources(id,name,type,path) VALUES "
                  "(4,'late-source','fixture','late-source')")
         self.assert_sql_fails(
