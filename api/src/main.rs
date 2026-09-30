@@ -108,6 +108,18 @@ async fn main() -> anyhow::Result<()> {
 /// Full API server with background event processor
 async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Result<()> {
     let cpu_mode = config.server.cpu_mode;
+    let active_storage = config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some();
+    let legacy_services_disabled = cpu_mode || active_storage;
+    if active_storage {
+        anyhow::ensure!(
+            cfg!(feature = "storage-v2-retrieval"),
+            "active storage-v2 requires the retrieval feature"
+        );
+        tracing::info!("Active storage-v2: legacy vector bootstrap and outbox work disabled");
+    }
     if cpu_mode {
         tracing::warn!(
             "MAINRAG CPU MODE — vector search/rerank/expansion disabled, FTS + intelligence only"
@@ -119,8 +131,8 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
 
     // Create Qdrant client
     let qdrant = Arc::new(QdrantClient::new(&config.qdrant));
-    if cpu_mode {
-        tracing::warn!("CPU mode: skipping Qdrant startup health check");
+    if legacy_services_disabled {
+        tracing::warn!("Legacy services disabled: skipping Qdrant startup health check");
     } else {
         anyhow::ensure!(
             qdrant.health_check().await?,
@@ -129,13 +141,15 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
         tracing::info!("Qdrant connection established (on_disk mode)");
     }
 
-    qdrant
-        .ensure_chunk_collection(cpu_mode, tei.get_embedding_dim())
-        .await?;
+    if !active_storage {
+        qdrant
+            .ensure_chunk_collection(cpu_mode, tei.get_embedding_dim())
+            .await?;
+    }
 
     // K4-FIX4: Auto-create user_id payload index for tenant isolation (idempotent)
-    if cpu_mode {
-        tracing::warn!("CPU mode: skipping Qdrant user_id payload index creation");
+    if legacy_services_disabled {
+        tracing::warn!("Legacy services disabled: skipping Qdrant user_id payload index creation");
     } else {
         match qdrant.create_payload_index("user_id", "keyword").await {
             Ok(()) => tracing::info!("Qdrant user_id payload index ensured"),
@@ -147,8 +161,8 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
     }
 
     // Check TEI after collection bootstrap.
-    if cpu_mode {
-        tracing::warn!("CPU mode: skipping TEI startup health check");
+    if legacy_services_disabled {
+        tracing::warn!("Legacy services disabled: skipping TEI startup health check");
     } else {
         tei.health_check().await?;
         tracing::info!("TEI connection established");
@@ -156,12 +170,14 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
 
     // Create Reranker service (BGE reranker-base on port 8082)
     let reranker = Arc::new(RerankerService::new(config.tei.reranker_url.clone()));
-    match reranker.health_check().await {
-        Ok(_) => tracing::info!("Reranker connection established"),
-        Err(e) => tracing::warn!(
-            "Reranker health check failed (will degrade search quality): {}",
-            e
-        ),
+    if !active_storage {
+        match reranker.health_check().await {
+            Ok(_) => tracing::info!("Reranker connection established"),
+            Err(e) => tracing::warn!(
+                "Reranker health check failed (will degrade search quality): {}",
+                e
+            ),
+        }
     }
 
     // Create QueryExpander for synonym-based query expansion
@@ -169,14 +185,14 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
     let query_expansion_enabled_from_env = std::env::var("QUERY_EXPANSION_ENABLED")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(true);
-    let query_expansion_enabled = !cpu_mode && query_expansion_enabled_from_env;
+    let query_expansion_enabled = !legacy_services_disabled && query_expansion_enabled_from_env;
     let query_expander = Arc::new(services::QueryExpander::new(
         &config.qdrant,
         tei.clone(),
         query_expansion_enabled,
     ));
-    if cpu_mode {
-        tracing::warn!("CPU mode: query expansion forced disabled");
+    if legacy_services_disabled {
+        tracing::warn!("Legacy services disabled: query expansion forced disabled");
     } else if query_expansion_enabled {
         tracing::info!("Query expansion enabled (synonyms_v1 collection)");
     } else {
@@ -303,9 +319,9 @@ async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Re
     });
     tracing::info!("App state initialized with quality tiers (fast/balanced)");
 
-    if cpu_mode {
+    if legacy_services_disabled {
         tracing::warn!(
-            "CPU mode: outbox worker, outbox purge task, and Qdrant health task disabled"
+            "Legacy services disabled: outbox worker, outbox purge task, and Qdrant health task disabled"
         );
         ::metrics::gauge!("qdrant_health_status").set(0.0);
     } else {

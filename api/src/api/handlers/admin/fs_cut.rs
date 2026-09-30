@@ -46,6 +46,8 @@ fn validate_change(old: &Value, new: &Value) -> anyhow::Result<()> {
     let mut after = normalized(new)?;
     before.remove("filesystem_consistency");
     after.remove("filesystem_consistency");
+    before.remove("conversation_text_projection");
+    after.remove("conversation_text_projection");
     anyhow::ensure!(
         before == after,
         "cut configuration cannot change registered source scope"
@@ -80,6 +82,11 @@ pub async fn admin_configure_filesystem_cut(
         if row.get::<_,Option<i64>>("active_generation_id").is_some()
             && scope.release_profile()!=FilesystemScope::from_config(&old).map_err(|_|invalid())?.release_profile() {
             return Err(AppError::BadRequest("active source consistency profile cannot change here".to_string()));
+        }
+        if scope.release_profile()!=FilesystemScope::from_config(&old).map_err(|_|invalid())?.release_profile()
+            && transaction.query_one("SELECT EXISTS(SELECT 1 FROM storage_v2_ingest_run WHERE source_id=$1 AND status='building')",
+                &[&source_id]).await?.get::<_,bool>(0) {
+            return Err(AppError::BadRequest("building source consistency profile cannot change here".to_string()));
         }
         transaction.execute("UPDATE sources SET config=$2,updated_at=NOW() WHERE id=$1",
             &[&source_id,&request.config]).await?;
@@ -226,5 +233,14 @@ mod tests {
         wrong["filesystem_consistency"] = serde_json::json!("unknown");
         assert!(validate_change(&old, &wrong).is_err());
         assert_ne!(config_digest(&old).unwrap(), config_digest(&new).unwrap());
+        let mut projected = new.clone();
+        projected["conversation_text_projection"] = serde_json::json!("utf8-nul-space-v1");
+        validate_change(&new, &projected).unwrap();
+        validate_change(&projected, &new).unwrap();
+        projected["retained"] = serde_json::json!(8);
+        assert!(validate_change(&new, &projected).is_err());
+        projected = new.clone();
+        projected["conversation_text_projection"] = serde_json::json!("unknown");
+        assert!(validate_change(&new, &projected).is_err());
     }
 }

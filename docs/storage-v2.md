@@ -1104,3 +1104,35 @@ set. Legacy incremental filesystem ingest cannot substitute for this contract.
 Cuts, failed capture intents and original descriptors remain owned until their
 explicit manifest cleanup. This feature alone does not establish production
 qualification, activation, recovery or cleanup acceptance.
+
+
+### Active source inspection and runtime retirement
+
+Migration 109 provides source metrics bound to the complete activation receipt.
+File counts group physical witness paths, so fragmenting a large conversation
+file does not inflate its file count. Input byte counts sum visible artifacts;
+view, symbol and resolved/unresolved call counts follow active membership.
+Source list/detail, administrative statistics and MCP source inspection use
+these metrics after the default switch. They do not use legacy cached counters
+or require the former files/chunks/symbols/call_graph table names.
+Administrative `chunks` counts represent visible retrieval views under this
+read path. The source statistics identify the active path and return a null
+legacy Qdrant vector count, rather than presenting an unused backend as zero.
+
+An explicit `current` search selector follows the configured active default.
+MCP code search uses the same checked active API retrieval handler. MCP card,
+layers, explain and ownership requests use the source-authorized active
+intelligence commands and return their source-bound envelope. An unknown or
+inaccessible requested source fails; it never becomes an unrestricted search.
+Semantic-only MCP search requires an accepted storage-v2 semantic profile.
+
+Active startup skips legacy vector collection creation, TEI/reranker probes,
+query expansion, and outbox processing/purge. It preserves legacy data for the
+accepted activation boundary. Legacy backfills are rejected under the active
+runtime. Registry additions and deletion of retained sources require a complete
+activation/retention procedure; an ordinary administrative rename remains
+available and returns active metrics.
+
+These routes are part of runtime retirement. They do not establish that every
+other intelligence/MCP route is retired, authorize deletion, or demonstrate
+production activation, normal ingest, latency, or physical space reclamation.

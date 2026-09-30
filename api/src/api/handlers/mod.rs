@@ -1,3 +1,4 @@
+mod active_metadata;
 pub mod admin;
 pub mod agents;
 pub mod auth;
