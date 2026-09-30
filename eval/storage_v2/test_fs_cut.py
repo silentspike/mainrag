@@ -198,6 +198,25 @@ class CutTests(unittest.TestCase):
             bad = copy.deepcopy(observation["filesystem_cut"]); bad["cut"]["snapshot_uuid"] = str(uuid.UUID(int=0))
             self.assertFalse(CUT["cut_observation_valid"](bad))
 
+    def test_conversation_projection_keeps_cut_and_filter_but_requires_registration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, registry, view, history, descriptor, observation = self.fixture(Path(temporary))
+            original_profile = observation["adapter_profile_id"]
+            observation["adapter_profile_id"] += ".text-utf8-nul-space-v1"
+            config = {"filesystem_consistency": "btrfs-cut-v1",
+                      "conversation_text_projection": "utf8-nul-space-v1"}
+            self.assertTrue(SCOPE["registered_scope_matcher"](config, observation)("fixture.jsonl"))
+            CUT["require_manifest"](observation["filesystem_cut"],
+                observation["filesystem_cut"]["cut"]["source_root_sha256"],
+                observation["adapter_profile_id"], observation["item_count"])
+            with self.assertRaisesRegex(RuntimeError, "projection differs"):
+                SCOPE["registered_scope_matcher"]({"filesystem_consistency":"btrfs-cut-v1"}, observation)
+            with self.assertRaisesRegex(RuntimeError, "unsupported"):
+                SCOPE["registered_scope_matcher"]({**config,"conversation_text_projection":"unknown"}, observation)
+            observation["adapter_profile_id"] = original_profile
+            with self.assertRaisesRegex(RuntimeError, "projection differs"):
+                SCOPE["registered_scope_matcher"](config, observation)
+
 
 if __name__ == "__main__":
     unittest.main()

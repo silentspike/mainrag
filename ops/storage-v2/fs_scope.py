@@ -8,6 +8,8 @@ import hashlib
 import json
 import re
 
+PROJECTION_SUFFIX = ".text-utf8-nul-space-v1"
+
 
 def scope_profile(sha256: str, cut: bool = False) -> str:
     version = "v4.btrfs-cut-v1" if cut else "v3"
@@ -15,6 +17,7 @@ def scope_profile(sha256: str, cut: bool = False) -> str:
 
 
 def scope_matcher(proof: object, profile: str):
+    profile = profile.removesuffix(PROJECTION_SUFFIX)
     if proof is None:
         if profile.startswith("mainrag.fs-release-candidate.v3.") or (
                 profile.startswith("mainrag.fs-release-candidate.v4.") and profile != scope_profile("unfiltered", True)):
@@ -56,6 +59,12 @@ def registered_scope_matcher(config: object, observation: dict):
         raise RuntimeError("registered filesystem config is invalid")
     patterns = (config or {}).get("file_patterns")
     consistency = (config or {}).get("filesystem_consistency")
+    projection = (config or {}).get("conversation_text_projection")
+    if projection not in {None, "utf8-nul-space-v1"} or (
+            projection is not None and consistency != "btrfs-cut-v1"):
+        raise RuntimeError("registered conversation text projection is unsupported")
+    if (projection == "utf8-nul-space-v1") != observation["adapter_profile_id"].endswith(PROJECTION_SUFFIX):
+        raise RuntimeError("conversation text projection differs from registration")
     cut = observation.get("filesystem_cut")
     if consistency not in {None, "btrfs-cut-v1"}:
         raise RuntimeError("registered filesystem consistency is unsupported")

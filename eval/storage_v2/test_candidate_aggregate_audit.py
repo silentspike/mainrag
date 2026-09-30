@@ -116,6 +116,15 @@ class CandidateAggregateAuditTests(unittest.TestCase):
             "source_snapshot_review_sha256":"1"*64,"complete_source_file":complete}
         inventory=self.inventory(reviewed,source(2,benchmark=True))
         result,_=AUDIT.audit(inventory,"e"*64);self.assertTrue(result["persisted_candidate_set_complete"])
+        candidate["adapter_profile_id"] = profile + ".text-utf8-nul-space-v1"
+        manifest["source_snapshot_review"]["adapter_profile_id"] = candidate["adapter_profile_id"]
+        projected,_ = AUDIT.audit(inventory,"e"*64)
+        self.assertTrue(projected["persisted_candidate_set_complete"])
+        manifest["source_snapshot_review"]["adapter_profile_id"] = profile + ".text-unknown"
+        rejected,_ = AUDIT.audit(inventory,"e"*64)
+        self.assertIn("source_snapshot_cut_invalid", rejected["persisted_gate_blockers"])
+        candidate["adapter_profile_id"] = profile
+        manifest["source_snapshot_review"]["adapter_profile_id"] = profile
         current["input_bytes"]=9
         rejected,_=AUDIT.audit(inventory,"e"*64)
         self.assertIn("source_snapshot_cut_invalid",rejected["persisted_gate_blockers"])
