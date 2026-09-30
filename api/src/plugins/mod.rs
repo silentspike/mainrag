@@ -7,6 +7,8 @@
 
 use async_trait::async_trait;
 
+#[cfg(any(feature = "storage-v2-retrieval", test))]
+pub mod conversation_text;
 pub mod export;
 pub mod fs;
 pub mod fs_cut;

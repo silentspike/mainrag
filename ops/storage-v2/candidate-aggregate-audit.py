@@ -83,7 +83,7 @@ def candidate_proof(manifest: object) -> tuple[list[str], dict | None]:
                 or isinstance(counts, dict) and counts.get("outside_configured_scope", 0) > 0):
             digest = snapshot.get("filesystem_scope_sha256")
             version = "v4.btrfs-cut-v1" if snapshot.get("filesystem_cut") is not None else "v3"
-            if (not digest_identity(digest) or snapshot.get("adapter_profile_id") !=
+            if (not digest_identity(digest) or snapshot.get("adapter_profile_id", "").removesuffix(".text-utf8-nul-space-v1") !=
                     f"mainrag.fs-release-candidate.{version}.scope-{digest}.fragment-1048576-newline-65536"):
                 failures.append("source_snapshot_scope_invalid")
         if isinstance(snapshot, dict):
@@ -96,7 +96,7 @@ def candidate_proof(manifest: object) -> tuple[list[str], dict | None]:
                     if not cut_contract["same_source_manifest"](cut, snapshot.get("build_filesystem_cut")):
                         raise RuntimeError("original build cut manifest differs")
                     scope = snapshot.get("filesystem_scope_sha256") or "unfiltered"
-                    if profile != f"{cut_contract['CUT_PROFILE']}scope-{scope}.fragment-1048576-newline-65536":
+                    if profile.removesuffix(".text-utf8-nul-space-v1") != f"{cut_contract['CUT_PROFILE']}scope-{scope}.fragment-1048576-newline-65536":
                         raise RuntimeError("cut scope profile binding differs")
                 except (RuntimeError, TypeError, KeyError):
                     failures.append("source_snapshot_cut_invalid")

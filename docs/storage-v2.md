@@ -1007,6 +1007,21 @@ restricted to the owned cut registry. A mutable current descriptor cannot redire
 ongoing read. Nonrecursive snapshots with nested source subvolumes are rejected.
 Nontext conversation files are rejected rather than silently omitted.
 
+An immutable conversation source may explicitly register
+`conversation_text_projection: "utf8-nul-space-v1"`. This keeps the registered
+root, filters, fragmentation and original body bytes. Its adapter profile adds
+`.text-utf8-nul-space-v1`; other source profiles remain unchanged. Valid UTF-8
+JSON/JSONL bodies containing NUL are retained byte exactly, while searchable
+text substitutes one ASCII space per NUL. Byte and character offsets are
+unchanged. Each affected locator records the projection kind, NUL count,
+original body digest and projected text digest. Binary signatures and invalid
+UTF-8 still fail. Other extensions and legacy ingestion retain their previous
+binary policy. Original malformed conversation fragments report unavailable
+parser intelligence explicitly; projected JSON is never treated as repaired
+parser input. Analysis uses a separate projection-bound profile to avoid
+reusing analysis under a different text contract. Config/profile changes require
+the existing reviewed configuration transition and full frozen source proof.
+
 The producer prepares reader permissions only in a root-private unpublished
 snapshot inside a private container. Its closed policy binds the reader identity and exact compiled file
 scope. It grants directory traversal and read access to selected regular files,

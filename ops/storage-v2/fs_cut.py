@@ -68,7 +68,7 @@ def require_manifest(value: object, root_sha256: str, profile: str,
                      item_count: int, source_watermark: str | None = None,
                      registered_root: str | None = None) -> None:
     if (not cut_observation_valid(value) or not isinstance(profile,str)
-            or not re.fullmatch(re.escape(CUT_PROFILE)+r"scope-(?:unfiltered|[0-9a-f]{64})\.fragment-1048576-newline-65536",profile)
+            or not re.fullmatch(re.escape(CUT_PROFILE)+r"scope-(?:unfiltered|[0-9a-f]{64})\.fragment-1048576-newline-65536(?:\.text-utf8-nul-space-v1)?",profile)
             or type(item_count) is not int or item_count < 0
             or value["cut"]["source_root_sha256"] != root_sha256
             or value["item_count"] != item_count):

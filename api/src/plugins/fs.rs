@@ -116,6 +116,7 @@ async fn check_if_binary(
     path: &Path,
     scan_full_text: bool,
     accounting: Option<&ReadAccounting>,
+    allow_conversation_nul: bool,
 ) -> anyhow::Result<bool> {
     use tokio::io::AsyncReadExt;
 
@@ -136,14 +137,20 @@ async fn check_if_binary(
     }
 
     // If no BOM, check for null bytes (common in binary files)
-    if header.contains(&0) {
+    if header.contains(&0) && !allow_conversation_nul {
         return Ok(true);
     }
 
     // Check for mostly non-printable characters
     let non_printable_count = header
         .iter()
-        .filter(|&&b| b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t')
+        .filter(|&&b| {
+            b < 0x20
+                && b != b'\n'
+                && b != b'\r'
+                && b != b'\t'
+                && !(allow_conversation_nul && b == 0)
+        })
         .count();
 
     if non_printable_count as f32 / bytes_read as f32 > 0.3 {
@@ -165,7 +172,9 @@ async fn check_if_binary(
             return Ok(!trailing.is_empty());
         }
         let bytes = &chunk[..read];
-        if bytes.contains(&0) || !valid_utf8_stream_chunk(&mut trailing, bytes) {
+        if (bytes.contains(&0) && !allow_conversation_nul)
+            || !valid_utf8_stream_chunk(&mut trailing, bytes)
+        {
             return Ok(true);
         }
     }
@@ -392,11 +401,6 @@ impl FilesystemPlugin {
                 continue;
             }
 
-            // DEBUG: Log JSONL files that pass extension check
-            if ext == "jsonl" {
-                tracing::warn!("JSONL file passed extension check: {}", path.display());
-            }
-
             // Metadata and binary checks happen before the size policy. A
             // storage-v2 scan decomposes large accepted text files instead of
             // dropping bytes or materializing the complete file in memory.
@@ -411,7 +415,10 @@ impl FilesystemPlugin {
             };
 
             // Binary check
-            match check_if_binary(&path, !load_content, accounting).await {
+            let allow_conversation_nul = !load_content
+                && self.scope.conversation_nul_projection
+                && matches!(ext.as_str(), "jsonl" | "json");
+            match check_if_binary(&path, !load_content, accounting, allow_conversation_nul).await {
                 Ok(true) => {
                     if self.scope.cut_consistency
                         && path
@@ -820,6 +827,24 @@ mod tests {
 
         assert!(result.errors.is_empty());
         assert!(result.files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn declared_conversation_projection_retains_nul_and_rejects_binary_or_invalid_utf8() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fixture.jsonl");
+        let mut original = vec![b'a'; 128 * 1024];
+        original[12] = 0;
+        original[96 * 1024] = 0;
+        tokio::fs::write(&path, &original).await.unwrap();
+        assert!(!check_if_binary(&path, true, None, true).await.unwrap());
+        assert!(check_if_binary(&path, true, None, false).await.unwrap());
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), original);
+        original[100 * 1024] = 0xff;
+        tokio::fs::write(&path, original).await.unwrap();
+        assert!(check_if_binary(&path, true, None, true).await.unwrap());
+        tokio::fs::write(&path, b"\x7fELF\0binary").await.unwrap();
+        assert!(check_if_binary(&path, true, None, true).await.unwrap());
     }
 
     #[tokio::test]
