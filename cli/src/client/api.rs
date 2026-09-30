@@ -192,7 +192,9 @@ pub struct SourceDeletionStats {
     pub chunks: i64,
     pub symbols: i64,
     pub call_graph: i64,
-    pub qdrant_vectors: i64,
+    pub qdrant_vectors: Option<i64>,
+    #[serde(default)]
+    pub read_path: Option<String>,
 }
 
 // ============================================================================
@@ -670,15 +672,9 @@ impl ApiClient {
             .await
             .context("Failed to get source stats")?;
 
-        if !response.status().is_success() {
-            // Return zeroed stats if endpoint doesn't exist yet
-            return Ok(SourceDeletionStats {
-                chunks: 0,
-                symbols: 0,
-                call_graph: 0,
-                qdrant_vectors: 0,
-            });
-        }
+        let response = response
+            .error_for_status()
+            .context("Source statistics are unavailable")?;
 
         response
             .json::<SourceDeletionStats>()
@@ -1569,4 +1565,23 @@ pub struct NegativeEvidence {
     pub severity: String,
     pub created_by: Option<String>,
     pub domain_profile: Option<String>,
+}
+
+#[cfg(test)]
+mod source_statistics_contract_tests {
+    use super::SourceDeletionStats;
+
+    #[test]
+    fn active_vector_absence_and_legacy_counts_are_distinct() {
+        let active: SourceDeletionStats = serde_json::from_str(
+            r#"{"chunks":2,"symbols":3,"call_graph":4,"qdrant_vectors":null,"read_path":"storage_v2_active"}"#
+        ).unwrap();
+        assert_eq!(active.qdrant_vectors, None);
+        assert_eq!(active.read_path.as_deref(), Some("storage_v2_active"));
+        let legacy: SourceDeletionStats =
+            serde_json::from_str(r#"{"chunks":2,"symbols":3,"call_graph":4,"qdrant_vectors":47}"#)
+                .unwrap();
+        assert_eq!(legacy.qdrant_vectors, Some(47));
+        assert_eq!(legacy.read_path, None);
+    }
 }

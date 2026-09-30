@@ -236,6 +236,18 @@ pub async fn execute_mcp_tool(
     Extension(claims): Extension<Arc<crate::auth::Claims>>,
     JsonBody(req): JsonBody<ExecuteToolRequest>,
 ) -> Result<Json<ExecuteToolResponse>, StatusCode> {
+    #[cfg(feature = "storage-v2-retrieval")]
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        if let Some(response) = execute_active_tool(&state, &claims, &req).await? {
+            return Ok(Json(response));
+        }
+    }
+
     // Derive TenantContext from auth claims — agents see only their own data
     let tenant = if claims.is_admin {
         TenantContext::Admin
@@ -922,6 +934,167 @@ pub async fn execute_mcp_tool(
             error: Some("Unknown tool".to_string()),
         })),
     }
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
+fn active_error_status(error: crate::error::AppError) -> StatusCode {
+    use axum::response::IntoResponse;
+    error.into_response().status()
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
+async fn execute_active_tool(
+    state: &Arc<AppState>,
+    claims: &Arc<crate::auth::Claims>,
+    request: &ExecuteToolRequest,
+) -> Result<Option<ExecuteToolResponse>, StatusCode> {
+    let result = match request.tool_name.as_str() {
+        "search_code" => {
+            let query: SearchQuery = serde_json::from_value(request.params.clone())
+                .map_err(|_| StatusCode::BAD_REQUEST)?;
+            match query.search_type.as_deref().unwrap_or("hybrid") {
+                "hybrid" | "keyword" => {}
+                "semantic" => {
+                    return Ok(Some(ExecuteToolResponse {
+                        tool_name: request.tool_name.clone(),
+                        result: Value::Null,
+                        success: false,
+                        error: Some(
+                            "semantic search requires an accepted storage-v2 semantic profile"
+                                .into(),
+                        ),
+                    }))
+                }
+                _ => return Err(StatusCode::BAD_REQUEST),
+            }
+            let api_request = serde_json::from_value(json!({
+                "query": query.query, "source_id": query.source_id,
+                "limit": query.limit, "read_path": "storage_v2_active",
+            }))
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+            let (_, Json(response)) = super::search::hybrid_search(
+                State(state.clone()),
+                Extension(claims.clone()),
+                JsonBody(api_request),
+            )
+            .await
+            .map_err(active_error_status)?;
+            serde_json::to_value(response.results).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        }
+        "list_sources" => {
+            let Json(response) =
+                super::sources::list_sources(State(state.clone()), Extension(claims.clone()))
+                    .await
+                    .map_err(active_error_status)?;
+            json!(response
+                .sources
+                .into_iter()
+                .map(|source| json!({
+                    "id": source.id, "name": source.name, "type": source.source_type,
+                    "path": source.path, "file_count": source.file_count,
+                    "total_size": source.total_size,
+                }))
+                .collect::<Vec<_>>())
+        }
+        "get_source_stats" => {
+            let source_id = request
+                .params
+                .get("source_id")
+                .and_then(Value::as_i64)
+                .filter(|id| *id > 0)
+                .ok_or(StatusCode::BAD_REQUEST)?;
+            let Json(source) = super::sources::get_source(
+                State(state.clone()),
+                axum::extract::Path(source_id),
+                Extension(claims.clone()),
+            )
+            .await
+            .map_err(active_error_status)?;
+            json!({"id": source.id, "name": source.name, "type": source.source_type,
+                "path": source.path, "file_count": source.file_count,
+                "total_size": source.total_size, "last_synced": source.last_synced})
+        }
+        "get_symbol_card" | "explain_path" | "browse_layers" | "get_ownership" => {
+            let (command, name_key) = match request.tool_name.as_str() {
+                "get_symbol_card" => ("card", Some("name")),
+                "explain_path" => ("explain", Some("symbol_name")),
+                "get_ownership" => ("ownership", Some("symbol")),
+                _ => ("layers", None),
+            };
+            let name = name_key
+                .map(|key| {
+                    request
+                        .params
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .ok_or(StatusCode::BAD_REQUEST)
+                })
+                .transpose()?
+                .map(str::to_owned);
+            let source_id = if let Some(source_name) = request.params.get("source") {
+                let source_name = source_name
+                    .as_str()
+                    .filter(|name| !name.trim().is_empty())
+                    .ok_or(StatusCode::BAD_REQUEST)?
+                    .to_owned();
+                let uid = Uuid::parse_str(&claims.sub).map_err(|_| StatusCode::UNAUTHORIZED)?;
+                let row = state
+                    .rls_client
+                    .with_rls(uid, claims.is_admin, move |txn| {
+                        Box::pin(async move {
+                            Ok(txn
+                                .query_opt("SELECT id FROM sources WHERE name=$1", &[&source_name])
+                                .await?)
+                        })
+                    })
+                    .await
+                    .map_err(active_error_status)?
+                    .ok_or(StatusCode::NOT_FOUND)?;
+                Some(row.get(0))
+            } else {
+                None
+            };
+            let query = super::intelligence::ShadowIntelligenceQuery {
+                source_id,
+                generation: None,
+                read_path: Some("storage_v2_active".into()),
+                command: command.into(),
+                name,
+                layer: request
+                    .params
+                    .get("layer")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                resource: request
+                    .params
+                    .get("resource")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                side_effect: request
+                    .params
+                    .get("side_effect")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                include_test: false,
+            };
+            let Json(response) = super::intelligence::shadow_intelligence_command(
+                State(state.clone()),
+                Extension(claims.clone()),
+                axum::extract::Query(query),
+            )
+            .await
+            .map_err(active_error_status)?;
+            response
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(ExecuteToolResponse {
+        tool_name: request.tool_name.clone(),
+        result,
+        success: true,
+        error: None,
+    }))
 }
 
 /// Get MCP protocol information (for Claude integration metadata)
