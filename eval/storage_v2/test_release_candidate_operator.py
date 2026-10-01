@@ -1018,6 +1018,7 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                         "active_generation_before": None, "active_generation_after": None}
             verified = {**checkpoint, "status": "verified", "intelligence_export": {},
                         "query_seeds": [seed], "checks": {key: "PASS" for key in MODULE.CHECKS},
+                        "verification_manifest_sha256": "f" * 64, "generation_root_sha256": "7" * 64,
                         "adapter_profile_id": "fixture-adapter", "analysis_profile_id": "fixture-analysis",
                         "search_profile_id": "fixture-search"}
             dual = {"status": "PASS", "artifact": {"unexplained_count": 0},
@@ -1079,6 +1080,90 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
             self.assertEqual(artifact["result"], qualified)
             self.assertEqual(stat.S_IMODE(arguments.output.stat().st_mode), 0o600)
             self.assertNotIn("private-token", arguments.output.read_text())
+
+            # Reuse only the completed restart proof. The replay/build POST is
+            # absent; real integrity and every current reader gate still run.
+            artifact["result"]["evidence_id"] = artifact["qualification"]["evidence_id"]
+            previous = directory / "completed.json"
+            MODULE.atomic_private_json(previous, artifact)
+            digest = MODULE.hashlib.sha256(previous.read_bytes()).hexdigest()
+            state = {**verified, "server_instance_id": "after"}
+            resumed = Namespace(**{**vars(arguments), "output": directory / "requalified.json",
+                                   "completed_restart_evidence": previous,
+                                   "expected_completed_restart_evidence_sha256": digest})
+            reader = {"commit_sha": "9" * 40, "binary_sha256": "8" * 64,
+                      "installation_receipt_sha256": "6" * 64}
+            with patch.object(MODULE, "source_state", return_value=state), \
+                 patch.object(MODULE, "observe_reader_package", side_effect=[reader.copy(), reader.copy()]), \
+                 patch.object(MODULE, "verify_intelligence", return_value={
+                     "applicability": "unknown_not_applicable", "commands": [],
+                 }), patch.object(MODULE, "publish_telemetry") as telemetry, \
+                 patch("builtins.print"), \
+                 patch.object(MODULE, "request", side_effect=[verified, current, storage, proof,
+                     current, current, empty, empty, dual, qualified]) as fresh:
+                MODULE.verify(resumed, "private-token")
+            paths = [call.args[3] for call in fresh.call_args_list]
+            self.assertEqual(len(paths), 10)
+            self.assertFalse(any(path.endswith("-build") for path in paths))
+            self.assertTrue(paths[0].endswith("-verify"))
+            self.assertTrue(paths[-1].endswith("-qualify"))
+            telemetry.assert_not_called()
+            replay = fresh.call_args_list[-1].args[4]["manifest"]["restart"]
+            self.assertEqual(replay["reused_completed_evidence_sha256"], digest)
+            self.assertEqual(replay["verified_producer_identity"]["generation_root_sha256"], "7" * 64)
+            submitted = fresh.call_args_list[-1].args[4]
+            self.assertEqual(submitted["commit_sha"], arguments.commit_sha)
+            self.assertEqual(submitted["manifest"]["reader_package"],
+                             {**reader, "server_instance_id": "after"})
+
+            drifted = Namespace(**{**vars(resumed), "output": directory / "reader-drift.json"})
+            with patch.object(MODULE, "source_state", side_effect=[state, {**state, "server_instance_id": "changed"}]), \
+                 patch.object(MODULE, "observe_reader_package", side_effect=[reader.copy(), reader.copy()]), \
+                 patch.object(MODULE, "verify_intelligence", return_value={
+                     "applicability": "unknown_not_applicable", "commands": [],
+                 }), patch("builtins.print"), \
+                 patch.object(MODULE, "request", side_effect=[verified, current, storage, proof,
+                     current, current, empty, empty, dual]) as rejected:
+                with self.assertRaisesRegex(RuntimeError, "API instance changed"):
+                    MODULE.verify(drifted, "private-token")
+            self.assertFalse(any(call.args[3].endswith("-qualify") for call in rejected.call_args_list))
+            self.assertFalse(json.loads(drifted.output.read_text())["qualification_attempted"])
+
+            for field in ("source_watermark_sha256", "verification_manifest_sha256", "generation_id",
+                          "active_generation_id", "item_count"):
+                with self.subTest(drift=field), self.assertRaisesRegex(RuntimeError, "live candidate"):
+                    MODULE.reuse_completed_restart(previous, digest, checkpoint, {**state, field: "drift"})
+            with self.assertRaisesRegex(RuntimeError, "reviewed digest"):
+                MODULE.reuse_completed_restart(previous, "0" * 64, checkpoint, state)
+            bad = copy.deepcopy(artifact)
+            bad["qualification"]["manifest"]["restart"]["generation_reused"] = False
+            MODULE.atomic_private_json(previous, bad)
+            bad_digest = MODULE.hashlib.sha256(previous.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(RuntimeError, "completed normal qualification"):
+                MODULE.reuse_completed_restart(previous, bad_digest, checkpoint, state)
+            previous.chmod(0o644)
+            with self.assertRaisesRegex(RuntimeError, "owned private regular file"):
+                MODULE.reuse_completed_restart(previous, bad_digest, checkpoint, state)
+
+    def test_reader_package_is_observed_from_running_service_not_only_installed_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "install.json"
+            receipt = {"status": "PASS", "commit": "a" * 40,
+                       "binaries": {"mainrag-api": {"sha256": "b" * 64}}}
+            MODULE.atomic_private_json(path, receipt)
+            arguments = Namespace(reader_package_receipt=path,
+                                  expected_reader_package_receipt_sha256=MODULE.hashlib.sha256(path.read_bytes()).hexdigest(),
+                                  api_url="http://127.0.0.1:3001")
+            replies = [SimpleNamespace(stdout="123\n"), SimpleNamespace(stdout="b" * 64 + "  /proc/123/exe\n")]
+            with patch.object(MODULE.subprocess, "run", side_effect=replies) as calls:
+                self.assertEqual(MODULE.observe_reader_package(arguments)["binary_sha256"], "b" * 64)
+            self.assertEqual(calls.call_args_list[-1].args[0][-1], "/proc/123/exe")
+            with patch.object(MODULE.subprocess, "run", side_effect=[replies[0], SimpleNamespace(stdout="c" * 64)]):
+                with self.assertRaisesRegex(RuntimeError, "running reader binary differs"):
+                    MODULE.observe_reader_package(arguments)
+            arguments.api_url = "http://other.invalid:3001"
+            with self.assertRaisesRegex(RuntimeError, "local production API"):
+                MODULE.observe_reader_package(arguments)
 
     def test_failing_gold_case_stops_before_dual_read_or_qualification(self) -> None:
         seed, current, storage, proof, identity = self.coverage_fixture()

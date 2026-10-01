@@ -1185,34 +1185,105 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
         progress.finish("COMPLETED")
 
 
-def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[str, Any]) -> None:
-    checkpoint = json.loads(arguments.checkpoint.read_text(encoding="utf-8"))
-    progress["checkpoint"] = checkpoint
-    if checkpoint["source_id"] != arguments.source_id or checkpoint["commit_sha"] != arguments.commit_sha:
-        raise RuntimeError("checkpoint source or commit identity differs")
-    progress["phase"] = "restart_state"
-    if checkpoint.get("reconstructed_from_persisted_witness") is True:
-        review_sha256 = checkpoint["reconstruction_evidence"].get("source_snapshot_review_sha256")
-        if review_sha256 is not None and (
-                arguments.source_snapshot_review is None
-                or arguments.source_snapshot_review_sha256 != review_sha256):
-            raise RuntimeError("reconstructed checkpoint requires exact source review recheck")
-        state = reconstructed_source_state(arguments.api_url, token, checkpoint)
-    else:
-        state = restarted_source_state(
-            arguments.api_url, token, arguments.source_id,
-            checkpoint["generation_seq"], checkpoint["server_instance_id"],
-        )
-    progress["phase"] = "resource_before_resume"
-    free_before_resume = shutil.disk_usage(arguments.pack_root).free
-    progress["free_bytes_before_resume"] = free_before_resume
-    if free_before_resume < arguments.minimum_free_bytes:
-        raise RuntimeError("resource reserve is below the approved minimum before resume")
-    progress["thin_pool_before_resume"] = thin_pool_capacity(
-        arguments.pack_root, 0, require_estimate=False)
-    require_same_pool(checkpoint.get("pack_capacity_before_build", {}).get("thin_pool"),
-                      progress["thin_pool_before_resume"])
-    progress["phase"] = "restart_resume"
+def read_private_receipt(path: Path, expected_sha256: str) -> dict[str, Any]:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() \
+                or stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise RuntimeError("receipt must be an owned private regular file")
+        raw = stream.read(64 * 1024**2 + 1)
+    if len(raw) > 64 * 1024**2 or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256 or "") \
+            or hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise RuntimeError("receipt differs from its reviewed digest or size bound")
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise RuntimeError("receipt is not a JSON object")
+    return value
+
+
+def observe_reader_package(arguments: argparse.Namespace) -> dict[str, str] | None:
+    path = getattr(arguments, "reader_package_receipt", None)
+    if path is None:
+        return None
+    url = urllib.parse.urlparse(arguments.api_url)
+    if url.scheme != "http" or url.hostname not in {"127.0.0.1", "localhost", "::1"} \
+            or url.port != 3001 or url.path not in {"", "/"}:
+        raise RuntimeError("local reader package binding requires the local production API")
+    receipt = read_private_receipt(path, arguments.expected_reader_package_receipt_sha256)
+    commit = receipt.get("commit")
+    binary = receipt.get("binaries", {}).get("mainrag-api", {}).get("sha256")
+    if receipt.get("status") != "PASS" or not isinstance(commit, str) \
+            or not re.fullmatch(r"[0-9a-f]{40}", commit) or not isinstance(binary, str) \
+            or not re.fullmatch(r"[0-9a-f]{64}", binary):
+        raise RuntimeError("reader installation receipt identity is invalid")
+    service = subprocess.run(["systemctl", "show", "mainrag-api.service", "-p", "ExecMainPID", "--value"],
+                             capture_output=True, text=True, check=True)
+    pid = service.stdout.strip()
+    if not pid.isdigit() or int(pid) <= 0:
+        raise RuntimeError("reader API service is inactive")
+    measured = subprocess.run(["sudo", "-n", "sha256sum", f"/proc/{pid}/exe"],
+                              capture_output=True, text=True, check=True).stdout.split()
+    if not measured or measured[0] != binary:
+        raise RuntimeError("running reader binary differs from the installation receipt")
+    return {"commit_sha": commit, "binary_sha256": binary,
+            "installation_receipt_sha256": arguments.expected_reader_package_receipt_sha256}
+
+
+def reuse_completed_restart(path: Path, expected_sha256: str, checkpoint: dict[str, Any],
+                           state: dict[str, Any]) -> dict[str, Any]:
+    """Reuse a completed replay, never an interrupted or merely planned attempt.
+
+    This reuses only restart/replay evidence. Integrity, live source review,
+    frozen gold, search, intelligence, resource and qualification still run.
+    """
+    prior = read_private_receipt(path, expected_sha256)
+    qualification = prior.get("qualification", {})
+    manifest = qualification.get("manifest", {})
+    result = prior.get("result", {})
+    failures, _ = candidate_proof(manifest)
+    if failures or result.get("status") != "release_candidate" \
+            or result.get("evidence_id") != qualification.get("evidence_id"):
+        raise RuntimeError("restart evidence is not a completed normal qualification")
+    previous = prior.get("checkpoint", {})
+    for name in ("source_id", "generation_id", "generation_seq", "commit_sha",
+                 "source_watermark_sha256", "item_count", "active_generation_id"):
+        if name not in checkpoint or previous.get(name) != checkpoint[name]:
+            raise RuntimeError("restart evidence candidate identity differs")
+    for name in ("git_snapshot_commit_sha", "source_snapshot_review_sha256",
+                 "source_snapshot_gold_review_sha256"):
+        if previous.get(name) != checkpoint.get(name):
+            raise RuntimeError("restart evidence frozen input identity differs")
+    if previous.get("build", {}).get("fixture_sha256") != checkpoint.get("build", {}).get("fixture_sha256") \
+            or not checkpoint.get("build", {}).get("fixture_sha256"):
+        raise RuntimeError("restart evidence build fixture differs")
+    verified = prior.get("verification", {})
+    if manifest.get("server_verification_sha256") != sha256_text(json.dumps(verified, sort_keys=True)):
+        raise RuntimeError("restart evidence verification digest differs")
+    for name in ("source_id", "generation_id", "generation_seq", "source_watermark_sha256",
+                 "item_count", "active_generation_id", "verification_manifest_sha256"):
+        if name not in state or verified.get(name) != state[name]:
+            raise RuntimeError("restart evidence live candidate identity differs")
+    if state.get("status") not in {"verified", "release_candidate"} \
+            or not re.fullmatch(r"[0-9a-f]{64}", state.get("verification_manifest_sha256") or ""):
+        raise RuntimeError("restart evidence live generation is not verified")
+    for name in ("adapter_profile_id", "analysis_profile_id", "search_profile_id"):
+        if not verified.get(name) or qualification.get(name) != verified[name]:
+            raise RuntimeError("restart evidence producer profile differs")
+    for name in ("generation_id", "commit_sha", "source_watermark_sha256"):
+        if qualification.get(name) != checkpoint[name]:
+            raise RuntimeError("restart evidence producer identity differs")
+    identity = {name: verified.get(name) for name in (
+        "adapter_profile_id", "analysis_profile_id", "search_profile_id",
+        "generation_root_sha256", "verification_manifest_sha256")}
+    if not re.fullmatch(r"[0-9a-f]{64}", identity["generation_root_sha256"] or ""):
+        raise RuntimeError("restart evidence generation root is invalid")
+    return {**manifest["restart"], "reused_completed_evidence_sha256": expected_sha256,
+            "verified_producer_identity": identity}
+
+
+def replay_completed_build(arguments: argparse.Namespace, token: str,
+                           checkpoint: dict[str, Any]) -> dict[str, Any]:
     repeated_body = {"commit_sha": arguments.commit_sha}
     if checkpoint.get("git_snapshot_commit_sha") is not None:
         repeated_body["git_snapshot_commit_sha"] = checkpoint["git_snapshot_commit_sha"]
@@ -1234,7 +1305,50 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
     ):
         raise RuntimeError("restart/resume did not reproduce the completed candidate identity")
     validate_telemetry(repeated.get("telemetry"), int(repeated["item_count"]))
-    progress["restart_resume"] = {"server_instance_changed": True, "generation_reused": True}
+    return repeated
+
+
+def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[str, Any]) -> None:
+    checkpoint = json.loads(arguments.checkpoint.read_text(encoding="utf-8"))
+    progress["checkpoint"] = checkpoint
+    if checkpoint["source_id"] != arguments.source_id or checkpoint["commit_sha"] != arguments.commit_sha:
+        raise RuntimeError("checkpoint source or commit identity differs")
+    progress["phase"] = "reader_package"
+    reader_package = observe_reader_package(arguments)
+    progress["phase"] = "restart_state"
+    if checkpoint.get("reconstructed_from_persisted_witness") is True:
+        review_sha256 = checkpoint["reconstruction_evidence"].get("source_snapshot_review_sha256")
+        if review_sha256 is not None and (
+                arguments.source_snapshot_review is None
+                or arguments.source_snapshot_review_sha256 != review_sha256):
+            raise RuntimeError("reconstructed checkpoint requires exact source review recheck")
+        state = reconstructed_source_state(arguments.api_url, token, checkpoint)
+    else:
+        state = restarted_source_state(
+            arguments.api_url, token, arguments.source_id,
+            checkpoint["generation_seq"], checkpoint["server_instance_id"],
+        )
+    if reader_package is not None:
+        reader_package["server_instance_id"] = state["server_instance_id"]
+        progress["reader_package"] = reader_package
+    progress["phase"] = "resource_before_resume"
+    free_before_resume = shutil.disk_usage(arguments.pack_root).free
+    progress["free_bytes_before_resume"] = free_before_resume
+    if free_before_resume < arguments.minimum_free_bytes:
+        raise RuntimeError("resource reserve is below the approved minimum before resume")
+    progress["thin_pool_before_resume"] = thin_pool_capacity(
+        arguments.pack_root, 0, require_estimate=False)
+    require_same_pool(checkpoint.get("pack_capacity_before_build", {}).get("thin_pool"),
+                      progress["thin_pool_before_resume"])
+    progress["phase"] = "restart_resume"
+    restart_evidence = getattr(arguments, "completed_restart_evidence", None)
+    repeated = None
+    if restart_evidence is not None:
+        progress["restart_resume"] = reuse_completed_restart(
+            restart_evidence, arguments.expected_completed_restart_evidence_sha256, checkpoint, state)
+    else:
+        repeated = replay_completed_build(arguments, token, checkpoint)
+        progress["restart_resume"] = {"server_instance_changed": True, "generation_reused": True}
     progress["phase"] = "integrity"
     verified = request(
         arguments.api_url,
@@ -1244,6 +1358,10 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
         {"generation_id": checkpoint["generation_id"]},
     )
     progress["verification"] = verified
+    if restart_evidence is not None:
+        identity = progress["restart_resume"]["verified_producer_identity"]
+        if any(verified.get(name) != value for name, value in identity.items()):
+            raise RuntimeError("reused restart producer profile or generation integrity differs")
     progress["query_seed_summary"] = query_seed_summary(verified["query_seeds"])
     if (
         int(verified["source_id"]) != arguments.source_id
@@ -1467,10 +1585,19 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             "query_coverage_sha256": sha256_text(json.dumps(query_coverage, sort_keys=True)),
             "intelligence": intelligence,
             "resource": {"free_bytes": free_bytes, "minimum_free_bytes": arguments.minimum_free_bytes},
-            "restart": {"server_instance_changed": True, "generation_reused": True},
+            "restart": progress["restart_resume"],
         },
     }
     progress["phase"] = "manifest_contract"
+    if reader_package is not None:
+        current_reader = observe_reader_package(arguments)
+        current_state = source_state(arguments.api_url, token, arguments.source_id,
+                                     checkpoint["generation_seq"])
+        if current_reader != {key: value for key, value in reader_package.items()
+                              if key != "server_instance_id"} \
+                or current_state.get("server_instance_id") != reader_package["server_instance_id"]:
+            raise RuntimeError("reader package or API instance changed during qualification")
+        qualification["manifest"]["reader_package"] = reader_package
     progress["qualification"] = qualification
     failures, _ = candidate_proof(qualification["manifest"])
     if failures:
@@ -1493,7 +1620,8 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
                 "query_coverage": query_coverage,
                 "qualification": qualification, "result": result}
     atomic_private_json(arguments.output, artifact)
-    publish_telemetry(repeated["telemetry"])
+    if repeated is not None:
+        publish_telemetry(repeated["telemetry"])
     print(json.dumps({
         "status": result["status"], "source_ref": checkpoint["source_ref"],
         "generation_seq": result["generation_seq"], "evidence_id": result["evidence_id"],
@@ -1510,6 +1638,12 @@ def main() -> int:
     parser.add_argument("--source-id", type=int, required=True)
     parser.add_argument("--commit-sha", required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--completed-restart-evidence", type=Path,
+                        help="Reuse only a completed, same-generation normal restart/replay proof")
+    parser.add_argument("--expected-completed-restart-evidence-sha256")
+    parser.add_argument("--reader-package-receipt", type=Path,
+                        help="Bind current reader gates to a verified local installation receipt")
+    parser.add_argument("--expected-reader-package-receipt-sha256")
     parser.add_argument("--resume-run-id", type=int, help="Require the exact persisted build run; use a new checkpoint path")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--pack-root", type=Path, default=Path("/data/mainrag/storage-v2-66/packs"))
@@ -1525,8 +1659,18 @@ def main() -> int:
     parser.add_argument("--git-snapshot-commit-sha")
     parser.add_argument("--expected-source-watermark-sha256")
     arguments = parser.parse_args()
+    if ((arguments.reader_package_receipt is None)
+            != (arguments.expected_reader_package_receipt_sha256 is None)):
+        parser.error("reader package receipt requires its reviewed SHA-256")
+    if arguments.reader_package_receipt is not None and arguments.phase != "verify":
+        parser.error("reader package receipt applies only to verify")
     if len(arguments.commit_sha) != 40 or any(c not in "0123456789abcdef" for c in arguments.commit_sha):
         parser.error("--commit-sha must be a full lowercase Git SHA")
+    if ((arguments.completed_restart_evidence is None)
+            != (arguments.expected_completed_restart_evidence_sha256 is None)):
+        parser.error("completed restart evidence requires its reviewed SHA-256")
+    if arguments.completed_restart_evidence is not None and arguments.phase != "verify":
+        parser.error("completed restart evidence applies only to verify")
     if arguments.phase == "verify" and arguments.output is None:
         parser.error("verify requires --output")
     if arguments.phase == "verify" and (arguments.gold_suite is None or
