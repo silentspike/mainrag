@@ -17,6 +17,8 @@ use super::generation_ingest::ShadowIngestMeasurements;
 pub struct BuildFailure {
     pub category: String,
     pub sqlstate: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
 }
 
 impl BuildFailure {
@@ -26,6 +28,14 @@ impl BuildFailure {
                 .downcast_ref::<tokio_postgres::Error>()
                 .and_then(|error| error.code())
                 .map(|code| code.code().to_owned())
+        });
+        let operation = error.chain().find_map(|cause| {
+            cause
+                .downcast_ref::<tokio_postgres::Error>()
+                .and_then(|error| error.as_db_error())
+                .and_then(|error| error.where_())
+                .and_then(database_operation)
+                .map(str::to_owned)
         });
         let category = match sqlstate.as_deref() {
             Some("53100" | "53200" | "53300" | "53400") => "database_resource_exhausted",
@@ -39,8 +49,21 @@ impl BuildFailure {
         Self {
             category: category.into(),
             sqlstate,
+            operation,
         }
     }
+}
+
+// Persist only a known public operation name, never raw SQL/source context.
+fn database_operation(context: &str) -> Option<&'static str> {
+    [
+        "storage_v2_put_search_document",
+        "storage_v2_put_lexical_segments_located",
+        "storage_v2_stage_shadow_item",
+        "storage_v2_seal_ingest_run",
+    ]
+    .into_iter()
+    .find(|operation| context.contains(&format!("PL/pgSQL function {operation}(")))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -273,6 +296,7 @@ impl BuildProgressRecorder {
             inner.value.failure = Some(BuildFailure {
                 category: "build_or_commit_failure".into(),
                 sqlstate: None,
+                operation: None,
             });
         }
         inner.value.status = if committed {
@@ -353,5 +377,28 @@ mod tests {
             "failed_requires_reconciliation"
         );
         Ok(())
+    }
+    #[test]
+    fn failure_operation_retains_public_identity_without_private_context() {
+        let context = "SQL statement with private path and secret parameters\nPL/pgSQL function storage_v2_put_search_document(text,text,bigint,text,text[]) line 62 at SQL statement";
+        assert_eq!(
+            database_operation(context),
+            Some("storage_v2_put_search_document")
+        );
+        assert_eq!(
+            database_operation("SQL private_function and source contents"),
+            None
+        );
+        let old: BuildFailure =
+            serde_json::from_str(r#"{"category":"database_query_cancelled","sqlstate":"57014"}"#)
+                .unwrap();
+        assert!(old.operation.is_none());
+        let value = serde_json::to_string(&BuildFailure {
+            category: "database_query_cancelled".into(),
+            sqlstate: Some("57014".into()),
+            operation: database_operation(context).map(str::to_owned),
+        })
+        .unwrap();
+        assert!(!value.contains("private") && !value.contains("secret"));
     }
 }
