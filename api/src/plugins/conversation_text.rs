@@ -5,8 +5,11 @@ use std::path::Path;
 
 use anyhow::{ensure, Context, Result};
 
+#[cfg(feature = "storage-v2-shadow-ingest")]
 pub const KIND: &str = "utf8-nul-space-v1";
+#[cfg(feature = "storage-v2-shadow-ingest")]
 pub const PROFILE_SUFFIX: &str = ".text-utf8-nul-space-v1";
+#[cfg(feature = "storage-v2-shadow-ingest")]
 pub const ANALYSIS_PROFILE: &str = "mainrag.generic-structural.v1.utf8-nul-space-v1";
 
 pub struct ProjectedText<'a> {
