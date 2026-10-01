@@ -138,7 +138,14 @@ jobs:
         shell: bash
         run: |
           cargo test -p mainrag-api --features storage-v2-retrieval --lib fs_scope -- --nocapture | tee fs-scope-tests.log
-          python3 -c 'from pathlib import Path; assert "4 passed; 0 failed; 0 ignored;" in Path("fs-scope-tests.log").read_text(), "Expected all filesystem scope regressions to execute"'
+          python3 -c 'from pathlib import Path; assert "5 passed; 0 failed; 0 ignored;" in Path("fs-scope-tests.log").read_text(), "Expected all filesystem scope and conversation projection regressions to execute"'
+      - name: Verify lossless conversation projection and native intelligence responses
+        shell: bash
+        run: |
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib plugins::conversation_text::tests -- --nocapture | tee conversation-projection-tests.log
+          python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("conversation-projection-tests.log").read_text(), "Expected the original-byte and Unicode-locator projection regression"'
+          cargo test -p mainrag-api --features storage-v2-retrieval --bin mainrag-api api::handlers::active_intelligence::chain_tests -- --nocapture | tee active-intelligence-response-tests.log
+          python3 -c 'from pathlib import Path; assert "2 passed; 0 failed; 0 ignored;" in Path("active-intelligence-response-tests.log").read_text(), "Expected typed call evidence, unknown confidence, note namespace and partial-result regressions"'
       - name: Verify immutable source cuts and complete fragment proof
         shell: bash
         run: |
