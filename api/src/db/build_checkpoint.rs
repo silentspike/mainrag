@@ -144,13 +144,21 @@ impl BuildCheckpointSession {
         );
         self.connection.batch_execute("COMMIT").await?;
         #[cfg(test)]
-        if self.fail_after.fetch_update(
-            std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::SeqCst,
-            |value| value.checked_sub(1),
-        ) == Ok(1)
         {
-            anyhow::bail!("controlled interruption after durable checkpoint");
+            use std::sync::atomic::Ordering::SeqCst;
+            let mut remaining = self.fail_after.load(SeqCst);
+            while remaining > 0 {
+                match self.fail_after.compare_exchange_weak(
+                    remaining,
+                    remaining - 1,
+                    SeqCst,
+                    SeqCst,
+                ) {
+                    Ok(1) => anyhow::bail!("controlled interruption after durable checkpoint"),
+                    Ok(_) => break,
+                    Err(actual) => remaining = actual,
+                }
+            }
         }
         self.connection
             .batch_execute("BEGIN; SET LOCAL statement_timeout='120s'")
