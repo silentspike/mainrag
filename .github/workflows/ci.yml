@@ -455,6 +455,7 @@ jobs:
               'eval.storage_v2.schema.test_managed_frontier_lock.ManagedFrontierLockTests',
               'eval.storage_v2.schema.test_active_set_search.ActiveSetSearchTests',
               'eval.storage_v2.schema.test_posting_hash_correlation.PostingHashCorrelationTests',
+              'eval.storage_v2.schema.test_authorized_copied_rank_scope.AuthorizedCopiedRankScopeTests',
               'eval.storage_v2.schema.test_active_source_metrics.ActiveSourceMetricsTests',
               'eval.storage_v2.schema.test_active_explore.ActiveExploreTests',
           ])
