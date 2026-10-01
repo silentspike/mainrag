@@ -45,6 +45,12 @@ impl BuildCheckpointSession {
             allowed,
             "checkpointed source build requires administrator source access"
         );
+        // GIN pending-list maintenance measured longer than the ordinary
+        // reader deadline. Keep writes bounded in this detached connection;
+        // it is destroyed on drop and never returns its settings to the pool.
+        connection
+            .batch_execute("SET LOCAL statement_timeout='120s'")
+            .await?;
         let acquired: bool = connection
             .query_one(
                 "SELECT pg_try_advisory_lock(hashtextextended( \
@@ -138,15 +144,25 @@ impl BuildCheckpointSession {
         );
         self.connection.batch_execute("COMMIT").await?;
         #[cfg(test)]
-        if self.fail_after.fetch_update(
-            std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::SeqCst,
-            |value| value.checked_sub(1),
-        ) == Ok(1)
         {
-            anyhow::bail!("controlled interruption after durable checkpoint");
+            use std::sync::atomic::Ordering::SeqCst;
+            let mut remaining = self.fail_after.load(SeqCst);
+            while remaining > 0 {
+                match self.fail_after.compare_exchange_weak(
+                    remaining,
+                    remaining - 1,
+                    SeqCst,
+                    SeqCst,
+                ) {
+                    Ok(1) => anyhow::bail!("controlled interruption after durable checkpoint"),
+                    Ok(_) => break,
+                    Err(actual) => remaining = actual,
+                }
+            }
         }
-        self.connection.batch_execute("BEGIN").await?;
+        self.connection
+            .batch_execute("BEGIN; SET LOCAL statement_timeout='120s'")
+            .await?;
         self.connection
             .execute(
                 "SELECT set_config('app.user_id',$1,true), \
