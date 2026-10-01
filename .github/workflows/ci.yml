@@ -161,7 +161,7 @@ jobs:
           cargo test -p mainrag-api --features storage-v2-retrieval --lib services::chunker::character::tests -- --nocapture | tee character-tests.log
           python3 -c 'from pathlib import Path; assert "3 passed; 0 failed; 0 ignored;" in Path("character-tests.log").read_text(), "Expected all character chunker regressions to execute"'
           cargo test -p mainrag-api --features storage-v2-retrieval --lib services::build_progress::tests -- --nocapture | tee build-progress-tests.log
-          python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("build-progress-tests.log").read_text(), "Expected durable progress regression to execute"'
+          python3 -c 'from pathlib import Path; assert "2 passed; 0 failed; 0 ignored;" in Path("build-progress-tests.log").read_text(), "Expected durable progress and private-operation redaction regressions to execute"'
       - name: Verify unavailable grammar distinction and supported parser failures
         shell: bash
         run: |
