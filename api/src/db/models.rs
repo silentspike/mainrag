@@ -99,7 +99,7 @@ impl SearchResult {
     /// Optimize result for LLM consumption with query-aware snippet generation:
     /// - Convert <<<>>> FTS markers to **markdown** bold
     /// - If no FTS markers found, create snippet around query match
-    /// - Unescape file_path (- → /)
+    /// - Preserve the canonical file path
     /// - Generate compact location field
     /// - Truncate content if too large (max 16000 chars ≈ 4000 tokens)
     pub fn optimize_for_llm_with_query(mut self, query: &str) -> Self {
@@ -162,24 +162,16 @@ impl SearchResult {
             }
         }
 
-        // 3. Unescape file_path: dashes before first / represent escaped slashes
-        if self.file_path.starts_with('-') {
-            if let Some(first_slash) = self.file_path.find('/') {
-                let prefix = &self.file_path[..first_slash].replace('-', "/");
-                let suffix = &self.file_path[first_slash..];
-                self.file_path = format!("{}{}", prefix, suffix);
-            } else {
-                self.file_path = self.file_path.replacen('-', "/", 1);
-            }
-        }
+        // Paths are identities supplied by the reader. A leading dash is a
+        // valid filename byte; presentation must not reinterpret it as a slash.
 
-        // 4. Generate compact location
+        // 3. Generate compact location
         self.location = Some(format!(
             "{}:{}-{}",
             self.file_path, self.line_start, self.line_end
         ));
 
-        // 5. Truncate content if too large for LLM context
+        // 4. Truncate content if too large for LLM context
         if self.content.len() > MAX_CONTENT_CHARS {
             // UTF-8 safety: MAX_CONTENT_CHARS is a byte limit and may land
             // inside a multi-byte character.  Walk backward to the nearest
@@ -465,4 +457,52 @@ pub struct NegativeEvidence {
     pub domain_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_provenance: Option<serde_json::Value>,
+}
+
+#[cfg(test)]
+mod search_result_path_tests {
+    use super::SearchResult;
+
+    fn result(path: &str) -> SearchResult {
+        serde_json::from_value(serde_json::json!({
+            "chunk_id": 1,
+            "file_path": path,
+            "content": "checkpoint completed",
+            "line_start": 3,
+            "line_end": 7,
+            "source_name": "public-fixture",
+            "score": 1.0
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn formatting_preserves_distinct_canonical_paths() {
+        // These are different registered files, including a legitimate leading
+        // dash and an absolute path. Their identities must remain distinct.
+        let paths = [
+            "-fixture-notes/session.jsonl",
+            "/fixture/notes/session.jsonl",
+            "-notes.md",
+        ];
+        let formatted: Vec<_> = paths
+            .iter()
+            .map(|path| result(path).optimize_for_llm_with_query("checkpoint"))
+            .collect();
+        for (path, hit) in paths.iter().zip(&formatted) {
+            assert_eq!(hit.file_path.as_str(), *path);
+            let location = format!("{path}:3-7");
+            assert_eq!(hit.location.as_deref(), Some(location.as_str()));
+            assert!(hit.snippet.as_deref().unwrap().contains("**checkpoint**"));
+        }
+        assert_ne!(formatted[0].file_path, formatted[1].file_path);
+    }
+
+    #[test]
+    fn repeated_formatting_preserves_path_identity() {
+        let once = result("-fixture-root/session.jsonl").optimize_for_llm();
+        let twice = once.clone().optimize_for_llm();
+        assert_eq!(twice.file_path, once.file_path);
+        assert_eq!(twice.location, once.location);
+    }
 }
