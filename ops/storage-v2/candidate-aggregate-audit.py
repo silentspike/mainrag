@@ -289,7 +289,14 @@ def gold_summary_valid(value: object) -> bool:
             and value.get("representative_coverage") == "SUITE_DIGEST_BOUND_REVIEW_EXTERNAL")
 
 
-def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
+def audit(inventory: dict, inventory_sha256: str,
+          expected_reader_package: dict | None = None) -> tuple[dict, dict]:
+    if expected_reader_package is not None and (
+            not isinstance(expected_reader_package, dict)
+            or not isinstance(expected_reader_package.get("commit_sha"), str)
+            or not COMMIT.fullmatch(expected_reader_package.get("commit_sha", ""))
+            or not digest_identity(expected_reader_package.get("binary_sha256"))):
+        raise RuntimeError("expected reader package identity is invalid")
     sources = inventory.get("sources")
     if not isinstance(sources, list) or not sources:
         raise RuntimeError("protected inventory has no source set")
@@ -353,6 +360,15 @@ def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
             proof_failures, proof_summary = candidate_proof(
                 candidate.get("qualification_manifest"))
             failures.extend(proof_failures)
+            if expected_reader_package is not None:
+                manifest = candidate.get("qualification_manifest")
+                reader = manifest.get("reader_package") if isinstance(manifest, dict) else None
+                if not isinstance(reader, dict) or any(reader.get(key) != value
+                        for key, value in expected_reader_package.items()) \
+                        or not digest_identity(reader.get("installation_receipt_sha256")) \
+                        or not isinstance(reader.get("server_instance_id"), str) \
+                        or not reader["server_instance_id"]:
+                    failures.append("current_reader_package_not_proven")
             snapshot = candidate.get("qualification_manifest", {}).get(
                 "source_snapshot_review") if isinstance(
                     candidate.get("qualification_manifest"), dict) else None
@@ -454,6 +470,7 @@ def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
         "quality_by_class": dict(sorted(quality_by_class.items())),
         "external_gates_not_proven_by_inventory": list(EXTERNAL_GATES),
         "sources": protected_sources,
+        "expected_reader_package": expected_reader_package,
     }
     public = {
         "schema_version": "mainrag.storage-v2.candidate-aggregate-audit-summary.v2",
@@ -470,6 +487,7 @@ def audit(inventory: dict, inventory_sha256: str) -> tuple[dict, dict]:
         "validated_source_class_count": len(quality_by_class),
         "validated_query_count": sum(value["query_count"] for value in quality_by_class.values()),
         "external_gate_count": len(EXTERNAL_GATES),
+        "expected_reader_package": expected_reader_package,
         "limitations": [
             "Protected database snapshot only; current watermarks, writers, resources, package and acceptance are not proven.",
             "No build, qualification, activation or cleanup was performed.",
@@ -500,13 +518,21 @@ def main() -> int:
     parser.add_argument("--inventory", required=True, type=Path)
     parser.add_argument("--expected-inventory-sha256", required=True)
     parser.add_argument("--protected-output", required=True, type=Path)
+    parser.add_argument("--expected-reader-commit-sha")
+    parser.add_argument("--expected-reader-binary-sha256")
     arguments = parser.parse_args()
+    if ((arguments.expected_reader_commit_sha is None)
+            != (arguments.expected_reader_binary_sha256 is None)):
+        parser.error("expected reader commit and binary SHA-256 are required together")
     if arguments.protected_output.exists() or arguments.protected_output.is_symlink():
         parser.error("protected audit output already exists")
     try:
         inventory, digest = read_protected_inventory(
             arguments.inventory, arguments.expected_inventory_sha256)
-        protected, public = audit(inventory, digest)
+        reader = ({"commit_sha": arguments.expected_reader_commit_sha,
+                   "binary_sha256": arguments.expected_reader_binary_sha256}
+                  if arguments.expected_reader_commit_sha is not None else None)
+        protected, public = audit(inventory, digest, reader)
         private_create(arguments.protected_output, protected)
     except FileExistsError:
         parser.error("protected audit output appeared during capture")
