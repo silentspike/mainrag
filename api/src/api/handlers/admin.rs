@@ -521,10 +521,46 @@ pub struct UpdateSourceRequest {
     pub name: Option<String>,
 }
 
+fn active_source_response(row: &tokio_postgres::Row) -> SourceResponse {
+    SourceResponse {
+        id: row.get("id"),
+        name: row.get("name"),
+        source_type: row.get("source_type"),
+        path: row.get("path"),
+        last_synced: row.get("active_last_synced"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        file_count: row.get("active_file_count"),
+        total_size: row.get("active_total_size"),
+        chunk_count: row.get("active_view_count"),
+    }
+}
+
 pub async fn admin_list_sources(
     State(state): State<Arc<AppState>>,
     Extension(_claims): Extension<Arc<crate::auth::Claims>>,
 ) -> Result<Json<Vec<SourceResponse>>> {
+    if let Some(manifest) = state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .clone()
+    {
+        return state
+            .rls_client
+            .with_system(move |txn| {
+                Box::pin(async move {
+                    let rows = txn
+                        .query(
+                            super::active_metadata::SOURCES_SQL,
+                            &[&manifest, &None::<i64>, &true],
+                        )
+                        .await?;
+                    Ok(Json(rows.iter().map(active_source_response).collect()))
+                })
+            })
+            .await;
+    }
     // K3: All DB operations in a single transaction via RlsClient
     state
         .rls_client
@@ -581,6 +617,15 @@ pub async fn admin_create_source(
     Extension(claims): Extension<Arc<crate::auth::Claims>>,
     JsonBody(req): JsonBody<CreateSourceRequest>,
 ) -> Result<(StatusCode, Json<SourceResponse>)> {
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        return Err(AppError::Conflict("source registry changes require a complete storage-v2 activation and retention procedure".into()));
+    }
+
     // Generate name if not provided (before closure — no DB needed)
     let name = req.name.unwrap_or_else(|| {
         req.path
@@ -669,6 +714,38 @@ pub async fn admin_update_source(
     Path(id): Path<i64>,
     JsonBody(req): JsonBody<UpdateSourceRequest>,
 ) -> Result<Json<SourceResponse>> {
+    if let Some(manifest) = state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .clone()
+    {
+        return state
+            .rls_client
+            .with_system(move |txn| {
+                Box::pin(async move {
+                    txn.query_one(
+                        "SELECT storage_v2_require_complete_active_set($1)",
+                        &[&manifest],
+                    )
+                    .await?;
+                    let changed = txn.execute(
+                    "UPDATE sources SET name=COALESCE($2,name),updated_at=NOW() WHERE id=$1",
+                    &[&id, &req.name]).await?;
+                    if changed == 0 {
+                        return Err(AppError::NotFound(format!("Source {id} not found")));
+                    }
+                    let row = txn
+                        .query_one(
+                            super::active_metadata::SOURCES_SQL,
+                            &[&manifest, &Some(id), &true],
+                        )
+                        .await?;
+                    Ok(Json(active_source_response(&row)))
+                })
+            })
+            .await;
+    }
     // K3: All DB operations in a single transaction via RlsClient
     state
         .rls_client
@@ -743,6 +820,15 @@ pub async fn admin_delete_source(
     Extension(_claims): Extension<Arc<crate::auth::Claims>>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode> {
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        return Err(AppError::Conflict("source registry changes require a complete storage-v2 activation and retention procedure".into()));
+    }
+
     // K3: All DB deletes in a single atomic transaction via RlsClient
     state
         .rls_client
@@ -1049,7 +1135,9 @@ pub struct SourceStats {
     pub chunks: i64,
     pub symbols: i64,
     pub call_graph: i64,
-    pub qdrant_vectors: i64,
+    pub qdrant_vectors: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_path: Option<&'static str>,
 }
 
 pub async fn admin_source_stats(
@@ -1057,6 +1145,34 @@ pub async fn admin_source_stats(
     Path(id): Path<i64>,
     Extension(_claims): Extension<Arc<crate::auth::Claims>>,
 ) -> Result<Json<SourceStats>> {
+    if let Some(manifest) = state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .clone()
+    {
+        return state
+            .rls_client
+            .with_system(move |txn| {
+                Box::pin(async move {
+                    let row = txn
+                        .query_opt(
+                            super::active_metadata::SOURCES_SQL,
+                            &[&manifest, &Some(id), &true],
+                        )
+                        .await?
+                        .ok_or_else(|| AppError::NotFound(format!("Source {id} not found")))?;
+                    Ok(Json(SourceStats {
+                        chunks: row.get("active_view_count"),
+                        symbols: row.get("active_symbol_count"),
+                        call_graph: row.get("active_call_count"),
+                        qdrant_vectors: None,
+                        read_path: Some("storage_v2_active"),
+                    }))
+                })
+            })
+            .await;
+    }
     // K3: DB queries in a single transaction via RlsClient
     let (chunks, symbols, call_graph) = state.rls_client.with_system(|txn| Box::pin(async move {
         let chunks: i64 = txn
@@ -1099,7 +1215,8 @@ pub async fn admin_source_stats(
         chunks,
         symbols,
         call_graph,
-        qdrant_vectors,
+        qdrant_vectors: Some(qdrant_vectors),
+        read_path: None,
     }))
 }
 
@@ -1116,6 +1233,52 @@ pub async fn admin_system_stats(
     State(state): State<Arc<AppState>>,
     Extension(_claims): Extension<Arc<crate::auth::Claims>>,
 ) -> Result<Json<SystemStats>> {
+    if let Some(manifest) = state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .clone()
+    {
+        return state
+            .rls_client
+            .with_system(move |txn| {
+                Box::pin(async move {
+                    let rows = txn
+                        .query(
+                            super::active_metadata::SOURCES_SQL,
+                            &[&manifest, &None::<i64>, &true],
+                        )
+                        .await?;
+                    let size: String = txn
+                        .query_one(
+                            "SELECT pg_size_pretty(pg_database_size(current_database()))",
+                            &[],
+                        )
+                        .await?
+                        .get(0);
+                    Ok(Json(SystemStats {
+                        sources: rows
+                            .len()
+                            .try_into()
+                            .map_err(|_| AppError::Internal("source count overflow".into()))?,
+                        files: rows
+                            .iter()
+                            .map(|row| row.get::<_, i64>("active_file_count"))
+                            .sum(),
+                        chunks: rows
+                            .iter()
+                            .map(|row| row.get::<_, i64>("active_view_count"))
+                            .sum(),
+                        total_size_bytes: rows
+                            .iter()
+                            .map(|row| row.get::<_, i64>("active_total_size"))
+                            .sum(),
+                        postgres_size: size,
+                    }))
+                })
+            })
+            .await;
+    }
     // K3: System stats in a single transaction via RlsClient
     state
         .rls_client
@@ -1307,6 +1470,17 @@ pub async fn admin_backfill_orphaned(
     State(state): State<Arc<AppState>>,
     Extension(_claims): Extension<Arc<crate::auth::Claims>>,
 ) -> Result<Json<BackfillResult>> {
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        return Err(AppError::Conflict(
+            "legacy backfill is retired under the active storage-v2 runtime".into(),
+        ));
+    }
+
     use pgvector::Vector;
 
     if state.config.server.cpu_mode {
@@ -1535,6 +1709,17 @@ pub async fn admin_backfill_intelligence(
     Extension(_claims): Extension<Arc<crate::auth::Claims>>,
     JsonBody(req): JsonBody<IntelligenceBackfillRequest>,
 ) -> Result<Json<IntelligenceBackfillResult>> {
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        return Err(AppError::Conflict(
+            "legacy backfill is retired under the active storage-v2 runtime".into(),
+        ));
+    }
+
     let limit = req.limit.unwrap_or(100).clamp(1, 1000);
     let force = req.force;
     let source_id = req.source_id;
@@ -1652,6 +1837,17 @@ pub async fn admin_backfill_qdrant_user_ids(
     State(state): State<Arc<AppState>>,
     Extension(_claims): Extension<Arc<crate::auth::Claims>>,
 ) -> Result<Json<BackfillResult>> {
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        return Err(AppError::Conflict(
+            "legacy backfill is retired under the active storage-v2 runtime".into(),
+        ));
+    }
+
     if state.config.server.cpu_mode {
         return Err(AppError::BadRequest(
             "Qdrant user-id backfill requires Qdrant and is unavailable in CPU mode; start full mode with mainrag --gpu, then retry".to_string(),

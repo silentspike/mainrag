@@ -284,7 +284,7 @@ fn storage_v2_selector(read_path: Option<&str>, active_default_configured: bool)
     match read_path {
         Some("storage_v2") => Some(false),
         Some("storage_v2_active") => Some(true),
-        None if active_default_configured => Some(true),
+        None | Some("current") if active_default_configured => Some(true),
         _ => None,
     }
 }
@@ -641,10 +641,11 @@ mod active_read_selector_tests {
     use super::storage_v2_selector;
 
     #[test]
-    fn default_switch_requires_configuration_and_explicit_current_stays_legacy() {
+    fn current_selector_follows_the_atomic_default_switch() {
         assert_eq!(storage_v2_selector(None, false), None);
         assert_eq!(storage_v2_selector(None, true), Some(true));
-        assert_eq!(storage_v2_selector(Some("current"), true), None);
+        assert_eq!(storage_v2_selector(Some("current"), true), Some(true));
+        assert_eq!(storage_v2_selector(Some("current"), false), None);
         assert_eq!(storage_v2_selector(Some("storage_v2"), true), Some(false));
         assert_eq!(
             storage_v2_selector(Some("storage_v2_active"), false),

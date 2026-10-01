@@ -243,7 +243,12 @@ async fn delete_source(
     };
 
     // Get detailed stats via stats endpoint if available
-    let stats = client.get_source_deletion_stats(name).await.ok();
+    let stats = client.get_source_deletion_stats(name).await?;
+    if stats.read_path.as_deref() == Some("storage_v2_active") {
+        return Err(anyhow::anyhow!(
+            "Source belongs to the retained storage-v2 set; deletion requires its activation and retention procedure"
+        ));
+    }
 
     if !force && !json_output {
         println!();
@@ -256,11 +261,14 @@ async fn delete_source(
             format_size(total_size as u64, BINARY)
         );
 
-        if let Some(ref s) = stats {
+        {
+            let s = &stats;
             println!("  {} {}", "Chunks:".dimmed(), s.chunks);
             println!("  {} {}", "Symbols:".dimmed(), s.symbols);
             println!("  {} {}", "Call Graph:".dimmed(), s.call_graph);
-            println!("  {} {}", "Qdrant Vectors:".dimmed(), s.qdrant_vectors);
+            if let Some(count) = s.qdrant_vectors {
+                println!("  {} {}", "Qdrant Vectors:".dimmed(), count);
+            }
         }
 
         println!();

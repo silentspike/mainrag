@@ -18,6 +18,7 @@ pub struct FilesystemScopeProof {
 pub struct FilesystemScope {
     matcher: Option<GlobSet>,
     pub cut_consistency: bool,
+    pub conversation_nul_projection: bool,
     #[cfg_attr(not(feature = "storage-v2-retrieval"), allow(dead_code))]
     pub proof: Option<FilesystemScopeProof>,
 }
@@ -41,10 +42,19 @@ impl FilesystemScope {
             Some(Value::String(kind)) if kind == super::fs_cut::KIND => true,
             Some(_) => bail!("unsupported filesystem consistency contract"),
         };
+        let conversation_nul_projection = match config.get("conversation_text_projection") {
+            None => false,
+            Some(Value::String(kind)) if kind == "utf8-nul-space-v1" => true,
+            Some(_) => bail!("unsupported conversation text projection"),
+        };
+        if conversation_nul_projection && !cut_consistency {
+            bail!("conversation text projection requires an immutable filesystem cut");
+        }
         let Some(patterns) = config.get("file_patterns") else {
             return Ok(Self {
                 matcher: None,
                 cut_consistency,
+                conversation_nul_projection,
                 proof: None,
             });
         };
@@ -86,6 +96,7 @@ impl FilesystemScope {
         Ok(Self {
             matcher: Some(builder.build()?),
             cut_consistency,
+            conversation_nul_projection,
             proof: Some(FilesystemScopeProof {
                 format: "mainrag.fs-scope.v1".to_string(),
                 patterns: values,
@@ -159,10 +170,14 @@ impl FilesystemScope {
     #[cfg_attr(not(feature = "storage-v2-retrieval"), allow(dead_code))]
     pub fn release_profile(&self) -> String {
         if self.cut_consistency {
-            return format!(
+            let mut profile = format!(
                 "mainrag.fs-release-candidate.v4.btrfs-cut-v1.scope-{}.fragment-1048576-newline-65536",
                 self.proof.as_ref().map(|proof| proof.sha256.as_str()).unwrap_or("unfiltered")
             );
+            if self.conversation_nul_projection {
+                profile.push_str(".text-utf8-nul-space-v1");
+            }
+            return profile;
         }
         match &self.proof {
             None => "mainrag.fs-release-candidate.v2.fragment-1048576-newline-65536".to_string(),
@@ -178,6 +193,32 @@ impl FilesystemScope {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn conversation_projection_is_explicit_and_keeps_the_original_selection() {
+        let original =
+            FilesystemScope::from_config(&json!({"filesystem_consistency":"btrfs-cut-v1",
+            "file_patterns":["*.jsonl"]}))
+            .unwrap();
+        let projected =
+            FilesystemScope::from_config(&json!({"filesystem_consistency":"btrfs-cut-v1",
+            "file_patterns":["*.jsonl"],"conversation_text_projection":"utf8-nul-space-v1"}))
+            .unwrap();
+        assert_eq!(original.proof, projected.proof);
+        assert_eq!(
+            projected.release_profile(),
+            original.release_profile() + ".text-utf8-nul-space-v1"
+        );
+        assert!(FilesystemScope::from_config(
+            &json!({"conversation_text_projection":"utf8-nul-space-v1"})
+        )
+        .is_err());
+        assert!(
+            FilesystemScope::from_config(&json!({"filesystem_consistency":"btrfs-cut-v1",
+            "conversation_text_projection":"unknown"}))
+            .is_err()
+        );
+    }
 
     #[test]
     fn explicit_cut_profile_retains_the_registered_filter_and_rejects_unknown_kinds() {

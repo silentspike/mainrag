@@ -1,6 +1,6 @@
 //! K3-FIX1: HealthPool Newtype — restricted pool access for health checks only.
 //!
-//! Wraps the database pool and exposes ONLY health_check() + pool_status().
+//! Exposes fixed connectivity/active-set checks and pool status only.
 //! Handlers use this for non-RLS health monitoring instead of the raw pool.
 
 use deadpool_postgres::Pool;
@@ -10,8 +10,8 @@ use crate::error::Result;
 /// Restricted pool wrapper for health checks and monitoring only.
 ///
 /// Unlike RlsClient (which provides transaction-scoped RLS access),
-/// HealthPool only allows connectivity checks and pool status queries.
-/// No data queries are possible through this type.
+/// HealthPool only allows fixed health checks and pool status queries.
+/// Arbitrary data queries are not exposed through this type.
 pub struct HealthPool {
     pool: Pool,
 }
@@ -27,6 +27,18 @@ impl HealthPool {
         let client = self.pool.get().await?;
         let row = client.query_one("SELECT 1 as test", &[]).await?;
         let _: i32 = row.get("test");
+        Ok(())
+    }
+
+    /// Check the configured active-set receipt without exposing source data.
+    pub async fn active_set_health_check(&self, manifest_sha256: &str) -> Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .query_one(
+                "SELECT storage_v2_require_complete_active_set($1)",
+                &[&manifest_sha256],
+            )
+            .await?;
         Ok(())
     }
 

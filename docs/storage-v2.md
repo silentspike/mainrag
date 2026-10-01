@@ -1007,6 +1007,21 @@ restricted to the owned cut registry. A mutable current descriptor cannot redire
 ongoing read. Nonrecursive snapshots with nested source subvolumes are rejected.
 Nontext conversation files are rejected rather than silently omitted.
 
+An immutable conversation source may explicitly register
+`conversation_text_projection: "utf8-nul-space-v1"`. This keeps the registered
+root, filters, fragmentation and original body bytes. Its adapter profile adds
+`.text-utf8-nul-space-v1`; other source profiles remain unchanged. Valid UTF-8
+JSON/JSONL bodies containing NUL are retained byte exactly, while searchable
+text substitutes one ASCII space per NUL. Byte and character offsets are
+unchanged. Each affected locator records the projection kind, NUL count,
+original body digest and projected text digest. Binary signatures and invalid
+UTF-8 still fail. Other extensions and legacy ingestion retain their previous
+binary policy. Original malformed conversation fragments report unavailable
+parser intelligence explicitly; projected JSON is never treated as repaired
+parser input. Analysis uses a separate projection-bound profile to avoid
+reusing analysis under a different text contract. Config/profile changes require
+the existing reviewed configuration transition and full frozen source proof.
+
 The producer prepares reader permissions only in a root-private unpublished
 snapshot inside a private container. Its closed policy binds the reader identity and exact compiled file
 scope. It grants directory traversal and read access to selected regular files,
@@ -1089,3 +1104,107 @@ set. Legacy incremental filesystem ingest cannot substitute for this contract.
 Cuts, failed capture intents and original descriptors remain owned until their
 explicit manifest cleanup. This feature alone does not establish production
 qualification, activation, recovery or cleanup acceptance.
+
+
+### Active source inspection and runtime retirement
+
+Migration 109 provides source metrics bound to the complete activation receipt.
+File counts group physical witness paths, so fragmenting a large conversation
+file does not inflate its file count. Input byte counts sum visible artifacts;
+view, symbol and resolved/unresolved call counts follow active membership.
+Source list/detail, administrative statistics and MCP source inspection use
+these metrics after the default switch. They do not use legacy cached counters
+or require the former files/chunks/symbols/call_graph table names.
+Administrative `chunks` counts represent visible retrieval views under this
+read path. The source statistics identify the active path and return a null
+legacy Qdrant vector count, rather than presenting an unused backend as zero.
+
+An explicit `current` search selector follows the configured active default.
+MCP code search uses the same checked active API retrieval handler. MCP card,
+layers, explain and ownership requests use the source-authorized active
+intelligence commands and return their source-bound envelope. An unknown or
+inaccessible requested source fails; it never becomes an unrestricted search.
+Semantic-only MCP search requires an accepted storage-v2 semantic profile.
+
+Migration 110 applies card/layer limits inside the source SQL query before JSON
+aggregation. Active requests share one result budget across authorized sources
+in source-ID order; exhausted sources keep an empty envelope without reading
+another card collection. Stable symbol/profile/item/occurrence ordering makes
+bounded prefixes deterministic. MCP defaults are 10 cards and 20 layer results;
+layer limits are 1–100, card limits are 1–200. Active HTTP requests default to 100
+and accept 1–200. Named-generation commands with no limit and intelligence
+exports retain their full collections. An explicit `current` intelligence
+selector follows the configured active default. A null optional MCP source is
+equivalent to omission; invalid or inaccessible explicit sources do not broaden
+the search.
+
+Migration 111 extends the checked commands with bounded `symbols`, `callers`,
+and `callees` reads. MCP symbol search and caller/callee inspection use the actor
+RLS context and one shared result budget. HTTP symbol search uses the same
+active adapter. Call results retain call-site evidence, candidate keys and an
+explicit `proven` flag; unresolved names are not promoted to resolved edges.
+Active symbol IDs are negative occurrence IDs and active file IDs are negative
+source-item IDs, disjoint from positive legacy IDs. Results also expose stable
+source-bound symbol keys and generation sequences. These IDs do not establish
+legacy symbol-ID compatibility.
+
+Migration 112 resolves active graph and file IDs against the complete receipt,
+source authorization and visible membership in one database snapshot. HTTP and
+MCP callgraphs retain resolved/unresolved call evidence and expose conservative
+completeness flags. File-symbol and card inspection use the same native IDs.
+Migration 113 provides bounded incoming/outgoing ownership with one shared
+active request budget, actual relation evidence and nullable confidence. These
+source-level intelligence relations explicitly identify their metadata scope.
+
+Migration 114 traverses resolved stable identities across multiple call levels,
+in either direction, within a single generation-bound snapshot. Each path has
+its own visited identities; cycles terminate that path without suppressing
+independent branches. Unresolved calls remain terminal evidence even when a
+same-named symbol exists. A resolved target without a visible occurrence is
+reported without reading an unsealed artifact. Requested depth is 1–10 and the
+request-wide fact/work budget is 1–200, default 100. Roots are additionally
+bounded to ten per source. SQL applies bounds before aggregation, and exhausted
+sources are not traversed. Limits mark completeness conservatively and remain
+visible as path termination reasons; reaching a limit never claims a complete
+graph. Annotations retain provenance and distinguish unknown confidence from
+numeric confidence. HTTP call-chain/path inspection, MCP path explanation and
+CLI active/named explanation forward the requested depth. Code snippets are
+returned when stored in call-site evidence; absent snippets remain unknown.
+
+Migration 115 provides native HTTP and MCP dead-end notes with authenticated
+ownership for global notes and source read/write ACLs for source notes. A
+`created_by` display label never grants ownership. Existing source evidence
+remains readable with explicit symbol-key provenance. New note IDs use an
+odd-negative namespace; source evidence uses even-negative IDs; imported legacy
+notes preserve their positive IDs. Administrative import accepts digest-bound,
+bounded batches, rejects conflicting identities atomically, and preserves the
+entire original record, including unknown fields and nulls. Historical global
+notes without provable ownership remain protected for administrators. Full
+protected exports are independent of interactive search limits. Installation
+does not import, delete, or certify production retention by itself.
+
+Migration 116 orchestrates native Explore in one statement snapshot with bounded
+domain expansions, shared card and traversal budgets, exact occurrence roots,
+source-scoped dead-end demotion, and visible completeness flags. Stable symbol
+keys are not mistaken for display names. Independent call branches remain in
+the output; unknown classification confidence is reported as unknown. HTTP,
+CLI and MCP results carry the active manifest and read provenance. Formatted
+output retains warnings, termination reasons, and partial-result status.
+
+Active startup skips legacy vector collection creation, TEI/reranker probes,
+query expansion, and outbox processing/purge. It preserves legacy data for the
+accepted activation boundary. Legacy backfills are rejected under the active
+runtime. Registry additions and deletion of retained sources require a complete
+activation/retention procedure; an ordinary administrative rename remains
+available and returns active metrics.
+
+Active health checks use PostgreSQL connectivity and the exact complete-set
+receipt; pointer or source-inventory drift degrades health. They do not probe
+retired Qdrant/TEI services. Health identifies the active read path separately
+from CPU/full process mode, and CLI health renders these backends as disabled.
+Active model information returns null for unused legacy embedding/reranker
+metadata instead of reporting configured values as serving models.
+
+These routes are part of runtime retirement. They do not establish that every
+other intelligence/MCP route is retired, authorize deletion, or demonstrate
+production activation, normal ingest, latency, or physical space reclamation.

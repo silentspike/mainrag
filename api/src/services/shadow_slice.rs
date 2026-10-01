@@ -525,7 +525,14 @@ where
         status,
         source_watermark_sha256: identity.get("semantic_manifest_sha256"),
         adapter_profile_id: identity.get("adapter_profile_id"),
-        analysis_profile_id: GENERIC_ANALYSIS_PROFILE.to_string(),
+        analysis_profile_id: if identity
+            .get::<_, String>("adapter_profile_id")
+            .ends_with(plugins::conversation_text::PROFILE_SUFFIX)
+        {
+            plugins::conversation_text::ANALYSIS_PROFILE.to_string()
+        } else {
+            GENERIC_ANALYSIS_PROFILE.to_string()
+        },
         search_profile_id: RELEASE_SEARCH_PROFILE.to_string(),
         generation_root_sha256: expected_root,
         verification_manifest_sha256: identity.get("verification_manifest_sha256"),
@@ -1053,6 +1060,14 @@ where
         SliceMode::ReleaseCandidate => {
             configured_release_adapter_profile(source_type, &source_config)?
         }
+    };
+    let conversation_projection = source_type == "fs"
+        && plugins::fs_scope::FilesystemScope::from_config(&source_config)?
+            .conversation_nul_projection;
+    let analysis_profile = if conversation_projection {
+        plugins::conversation_text::ANALYSIS_PROFILE
+    } else {
+        GENERIC_ANALYSIS_PROFILE
     };
     let predecessor = client
         .query_opt(
@@ -1663,7 +1678,7 @@ where
                    FROM storage_v2_analysis_cache \
                   WHERE content_identity_sha256=ANY($1) \
                     AND analysis_profile_id=$2 AND status='complete'",
-                &[&analysis_digests, &GENERIC_ANALYSIS_PROFILE],
+                &[&analysis_digests, &analysis_profile],
             )
             .await?
             .into_iter()
@@ -1689,8 +1704,12 @@ where
             let item_key = &file.item_key;
             let language = &file.language;
             let bytes = file.load_verified_bytes().await?;
-            let text = std::str::from_utf8(bytes.as_ref())
-                .context("fixture adapter produced non-UTF-8 text")?;
+            let projected = plugins::conversation_text::project(
+                bytes.as_ref(),
+                Path::new(path),
+                conversation_projection,
+            )?;
+            let text = projected.text.as_ref();
             let analysis_started = Instant::now();
             let content_digest = body.digest.as_slice();
             let cached_analysis = cached_analyses.get(content_digest).cloned();
@@ -1698,17 +1717,13 @@ where
                 measurements.reused_analysis = measurements.reused_analysis.saturating_add(1);
                 (analysis_cache::decode(result, content_digest)?, 0_i16)
             } else {
-                generation_ingest::begin_analysis_attempt(
-                    client,
-                    content_digest,
-                    GENERIC_ANALYSIS_PROFILE,
-                )
-                .await?;
+                generation_ingest::begin_analysis_attempt(client, content_digest, analysis_profile)
+                    .await?;
                 if mode == SliceMode::PublicFixture && !controlled_retry_done {
                     generation_ingest::finish_analysis_attempt(
                         client,
                         content_digest,
-                        GENERIC_ANALYSIS_PROFILE,
+                        analysis_profile,
                         None,
                         Some("controlled_fixture_retry"),
                     )
@@ -1716,14 +1731,20 @@ where
                     generation_ingest::begin_analysis_attempt(
                         client,
                         content_digest,
-                        GENERIC_ANALYSIS_PROFILE,
+                        analysis_profile,
                     )
                     .await?;
                     controlled_retry_count += 1;
                     measurements.analysis_retries = measurements.analysis_retries.saturating_add(1);
                     controlled_retry_done = true;
                 }
-                let parsed = parser.parse_file_if_available(Path::new(path), text)?;
+                // A projected malformed conversation is still fully retained and
+                // searchable. Do not manufacture intelligence from repaired JSON.
+                let parsed = if projected.nul_count > 0 {
+                    None
+                } else {
+                    parser.parse_file_if_available(Path::new(path), text)?
+                };
                 let parser_available = parsed.is_some();
                 let parsed = parsed.unwrap_or_default();
                 let mut analysis_result = analysis_cache::encode(&parsed, content_digest)?;
@@ -1738,7 +1759,8 @@ where
                             "parser_availability".into(),
                             json!({
                                 "status": "unavailable",
-                                "reason": "no_registered_parser",
+                                "reason": if projected.nul_count > 0 { "original_conversation_contains_nul" }
+                                    else { "no_registered_parser" },
                                 "recognized_language": crate::services::parser::Lang::from_path(Path::new(path)).to_string(),
                             }),
                         );
@@ -1746,7 +1768,7 @@ where
                 generation_ingest::finish_analysis_attempt(
                     client,
                     content_digest,
-                    GENERIC_ANALYSIS_PROFILE,
+                    analysis_profile,
                     Some(&analysis_result),
                     None,
                 )
@@ -1757,12 +1779,15 @@ where
                     .saturating_add(u64::from(parser_available));
                 (parsed, i16::from(parser_available))
             };
-            let cards = generic_structural_cards(item_key, &parsed)?;
+            let mut cards = generic_structural_cards(item_key, &parsed)?;
+            for card in &mut cards {
+                card.analysis_profile_id = analysis_profile.to_string();
+            }
             measurements.record_stage(ShadowIngestStage::Analysis, analysis_started.elapsed());
 
             let database_started = Instant::now();
             let fragmented = file.source_range.is_some();
-            let locator = json!({
+            let mut locator = json!({
                 "byte_start": file.byte_start(),
                 "byte_end": file.byte_end(),
                 "line_start": (!fragmented).then_some(1),
@@ -1772,6 +1797,15 @@ where
                 "level": 0,
                 "fragmented": fragmented,
             });
+            if projected.nul_count > 0 {
+                locator["text_projection"] = json!({
+                    "kind": plugins::conversation_text::KIND,
+                    "nul_count": projected.nul_count,
+                    "original_body_sha256": hex::encode(&body.digest),
+                    "projected_text_sha256": hex::encode(Sha256::digest(text.as_bytes())),
+                    "preserves_byte_and_character_offsets": true,
+                });
+            }
             let item_witness = json!({
                 "path": path,
                 "byte_start": file.byte_start(),
@@ -1804,7 +1838,7 @@ where
                     expected_content_hash: &expected_content_hash,
                     byte_length: body.logical_length,
                     content_identity_sha256: content_digest,
-                    analysis_profile_id: GENERIC_ANALYSIS_PROFILE,
+                    analysis_profile_id: analysis_profile,
                     source_path: path,
                     locator: &locator,
                     parser_pass_count,

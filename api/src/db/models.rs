@@ -362,6 +362,10 @@ pub struct DelegationStep {
     pub code_snippet: Option<String>,
     #[serde(default)]
     pub step_annotations: Vec<AnnotationInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_evidence: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations_complete: Option<bool>,
 }
 
 /// Complete delegation chain from entry point through proxy/dispatch to mutation.
@@ -371,6 +375,16 @@ pub struct DelegationChain {
     pub steps: Vec<DelegationStep>,
     #[serde(default)]
     pub annotations: Vec<AnnotationInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub termination: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_evidence: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complete: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations_complete: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_provenance: Option<serde_json::Value>,
 }
 
 /// Code-level annotation extracted from source (thread requirements, dispatch patterns, etc.)
@@ -378,7 +392,9 @@ pub struct DelegationChain {
 pub struct AnnotationInfo {
     pub annotation_type: String,
     pub value: String,
-    pub confidence: f32,
+    pub confidence: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<serde_json::Value>,
 }
 
 /// Ownership/containment relationship between symbols.
@@ -390,7 +406,7 @@ pub struct OwnershipInfo {
     pub target_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_file: Option<String>,
-    pub confidence: f32,
+    pub confidence: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence_line: Option<i32>,
 }
@@ -409,6 +425,8 @@ pub struct ExploreResponse {
     pub suggested_next: Vec<SuggestedQuery>,
     /// Structured text summary for direct LLM consumption
     pub formatted: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_provenance: Option<serde_json::Value>,
 }
 
 /// A candidate delegation path with explanation
@@ -445,4 +463,6 @@ pub struct NegativeEvidence {
     pub created_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_provenance: Option<serde_json::Value>,
 }

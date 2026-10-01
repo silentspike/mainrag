@@ -109,6 +109,37 @@ pub async fn list_sources(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Arc<crate::auth::Claims>>,
 ) -> Result<Json<SourcesResponse>> {
+    if let Some(manifest) = state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .clone()
+    {
+        let user_id = Uuid::parse_str(&claims.sub)
+            .map_err(|_| AppError::Unauthorized("invalid user id".into()))?;
+        return state
+            .rls_client
+            .with_rls(user_id, claims.is_admin, move |txn| {
+                Box::pin(async move {
+                    let rows = txn
+                        .query(
+                            super::active_metadata::SOURCES_SQL,
+                            &[&manifest, &None::<i64>, &false],
+                        )
+                        .await?;
+                    let sources = rows
+                        .iter()
+                        .map(super::active_metadata::source)
+                        .collect::<Result<Vec<_>>>()?;
+                    Ok(Json(SourcesResponse {
+                        total: sources.len(),
+                        sources,
+                    }))
+                })
+            })
+            .await;
+    }
+
     let user_id = Uuid::from_str(&claims.sub)
         .map_err(|_| AppError::Auth("Invalid user ID in claims".into()))?;
 
@@ -156,6 +187,31 @@ pub async fn get_source(
     Path(id): Path<i64>,
     Extension(claims): Extension<Arc<crate::auth::Claims>>,
 ) -> Result<Json<Source>> {
+    if let Some(manifest) = state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .clone()
+    {
+        let user_id = Uuid::parse_str(&claims.sub)
+            .map_err(|_| AppError::Unauthorized("invalid user id".into()))?;
+        return state
+            .rls_client
+            .with_rls(user_id, claims.is_admin, move |txn| {
+                Box::pin(async move {
+                    let row = txn
+                        .query_opt(
+                            super::active_metadata::SOURCES_SQL,
+                            &[&manifest, &Some(id), &false],
+                        )
+                        .await?
+                        .ok_or_else(|| AppError::NotFound(format!("Source {id} not found")))?;
+                    Ok(Json(super::active_metadata::source(&row)?))
+                })
+            })
+            .await;
+    }
+
     let user_id = Uuid::from_str(&claims.sub)
         .map_err(|_| AppError::Auth("Invalid user ID in claims".into()))?;
 
