@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -1128,6 +1129,93 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
             "additional_path_classes": classes}
 
 
+def intelligence_layers_summary(response: Any, *, chunk_bytes: int = 65536,
+                                maximum_item_chars: int = 16 * 1024**2) -> tuple[str, str]:
+    """Hash the complete layers array with the existing canonical JSON grammar.
+
+    Retain one decoded symbol at a time. The response must be a complete array
+    of objects, including its closing delimiter and whitespace-only suffix.
+    """
+    decoder = json.JSONDecoder()
+    utf8 = codecs.getincrementaldecoder("utf-8")()
+    buffer = ""
+    eof = False
+
+    def more() -> None:
+        nonlocal buffer, eof
+        raw = response.read(chunk_bytes)
+        eof = not raw
+        buffer += utf8.decode(raw, final=eof)
+        if len(buffer) > maximum_item_chars + chunk_bytes:
+            raise RuntimeError("candidate intelligence symbol exceeds the streaming bound")
+
+    def token() -> str:
+        nonlocal buffer
+        buffer = buffer.lstrip()
+        while not buffer and not eof:
+            more()
+            buffer = buffer.lstrip()
+        return buffer[:1]
+
+    if token() != "[":
+        raise RuntimeError("candidate intelligence layers is not an array")
+    buffer = buffer[1:]
+    digest = hashlib.sha256(b"[")
+    name = None
+    count = 0
+    while token() != "]":
+        if token() != "{":
+            raise RuntimeError("candidate intelligence layers contains an invalid symbol")
+        while True:
+            try:
+                item, end = decoder.raw_decode(buffer)
+                break
+            except json.JSONDecodeError as error:
+                if eof:
+                    raise RuntimeError("candidate intelligence layers is incomplete") from error
+                more()
+        if end > maximum_item_chars:
+            raise RuntimeError("candidate intelligence symbol exceeds the streaming bound")
+        buffer = buffer[end:]
+        if count == 0:
+            generic = item.get("generic_card", {})
+            name = generic.get("name") or item.get("qualified_name")
+            del generic
+        else:
+            digest.update(b", ")
+        digest.update(json.dumps(item, sort_keys=True).encode())
+        count += 1
+        # Release the decoded object before reading the next symbol.
+        del item
+        separator = token()
+        if separator == "]":
+            break
+        if separator != ",":
+            raise RuntimeError("candidate intelligence layers has an invalid delimiter")
+        buffer = buffer[1:]
+        if token() != "{":
+            raise RuntimeError("candidate intelligence layers has an invalid next symbol")
+    buffer = buffer[1:]
+    if token():
+        raise RuntimeError("candidate intelligence layers has trailing data")
+    if not count:
+        raise RuntimeError("candidate intelligence layers returned no applicable symbol")
+    if not name:
+        raise RuntimeError("candidate intelligence symbol omitted its name")
+    digest.update(b"]")
+    return name, digest.hexdigest()
+
+
+def request_intelligence_layers(api_url: str, token: str, path: str) -> tuple[str, str]:
+    call = urllib.request.Request(api_url.rstrip("/") + path,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(call, timeout=24 * 3600) as response:
+            return intelligence_layers_summary(response)
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f"API request failed with HTTP {error.code}") from error
+
+
 def verify_intelligence(api_url: str, token: str, source_id: int, generation: int,
                         export: dict[str, Any], progress: dict[str, Any] | None = None) -> dict[str, Any]:
     hashes: dict[str, str] = {}
@@ -1139,14 +1227,8 @@ def verify_intelligence(api_url: str, token: str, source_id: int, generation: in
         return {"applicability": "unknown_not_applicable", "commands": []}
     common = {"source_id": source_id, "generation": generation, "include_test": "true"}
     layers_query = urllib.parse.urlencode({**common, "command": "layers"})
-    layers = request(api_url, token, "GET", f"/api/v1/intelligence/shadow?{layers_query}")
-    if not isinstance(layers, list) or not layers:
-        raise RuntimeError("candidate intelligence layers returned no applicable symbol")
-    generic = layers[0].get("generic_card", {})
-    name = generic.get("name") or layers[0].get("qualified_name")
-    if not name:
-        raise RuntimeError("candidate intelligence symbol omitted its name")
-    hashes["layers"] = sha256_text(json.dumps(layers, sort_keys=True))
+    name, hashes["layers"] = request_intelligence_layers(
+        api_url, token, f"/api/v1/intelligence/shadow?{layers_query}")
     for command in ("card", "explain", "ownership"):
         if progress is not None:
             progress["phase"] = "intelligence_" + command
