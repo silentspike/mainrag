@@ -8,6 +8,7 @@ import io
 import json
 import stat
 import tempfile
+import tracemalloc
 import unittest
 import urllib.error
 import uuid
@@ -945,7 +946,9 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
         layers = [{"generic_card": {"name": "private-symbol"}}]
         card = {"private": "card-content"}
         progress = {}
-        with patch.object(MODULE, "request", side_effect=[layers, card, TimeoutError("private-token")]):
+        with patch.object(MODULE, "request_intelligence_layers", return_value=(
+                "private-symbol", MODULE.sha256_text(json.dumps(layers, sort_keys=True)))), \
+             patch.object(MODULE, "request", side_effect=[card, TimeoutError("private-token")]):
             with self.assertRaises(TimeoutError):
                 MODULE.verify_intelligence("http://fixture.invalid", "private-token", 1, 1,
                                            {"payload": {"record_counts": {"cards": 1}}}, progress)
@@ -956,6 +959,56 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
         })
         for private in ("private-token", "private-symbol", "card-content"):
             self.assertNotIn(private, json.dumps(progress))
+
+    def test_streaming_layers_preserves_complete_canonical_hash_at_byte_boundaries(self) -> None:
+        layers = [{"generic_card": {"name": "fixture-Ä"}, "nested": [1, None, True],
+                   "text": 'quoted " brace } comma , slash \\ 日本語'},
+                  {"qualified_name": "second", "text": "another symbol"}]
+        expected = MODULE.sha256_text(json.dumps(layers, sort_keys=True))
+        body = (" \n" + json.dumps(layers, ensure_ascii=False) + "\r\n ").encode()
+        for size in (1, 2, 7, 65536):
+            with self.subTest(chunk_bytes=size):
+                self.assertEqual(MODULE.intelligence_layers_summary(
+                    io.BytesIO(body), chunk_bytes=size), ("fixture-Ä", expected))
+        self.assertEqual(MODULE.intelligence_layers_summary(io.BytesIO(
+            b'[{"qualified_name":"fallback"}]'))[0], "fallback")
+
+    def test_streaming_layers_rejects_incomplete_or_invalid_array_before_acceptance(self) -> None:
+        for body in (b'', b'{}', b'[]', b'[{"qualified_name":"x"}',
+                     b'[{"qualified_name":"x"},]', b'[{"qualified_name":"x"}]false',
+                     b'[{"qualified_name":"x"} {"qualified_name":"y"}]',
+                     b'[null]', b'[{}]'):
+            with self.subTest(body=body):
+                with self.assertRaises(RuntimeError):
+                    MODULE.intelligence_layers_summary(io.BytesIO(body), chunk_bytes=2)
+        with self.assertRaises(UnicodeDecodeError):
+            MODULE.intelligence_layers_summary(io.BytesIO(b'[{"qualified_name":"\xff"}]'))
+        with self.assertRaisesRegex(RuntimeError, "streaming bound"):
+            MODULE.intelligence_layers_summary(io.BytesIO(json.dumps([
+                {"qualified_name": "x", "text": "y" * 200}]).encode()),
+                chunk_bytes=16, maximum_item_chars=64)
+
+    def test_streaming_layers_memory_does_not_retain_the_complete_response(self) -> None:
+        layers = [{"generic_card": {"name": "fixture"}, "text": "x" * 256}] * 12000
+        body = json.dumps(layers).encode()
+        expected = MODULE.sha256_text(json.dumps(layers, sort_keys=True))
+        stream = io.BytesIO(body)
+        tracemalloc.start()
+        try:
+            self.assertEqual(MODULE.intelligence_layers_summary(stream), ("fixture", expected))
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertGreater(len(body), 3 * 1024**2)
+        self.assertLess(peak, 1024**2, "complete layers response was retained")
+
+    def test_streaming_layers_http_errors_keep_protected_body_out_of_status(self) -> None:
+        error = urllib.error.HTTPError("http://fixture.invalid", 503, "unavailable", {},
+                                       io.BytesIO(b'private-error-content'))
+        with patch.object(MODULE.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaisesRegex(RuntimeError, "API request failed with HTTP 503") as raised:
+                MODULE.request_intelligence_layers("http://fixture.invalid", "private-token", "/layers")
+        self.assertNotIn("private", str(raised.exception))
 
     def test_additional_coverage_requires_identity_bound_body_and_term_proof(self) -> None:
         seed, current, storage, evidence, checkpoint = self.coverage_fixture()
