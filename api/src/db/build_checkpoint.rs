@@ -45,6 +45,12 @@ impl BuildCheckpointSession {
             allowed,
             "checkpointed source build requires administrator source access"
         );
+        // GIN pending-list maintenance measured longer than the ordinary
+        // reader deadline. Keep writes bounded in this detached connection;
+        // it is destroyed on drop and never returns its settings to the pool.
+        connection
+            .batch_execute("SET LOCAL statement_timeout='120s'")
+            .await?;
         let acquired: bool = connection
             .query_one(
                 "SELECT pg_try_advisory_lock(hashtextextended( \
@@ -146,7 +152,9 @@ impl BuildCheckpointSession {
         {
             anyhow::bail!("controlled interruption after durable checkpoint");
         }
-        self.connection.batch_execute("BEGIN").await?;
+        self.connection
+            .batch_execute("BEGIN; SET LOCAL statement_timeout='120s'")
+            .await?;
         self.connection
             .execute(
                 "SELECT set_config('app.user_id',$1,true), \

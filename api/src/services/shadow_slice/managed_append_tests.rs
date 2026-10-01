@@ -237,11 +237,22 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         client.execute("INSERT INTO sources(id,name,type,path,is_test) VALUES \
             (165,'checkpoint-fixture','fs',$1,TRUE)",
             &[&resume_root.to_str().context("fixture path is not UTF-8")?]).await?;
-        let manager = deadpool_postgres::Manager::new(config.clone(), NoTls);
+        let mut writer_config = config.clone();
+        writer_config.options("-c statement_timeout=30s");
+        let manager = deadpool_postgres::Manager::new(writer_config, NoTls);
         let pool = deadpool_postgres::Pool::builder(manager).max_size(3).build()?;
         let principal = Uuid::parse_str(PRINCIPAL)?;
         let session = crate::db::build_checkpoint::BuildCheckpointSession::open(
             &pool, principal, 165, &packs).await?;
+        ensure!(session.client().query_one("SHOW statement_timeout", &[]).await?
+            .get::<_, String>(0)=="2min", "writer inherited the short reader deadline");
+        session.checkpoint().await?;
+        ensure!(session.client().query_one("SHOW statement_timeout", &[]).await?
+            .get::<_, String>(0)=="2min", "writer deadline was lost at COMMIT");
+        let reader = pool.get().await?;
+        ensure!(reader.query_one("SHOW statement_timeout", &[]).await?
+            .get::<_, String>(0)=="30s", "writer deadline leaked to an ordinary reader");
+        drop(reader);
         session.fail_after_checkpoints(2);
         ensure!(crate::db::build_checkpoint::BuildCheckpointSession::open(
             &pool, principal, 165, &packs).await.is_err(), "concurrent source writer was admitted");
@@ -253,6 +264,10 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         ensure!(interrupted.unwrap_err().to_string().contains("controlled interruption"),
             "fixture did not stop at the durable checkpoint");
         drop(session);
+        let reader = pool.get().await?;
+        ensure!(reader.query_one("SHOW statement_timeout", &[]).await?
+            .get::<_, String>(0)=="30s", "cancelled writer returned a modified connection");
+        drop(reader);
         let saved = client.query_one("SELECT r.id,r.generation_id, \
             (SELECT count(*) FROM storage_v2_ingest_run_item WHERE run_id=r.id) AS items \
             FROM storage_v2_ingest_run r WHERE source_id=165 AND status='building'", &[]).await?;
