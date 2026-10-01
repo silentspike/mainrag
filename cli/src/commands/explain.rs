@@ -19,6 +19,10 @@ pub async fn run(
     }
 
     let active = super::intelligence_active(client, read_path, generation).await?;
+    if depth.is_some_and(|d| !(1..=10).contains(&d)) {
+        anyhow::bail!("depth must be from 1 to 10");
+    }
+    let depth_text = depth.map(|d| d.to_string());
     if let Some(generation) = generation {
         let source = source.ok_or_else(|| anyhow::anyhow!("--generation requires --source"))?;
         let result = client
@@ -27,7 +31,7 @@ pub async fn run(
                 source,
                 generation,
                 include_test,
-                &[("name", Some(symbol))],
+                &[("name", Some(symbol)), ("max_depth", depth_text.as_deref())],
             )
             .await?;
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -35,7 +39,12 @@ pub async fn run(
     }
     if active {
         let result = client
-            .active_intelligence("explain", source, include_test, &[("name", Some(symbol))])
+            .active_intelligence(
+                "explain",
+                source,
+                include_test,
+                &[("name", Some(symbol)), ("max_depth", depth_text.as_deref())],
+            )
             .await?;
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());

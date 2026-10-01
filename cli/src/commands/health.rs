@@ -11,6 +11,7 @@ pub async fn run(client: &ApiClient, json_output: bool) -> anyhow::Result<()> {
             serde_json::to_string_pretty(&json!({
                 "status": health.status,
                 "mode": health.mode,
+                "read_path": health.read_path,
                 "services": {
                     "postgres": health.services.postgres,
                     "qdrant": health.services.qdrant,
@@ -35,9 +36,12 @@ pub async fn run(client: &ApiClient, json_output: bool) -> anyhow::Result<()> {
     println!("  {} {}", "PostgreSQL:".cyan(), pg_status);
 
     let cpu_mode = mode == "cpu";
+    let active = health.read_path.as_deref() == Some("storage_v2_active");
 
     let qdrant_status = if health.services.qdrant {
         "✓ OK".green()
+    } else if active {
+        "off (storage-v2 active)".dimmed()
     } else if cpu_mode {
         "off (cpu mode)".dimmed()
     } else {
@@ -47,6 +51,8 @@ pub async fn run(client: &ApiClient, json_output: bool) -> anyhow::Result<()> {
 
     let tei_status = if health.services.tei {
         "✓ OK".green()
+    } else if active {
+        "off (storage-v2 active)".dimmed()
     } else if cpu_mode {
         "off (cpu mode)".dimmed()
     } else {
@@ -57,7 +63,9 @@ pub async fn run(client: &ApiClient, json_output: bool) -> anyhow::Result<()> {
     println!();
 
     let healthy = health.status == "healthy";
-    if healthy && cpu_mode {
+    if healthy && active {
+        println!("{}", "Status: Healthy (Storage-v2 active)".green());
+    } else if healthy && cpu_mode {
         println!("{}", "Status: Healthy (CPU mode)".green());
     } else if healthy {
         println!("{}", "Status: All services operational ✓".green());
