@@ -447,8 +447,11 @@ jobs:
               'eval.storage_v2.schema.test_scoped_rank_explanations.ScopedRankExplanationTests',
               'eval.storage_v2.schema.test_managed_frontier_lock.ManagedFrontierLockTests',
               'eval.storage_v2.schema.test_active_set_search.ActiveSetSearchTests',
+              'eval.storage_v2.schema.test_posting_hash_correlation.PostingHashCorrelationTests',
+              'eval.storage_v2.schema.test_active_source_metrics.ActiveSourceMetricsTests',
+              'eval.storage_v2.schema.test_active_explore.ActiveExploreTests',
           ])
-          assert suite.countTestCases() >= 32, 'Expected search, pack reader-fence, append frontier and lexical window regressions'
+          assert suite.countTestCases() >= 35, 'Expected search, pack reader-fence, append, native intelligence and lexical window regressions'
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           raise SystemExit(0 if result.wasSuccessful() and not result.skipped else 1)
           PY

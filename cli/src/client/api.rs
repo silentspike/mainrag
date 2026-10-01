@@ -156,6 +156,8 @@ pub struct HealthResponse {
     pub status: String,
     #[serde(default)]
     pub mode: Option<String>,
+    #[serde(default)]
+    pub read_path: Option<String>,
     pub services: HealthServices,
 }
 
@@ -1503,6 +1505,10 @@ pub struct DelegationStep {
     pub code_snippet: Option<String>,
     #[serde(default)]
     pub step_annotations: Vec<AnnotationInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_evidence: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations_complete: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1511,13 +1517,25 @@ pub struct DelegationChain {
     pub steps: Vec<DelegationStep>,
     #[serde(default)]
     pub annotations: Vec<AnnotationInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub termination: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_evidence: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complete: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations_complete: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_provenance: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AnnotationInfo {
     pub annotation_type: String,
     pub value: String,
-    pub confidence: f32,
+    pub confidence: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1534,6 +1552,8 @@ pub struct ExploreResponse {
     #[serde(default)]
     pub suggested_next: Vec<SuggestedQuery>,
     pub formatted: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_provenance: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1565,6 +1585,8 @@ pub struct NegativeEvidence {
     pub severity: String,
     pub created_by: Option<String>,
     pub domain_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_provenance: Option<serde_json::Value>,
 }
 
 #[cfg(test)]

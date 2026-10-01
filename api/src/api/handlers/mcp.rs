@@ -137,7 +137,8 @@ pub async fn list_mcp_tools(
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "Symbol name to look up" },
-                    "source": { "type": "string", "description": "Optional source name filter (e.g. 'internal-java-corpus')" }
+                    "source": { "type": "string", "description": "Optional source name filter (e.g. 'internal-java-corpus')" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 10 }
                 },
                 "required": ["name"]
             }),
@@ -948,6 +949,11 @@ async fn execute_active_tool(
     claims: &Arc<crate::auth::Claims>,
     request: &ExecuteToolRequest,
 ) -> Result<Option<ExecuteToolResponse>, StatusCode> {
+    if let Some(response) =
+        super::active_intelligence::execute_mcp_symbols(state, claims, request).await?
+    {
+        return Ok(Some(response));
+    }
     let result = match request.tool_name.as_str() {
         "search_code" => {
             let query: SearchQuery = serde_json::from_value(request.params.clone())
@@ -1032,7 +1038,11 @@ async fn execute_active_tool(
                 })
                 .transpose()?
                 .map(str::to_owned);
-            let source_id = if let Some(source_name) = request.params.get("source") {
+            let source_id = if let Some(source_name) = request
+                .params
+                .get("source")
+                .filter(|value| !value.is_null())
+            {
                 let source_name = source_name
                     .as_str()
                     .filter(|name| !name.trim().is_empty())
@@ -1076,6 +1086,23 @@ async fn execute_active_tool(
                     .get("side_effect")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+                limit: active_card_limit(command, &request.params)?,
+                language: None,
+                symbol_type: None,
+                max_depth: if command == "explain" {
+                    Some(
+                        match request.params.get("max_depth").filter(|v| !v.is_null()) {
+                            None => 6,
+                            Some(value) => value
+                                .as_u64()
+                                .filter(|n| (1..=10).contains(n))
+                                .ok_or(StatusCode::BAD_REQUEST)?
+                                as u32,
+                        },
+                    )
+                } else {
+                    None
+                },
                 include_test: false,
             };
             let Json(response) = super::intelligence::shadow_intelligence_command(
@@ -1095,6 +1122,59 @@ async fn execute_active_tool(
         success: true,
         error: None,
     }))
+}
+
+#[cfg(feature = "storage-v2-retrieval")]
+fn active_card_limit(command: &str, params: &Value) -> Result<Option<u32>, StatusCode> {
+    let (default, maximum) = match command {
+        "card" => (10, 200),
+        "layers" => (20, 100),
+        _ => return Ok(None),
+    };
+    let limit = match params.get("limit").filter(|value| !value.is_null()) {
+        None => default,
+        Some(value) => value.as_u64().ok_or(StatusCode::BAD_REQUEST)?,
+    };
+    if !(1..=maximum).contains(&limit) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(Some(limit as u32))
+}
+
+#[cfg(all(test, feature = "storage-v2-retrieval"))]
+mod active_limit_tests {
+    use super::*;
+
+    #[test]
+    fn card_limits_preserve_defaults_and_reject_invalid_requests() {
+        assert_eq!(active_card_limit("card", &json!({})), Ok(Some(10)));
+        assert_eq!(
+            active_card_limit("layers", &json!({"limit": null})),
+            Ok(Some(20))
+        );
+        assert_eq!(
+            active_card_limit("layers", &json!({"limit": 100})),
+            Ok(Some(100))
+        );
+        for limit in [
+            json!(0),
+            json!(-1),
+            json!(1.5),
+            json!("20"),
+            json!(true),
+            json!(101),
+        ] {
+            assert_eq!(
+                active_card_limit("layers", &json!({"limit": limit})),
+                Err(StatusCode::BAD_REQUEST)
+            );
+        }
+        assert_eq!(
+            active_card_limit("card", &json!({"limit": 201})),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(active_card_limit("explain", &json!({})), Ok(None));
+    }
 }
 
 /// Get MCP protocol information (for Claude integration metadata)

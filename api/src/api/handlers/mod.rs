@@ -1,3 +1,5 @@
+#[cfg(feature = "storage-v2-retrieval")]
+mod active_intelligence;
 mod active_metadata;
 pub mod admin;
 pub mod agents;

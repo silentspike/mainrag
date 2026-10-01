@@ -561,7 +561,9 @@ async fn authenticated_health_checks(api_url: &str, expected_mode: &str) -> Resu
             let mode = health.mode.as_deref().unwrap_or("unknown");
             let mode_ok = mode == expected_mode;
             let status_ok = health.status == "healthy";
-            let service_ok = if expected_mode == "cpu" {
+            let service_ok = if expected_mode == "cpu"
+                || health.read_path.as_deref() == Some("storage_v2_active")
+            {
                 health.services.postgres && !health.services.qdrant && !health.services.tei
             } else {
                 health.services.postgres && health.services.qdrant && health.services.tei

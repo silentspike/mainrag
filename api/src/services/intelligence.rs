@@ -771,7 +771,8 @@ impl IntelligenceService {
             .map(|r| AnnotationInfo {
                 annotation_type: r.get(0),
                 value: r.get(1),
-                confidence: r.get(2),
+                confidence: Some(r.get(2)),
+                provenance: None,
             })
             .collect())
     }
@@ -830,7 +831,7 @@ impl IntelligenceService {
                 relation_type: r.get(1),
                 direction: r.get(2),
                 target_name: r.get(3),
-                confidence: r.get::<_, f64>(4) as f32,
+                confidence: Some(r.get::<_, f64>(4) as f32),
                 evidence_line: r.get(5),
                 target_file: r.get(6),
             })
@@ -898,6 +899,7 @@ impl IntelligenceService {
                 severity: r.get(5),
                 created_by: r.get(6),
                 domain_profile: r.get(7),
+                read_provenance: None,
             })
             .collect())
     }
@@ -1023,6 +1025,8 @@ impl IntelligenceService {
                     dispatch_via: target.dispatch_via,
                     code_snippet: snippet,
                     step_annotations: step_anns,
+                    call_evidence: None,
+                    annotations_complete: None,
                 });
 
                 current_targets = next_targets;
@@ -1039,6 +1043,11 @@ impl IntelligenceService {
                 entry_point: entry.clone(),
                 steps,
                 annotations: entry_anns,
+                termination: None,
+                terminal_evidence: None,
+                complete: None,
+                annotations_complete: None,
+                read_provenance: None,
             });
         }
 
@@ -1273,6 +1282,11 @@ impl IntelligenceService {
                     entry_point: (*card).clone(),
                     steps: vec![],
                     annotations: vec![],
+                    termination: None,
+                    terminal_evidence: None,
+                    complete: None,
+                    annotations_complete: None,
+                    read_provenance: None,
                 });
 
             let title = format!(
@@ -1361,12 +1375,13 @@ impl IntelligenceService {
             negative_evidence: negative,
             suggested_next: suggested,
             formatted,
+            read_provenance: None,
         })
     }
 }
 
 /// Format explore response as structured text for direct LLM consumption.
-fn format_explore_response(
+pub(crate) fn format_explore_response(
     query: &str,
     intent: Option<&str>,
     domain: Option<&str>,
@@ -1431,6 +1446,15 @@ fn format_explore_response(
 
         if let Some(ref why) = path.why_relevant {
             out.push_str(&format!("Why: {}\n", why));
+        }
+        if let Some(ref why) = path.why_might_not_work {
+            out.push_str(&format!("Caution: {}\n", why));
+        }
+        if let Some(ref termination) = path.chain.termination {
+            out.push_str(&format!("Path ends: {}\n", termination));
+        }
+        if path.chain.complete == Some(false) {
+            out.push_str("Call traversal is incomplete.\n");
         }
         out.push('\n');
     }

@@ -4,7 +4,6 @@ use crate::db::models::{
     DelegationChain, ExploreResponse, NegativeEvidence, OwnershipInfo, SymbolCard,
 };
 use crate::AppState;
-#[cfg(feature = "storage-v2-intelligence")]
 use axum::Extension;
 use axum::{
     extract::{Path, Query, State},
@@ -28,6 +27,10 @@ pub struct ShadowIntelligenceQuery {
     pub layer: Option<String>,
     pub resource: Option<String>,
     pub side_effect: Option<String>,
+    pub limit: Option<u32>,
+    pub language: Option<String>,
+    pub symbol_type: Option<String>,
+    pub max_depth: Option<u32>,
     #[serde(default)]
     pub include_test: bool,
 }
@@ -52,7 +55,7 @@ pub async fn shadow_intelligence_command(
 ) -> crate::error::Result<Json<Value>> {
     if !matches!(
         req.command.as_str(),
-        "card" | "layers" | "explain" | "ownership"
+        "card" | "layers" | "explain" | "ownership" | "symbols" | "callers" | "callees"
     ) {
         return Err(crate::error::AppError::BadRequest(
             "unsupported shadow intelligence command".to_string(),
@@ -61,6 +64,7 @@ pub async fn shadow_intelligence_command(
     let active = match (req.read_path.as_deref(), req.generation.as_deref()) {
         (None, Some(_)) | (Some("storage_v2"), Some(_)) => false,
         (None, None) | (Some("storage_v2_active"), None) => true,
+        (Some("current"), None) => true,
         _ => {
             return Err(crate::error::AppError::BadRequest(
                 "intelligence requires a named generation or the active read path".to_string(),
@@ -99,12 +103,39 @@ pub async fn shadow_intelligence_command(
     let source_id = req.source_id;
     let generation = req.generation;
     let command = req.command;
+    if command == "explain"
+        && req
+            .max_depth
+            .is_some_and(|depth| !(1..=10).contains(&depth))
+    {
+        return Err(crate::error::AppError::BadRequest(
+            "call-chain depth must be from 1 to 10".into(),
+        ));
+    }
     let include_test = req.include_test;
+    let limit = if matches!(
+        command.as_str(),
+        "card" | "layers" | "symbols" | "callers" | "callees" | "explain" | "ownership"
+    ) {
+        let limit = req.limit.or(active.then_some(100));
+        if limit.is_some_and(|limit| !(1..=200).contains(&limit)) {
+            return Err(crate::error::AppError::BadRequest(
+                "intelligence limit must be from 1 to 200".to_string(),
+            ));
+        }
+        limit
+    } else {
+        None
+    };
     let query = serde_json::json!({
         "name": req.name,
         "layer": req.layer,
         "resource": req.resource,
         "side_effect": req.side_effect,
+        "limit": limit,
+        "language": req.language,
+        "symbol_type": req.symbol_type,
+        "max_depth": req.max_depth,
     });
     let result = state
         .rls_client
@@ -194,13 +225,55 @@ pub struct CallGraphResponse {
     pub symbol: SymbolInfo,
     pub callers: Vec<CallGraphNode>,
     pub callees: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callers_complete: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callees_complete: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_evidence: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_seq: Option<i64>,
 }
 
 /// Search for symbols by name or type
 pub async fn search_symbols(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
     Query(req): Query<SymbolSearchRequest>,
 ) -> Result<Json<Vec<SymbolInfo>>, StatusCode> {
+    #[cfg(feature = "storage-v2-retrieval")]
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        let limit = req.limit.unwrap_or(50);
+        if !(1..=200).contains(&limit) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let rows = super::active_intelligence::rows(
+            &state,
+            &claims,
+            "symbols",
+            serde_json::json!({"name":req.query,"language":req.language,
+                              "symbol_type":req.symbol_type,"limit":limit}),
+            None,
+        )
+        .await?;
+        let symbols = rows
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<std::result::Result<Vec<SymbolInfo>, _>>()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        return Ok(Json(symbols));
+    }
+    #[cfg(not(feature = "storage-v2-retrieval"))]
+    let _ = claims;
     let limit = req.limit.unwrap_or(50).min(200);
     let search_pattern = format!("%{}%", req.query);
 
@@ -259,8 +332,28 @@ pub async fn search_symbols(
 /// Get symbol details with call graph (who calls this, who it calls)
 pub async fn get_symbol_callgraph(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
     Path(symbol_id): Path<i64>,
 ) -> Result<Json<CallGraphResponse>, StatusCode> {
+    #[cfg(feature = "storage-v2-retrieval")]
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        let value = super::active_intelligence::checked_read(
+            &state,
+            &claims,
+            super::active_intelligence::CheckedRead::Callgraph(symbol_id, 200),
+        )
+        .await?;
+        return Ok(Json(
+            serde_json::from_value(value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        ));
+    }
+    #[cfg(not(feature = "storage-v2-retrieval"))]
+    let _ = claims;
     state
         .rls_client
         .with_system(|txn| {
@@ -319,6 +412,12 @@ pub async fn get_symbol_callgraph(
                     symbol,
                     callers: caller_nodes,
                     callees: callee_names,
+                    callers_complete: None,
+                    callees_complete: None,
+                    call_evidence: None,
+                    read_path: None,
+                    source_id: None,
+                    generation_seq: None,
                 }))
             })
         })
@@ -329,9 +428,34 @@ pub async fn get_symbol_callgraph(
 /// List all symbols in a file
 pub async fn list_file_symbols(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
     Path(file_id): Path<i64>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<SymbolInfo>>, StatusCode> {
+    #[cfg(feature = "storage-v2-retrieval")]
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        let limit = params
+            .get("limit")
+            .map(|value| value.parse::<i64>().map_err(|_| StatusCode::BAD_REQUEST))
+            .transpose()?
+            .unwrap_or(100);
+        let value = super::active_intelligence::checked_read(
+            &state,
+            &claims,
+            super::active_intelligence::CheckedRead::FileSymbols(file_id, limit),
+        )
+        .await?;
+        return Ok(Json(
+            serde_json::from_value(value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        ));
+    }
+    #[cfg(not(feature = "storage-v2-retrieval"))]
+    let _ = claims;
     let limit = params
         .get("limit")
         .and_then(|s| s.parse::<i64>().ok())
@@ -380,7 +504,7 @@ pub struct CallerQuery {
     pub source: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CallerInfo {
     pub name: String,
     pub file_path: String,
@@ -389,8 +513,36 @@ pub struct CallerInfo {
 
 pub async fn find_callers_by_name(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
     Query(req): Query<CallerQuery>,
 ) -> Result<Json<Vec<CallerInfo>>, StatusCode> {
+    #[cfg(feature = "storage-v2-retrieval")]
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        let source = req.source.as_ref().map(|name| Value::String(name.clone()));
+        let source_id =
+            super::active_intelligence::resolve_source_name(&state, &claims, source.as_ref())
+                .await?;
+        let rows = super::active_intelligence::rows(
+            &state,
+            &claims,
+            "callers",
+            serde_json::json!({"name":req.function,"exact_name":true,"limit":100}),
+            source_id,
+        )
+        .await?;
+        let callers=rows.into_iter().map(|row| {
+            let line=row.get("call_line").filter(|value|!value.is_null()).or_else(||row.get("line"));
+            serde_json::from_value(serde_json::json!({"name":row["caller_name"],"file_path":row["file_path"],"line":line}))
+        }).collect::<std::result::Result<Vec<CallerInfo>,_>>().map_err(|_|StatusCode::INTERNAL_SERVER_ERROR)?;
+        return Ok(Json(callers));
+    }
+    #[cfg(not(feature = "storage-v2-retrieval"))]
+    let _ = claims;
     let source = req.source.clone();
     state
         .rls_client
@@ -442,8 +594,32 @@ pub async fn find_callers_by_name(
 /// Find callees (functions called by) a function by name (for MCP tools)
 pub async fn find_callees_by_name(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
     Query(req): Query<CallerQuery>,
 ) -> Result<Json<Vec<String>>, StatusCode> {
+    #[cfg(feature = "storage-v2-retrieval")]
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        let source = req.source.as_ref().map(|name| Value::String(name.clone()));
+        let source_id =
+            super::active_intelligence::resolve_source_name(&state, &claims, source.as_ref())
+                .await?;
+        let value = super::active_intelligence::checked_read(
+            &state,
+            &claims,
+            super::active_intelligence::CheckedRead::CalleeNames(req.function, source_id, 100),
+        )
+        .await?;
+        return Ok(Json(
+            serde_json::from_value(value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        ));
+    }
+    #[cfg(not(feature = "storage-v2-retrieval"))]
+    let _ = claims;
     let source = req.source.clone();
     state
         .rls_client
@@ -503,8 +679,60 @@ fn default_depth() -> i32 {
 
 pub async fn find_call_chain(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
     Query(req): Query<CallChainQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    #[cfg(feature = "storage-v2-retrieval")]
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        if !(1..=10).contains(&req.depth)
+            || !matches!(req.direction.as_str(), "callers" | "callees")
+            || req.function.trim().is_empty()
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let source = req.source.as_ref().map(|s| serde_json::json!(s));
+        let source_id =
+            super::active_intelligence::resolve_source_name(&state, &claims, source.as_ref())
+                .await?;
+        let result = super::active_intelligence::envelope(
+            &state,
+            &claims,
+            "explain",
+            serde_json::json!({"name":req.function,"exact_name":true,"direction":req.direction,
+                "max_depth":req.depth,"limit":100}),
+            source_id,
+        )
+        .await?;
+        let results = result["results"]
+            .as_array()
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        let entries: Vec<_> = results
+            .iter()
+            .flat_map(|r| {
+                r["value"]["entries"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+            })
+            .collect();
+        let complete = results
+            .iter()
+            .all(|r| r["value"]["complete"].as_bool() == Some(true));
+        return Ok(Json(
+            serde_json::json!({"function":req.function,"direction":req.direction,
+            "depth":req.depth,"entries":entries,"complete":complete,
+            "read_path":"storage_v2_active","activation_manifest_sha256":result["activation_manifest_sha256"],
+            "paths":results.iter().flat_map(|r|r["value"]["paths"].as_array().into_iter().flatten().cloned()).collect::<Vec<_>>()}),
+        ));
+    }
+    #[cfg(not(feature = "storage-v2-retrieval"))]
+    let _ = claims;
     let source_id = if let Some(ref source_name) = req.source {
         state
             .rls_client
@@ -554,8 +782,38 @@ pub struct SymbolCardQuery {
 /// Browse/search symbol cards with optional filters.
 pub async fn browse_symbol_cards(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
     Query(req): Query<SymbolCardQuery>,
 ) -> Result<Json<Vec<SymbolCard>>, StatusCode> {
+    #[cfg(feature = "storage-v2-retrieval")]
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        let limit = req.limit.unwrap_or(50);
+        if !(1..=200).contains(&limit) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let rows = super::active_intelligence::rows(
+            &state,
+            &claims,
+            "card",
+            serde_json::json!({"name":req.name,"layer":req.layer,"resource":req.resource,
+                              "side_effect":req.side_effect,"limit":limit}),
+            req.source_id,
+        )
+        .await?;
+        let cards = rows
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<std::result::Result<Vec<SymbolCard>, _>>()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        return Ok(Json(cards));
+    }
+    #[cfg(not(feature = "storage-v2-retrieval"))]
+    let _ = claims;
     let name = req.name.as_deref().unwrap_or("%");
     let limit = req.limit.unwrap_or(50).min(200);
 
@@ -581,8 +839,37 @@ pub async fn browse_symbol_cards(
 /// Get a single symbol card by ID.
 pub async fn get_symbol_card(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
     Path(symbol_id): Path<i64>,
 ) -> Result<Json<Option<SymbolCard>>, StatusCode> {
+    #[cfg(feature = "storage-v2-retrieval")]
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        let occurrence_id = symbol_id
+            .checked_neg()
+            .filter(|id| *id > 0)
+            .ok_or(StatusCode::BAD_REQUEST)?;
+        let card = super::active_intelligence::rows(
+            &state,
+            &claims,
+            "card",
+            serde_json::json!({"occurrence_id":occurrence_id,"limit":1}),
+            None,
+        )
+        .await?
+        .into_iter()
+        .next()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        return Ok(Json(card));
+    }
+    #[cfg(not(feature = "storage-v2-retrieval"))]
+    let _ = claims;
     let card = state
         .intelligence
         .get_symbol_card(symbol_id)
@@ -605,9 +892,34 @@ pub struct ExplainPathRequest {
 /// Trace delegation chain through proxy → dispatch → mutation.
 pub async fn explain_path(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
     Json(req): Json<ExplainPathRequest>,
 ) -> Result<Json<Vec<DelegationChain>>, StatusCode> {
     let max_depth = req.max_depth.unwrap_or(6);
+    #[cfg(feature = "storage-v2-retrieval")]
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        if !(1..=10).contains(&max_depth) || req.symbol_name.trim().is_empty() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let result = super::active_intelligence::envelope(
+            &state,
+            &claims,
+            "explain",
+            serde_json::json!({"name":req.symbol_name,"max_depth":max_depth,"limit":100}),
+            req.source_id,
+        )
+        .await?;
+        return Ok(Json(super::active_intelligence::delegation_chains(
+            &result,
+        )?));
+    }
+    #[cfg(not(feature = "storage-v2-retrieval"))]
+    let _ = claims;
 
     let chains = state
         .intelligence
@@ -646,8 +958,21 @@ pub struct CreateNegativeEvidenceResponse {
 /// Create a negative evidence entry (dead-end documentation).
 pub async fn create_negative_evidence(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
     Json(req): Json<CreateNegativeEvidenceRequest>,
 ) -> Result<Json<CreateNegativeEvidenceResponse>, StatusCode> {
+    #[cfg(feature = "storage-v2-retrieval")]
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        let id = super::active_intelligence::create_note(&state, &claims, &req).await?;
+        return Ok(Json(CreateNegativeEvidenceResponse { id }));
+    }
+    #[cfg(not(feature = "storage-v2-retrieval"))]
+    let _ = claims;
     let id = state
         .intelligence
         .create_negative_evidence(
@@ -678,8 +1003,23 @@ pub struct SearchNegativeEvidenceQuery {
 /// Search negative evidence by concept.
 pub async fn search_negative_evidence(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
     Query(req): Query<SearchNegativeEvidenceQuery>,
 ) -> Result<Json<Vec<NegativeEvidence>>, StatusCode> {
+    #[cfg(feature = "storage-v2-retrieval")]
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        return Ok(Json(
+            super::active_intelligence::search_notes(&state, &claims, &req.concept, req.source_id)
+                .await?,
+        ));
+    }
+    #[cfg(not(feature = "storage-v2-retrieval"))]
+    let _ = claims;
     let results = state
         .intelligence
         .search_negative_evidence(&req.concept, req.source_id)
@@ -701,8 +1041,33 @@ pub struct OwnershipQuery {
 /// Get ownership/containment relations for a symbol.
 pub async fn get_ownership(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
     Query(req): Query<OwnershipQuery>,
 ) -> Result<Json<Vec<OwnershipInfo>>, StatusCode> {
+    #[cfg(feature = "storage-v2-retrieval")]
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        let rows = super::active_intelligence::rows(
+            &state,
+            &claims,
+            "ownership",
+            serde_json::json!({"name":req.symbol,"limit":50}),
+            req.source_id,
+        )
+        .await?;
+        let relations = rows
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<std::result::Result<Vec<OwnershipInfo>, _>>()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        return Ok(Json(relations));
+    }
+    #[cfg(not(feature = "storage-v2-retrieval"))]
+    let _ = claims;
     let results = state
         .intelligence
         .get_ownership(&req.symbol, req.source_id)
@@ -725,8 +1090,23 @@ pub struct ExploreRequest {
 /// path tracing, and negative evidence.
 pub async fn explore(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Arc<crate::auth::Claims>>,
     Json(req): Json<ExploreRequest>,
 ) -> Result<Json<ExploreResponse>, StatusCode> {
+    #[cfg(feature = "storage-v2-retrieval")]
+    if state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .is_some()
+    {
+        return Ok(Json(
+            super::active_intelligence::explore(&state, &claims, &req.query, req.source.as_deref())
+                .await?,
+        ));
+    }
+    #[cfg(not(feature = "storage-v2-retrieval"))]
+    let _ = claims;
     let result = state
         .intelligence
         .explore(
