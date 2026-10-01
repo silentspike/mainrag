@@ -74,6 +74,22 @@ def source(source_id: int, *, benchmark: bool = False, candidate: bool = True,
 
 
 class CandidateAggregateAuditTests(unittest.TestCase):
+    def test_current_reader_package_is_required_when_auditing_new_reader_acceptance(self):
+        reader = {"commit_sha": "9" * 40, "binary_sha256": "8" * 64}
+        regular, benchmark = source(1), source(2, benchmark=True)
+        inventory = self.inventory(regular, benchmark)
+        protected, _ = AUDIT.audit(inventory, "f" * 64, reader)
+        self.assertEqual(protected["persisted_gate_blockers"]["current_reader_package_not_proven"], 2)
+        self.assertFalse(protected["persisted_candidate_set_complete"])
+        for item in (regular, benchmark):
+            item["generations"][0]["qualification_manifest"]["reader_package"] = {
+                **reader, "installation_receipt_sha256": "6" * 64, "server_instance_id": "current-instance"}
+        protected, _ = AUDIT.audit(inventory, "f" * 64, reader)
+        self.assertTrue(protected["persisted_candidate_set_complete"])
+        regular["generations"][0]["qualification_manifest"]["reader_package"]["binary_sha256"] = "7" * 64
+        protected, _ = AUDIT.audit(inventory, "f" * 64, reader)
+        self.assertEqual(protected["persisted_gate_blockers"]["current_reader_package_not_proven"], 1)
+
     @staticmethod
     def inventory(*sources: dict) -> dict:
         return {"inventory_id": "fixture", "operator_commit_sha": "d" * 40,

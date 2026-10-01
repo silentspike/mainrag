@@ -126,6 +126,37 @@ final manifest is PASS and its evidence boundary has been accepted. Search/read
 availability during an adapter is determined by that reviewed adapter; the
 preflight does not silently claim it.
 
+## Requalifying an existing candidate
+
+Keep the candidate's original producer commit, checkpoint and frozen gold suite.
+When a previous normal qualification completed successfully for the same
+generation, `release-candidate.py verify` can reuse its restart/replay proof with
+`--completed-restart-evidence` and
+`--expected-completed-restart-evidence-sha256`. The receipt must be an owned,
+private regular file with the reviewed digest. Producer identity, input hashes,
+profiles, verification manifest, counts and active pointer must still match.
+Interrupted attempts and failed qualifications cannot supply this proof.
+
+This avoids the repeated build endpoint and source traversal. Body/segment
+integrity, live input review, frozen gold, search quality/latency, intelligence,
+resources and the final qualification POST still execute. Original telemetry is
+not emitted as a new replay measurement.
+
+Use `--reader-package-receipt` and
+`--expected-reader-package-receipt-sha256` to bind the new reader checks to the
+local production installation. This mode checks the actual running service
+executable against the accepted installation digest, retains the producer
+commit separately, and rejects a package or API instance change during the run.
+It applies only to the local production API. All receipts and checkpoints stay
+in protected operator storage.
+
+For a current-package aggregate audit, supply both
+`--expected-reader-commit-sha` and `--expected-reader-binary-sha256` to
+`candidate-aggregate-audit.py`. Every candidate must then contain matching reader
+evidence. A historical qualification alone fails this check. The audit still
+reports external gates separately; this package binding does not prove source
+freshness, production activation, backup recovery or cleanup.
+
 ## Source-local final deltas
 
 The authenticated pointer-neutral release-watermark endpoint scans the same adapter
