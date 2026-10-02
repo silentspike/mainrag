@@ -129,6 +129,11 @@ jobs:
         run: |
           cargo test -p mainrag-api --features storage-v2-retrieval --lib services::analysis_cache::tests -- --nocapture | tee analysis-cache-tests.log
           python3 -c 'from pathlib import Path; assert "4 passed; 0 failed; 0 ignored;" in Path("analysis-cache-tests.log").read_text(), "Expected all lossless cache and card group regressions to execute"'
+      - name: Verify complete streamed intelligence and reader diagnostics
+        shell: bash
+        run: |
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib qualification_reader_tests -- --nocapture | tee qualification-reader-tests.log
+          python3 -c 'from pathlib import Path; assert "8 passed; 0 failed; 0 ignored;" in Path("qualification-reader-tests.log").read_text(), "Expected all complete export and reader diagnostic regressions to execute"'
       - name: Verify final storage-v2 source read accounting
         shell: bash
         run: |
@@ -457,6 +462,8 @@ jobs:
               'eval.storage_v2.schema.test_posting_hash_correlation.PostingHashCorrelationTests',
               'eval.storage_v2.schema.test_authorized_copied_rank_scope.AuthorizedCopiedRankScopeTests',
               'eval.storage_v2.schema.test_constructor_token_reuse.ConstructorTokenReuseTests',
+              'eval.storage_v2.schema.test_streamed_intelligence_records.StreamedIntelligenceRecordsTests',
+              'eval.storage_v2.schema.test_scoped_posting_sets.ScopedPostingSetsTests',
               'eval.storage_v2.schema.test_active_source_metrics.ActiveSourceMetricsTests',
               'eval.storage_v2.schema.test_active_explore.ActiveExploreTests',
           ])

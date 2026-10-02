@@ -346,6 +346,8 @@ pub struct ReleaseCandidateVerifyResult {
     pub verified_logical_bytes: u64,
     pub lexical_segment_verification: serde_json::Value,
     pub intelligence_export: serde_json::Value,
+    #[serde(default)]
+    pub intelligence_export_serialized_bytes: u64,
     pub query_seeds: Vec<CandidateQuerySeed>,
     pub checks: BTreeMap<String, String>,
 }
@@ -371,6 +373,67 @@ where
     .await
 }
 
+#[derive(Debug)]
+struct CandidateVerificationPhase(&'static str);
+
+impl std::fmt::Display for CandidateVerificationPhase {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "candidate verification phase: {}", self.0)
+    }
+}
+
+impl std::error::Error for CandidateVerificationPhase {}
+
+/// Report stable operation labels and SQLSTATE only. Database messages can
+/// contain private source content, paths, or query values and stay out of HTTP.
+pub fn candidate_verification_failure(error: &anyhow::Error) -> String {
+    let phase = error
+        .downcast_ref::<CandidateVerificationPhase>()
+        .map(|phase| phase.0)
+        .unwrap_or("validation_or_reader_epoch");
+    let sqlstate = error
+        .downcast_ref::<tokio_postgres::Error>()
+        .and_then(tokio_postgres::Error::code)
+        .map(|code| code.code())
+        .unwrap_or("none");
+    let close = error.downcast_ref::<content_body::ReaderEpochCloseFailure>();
+    let close_sqlstate = close
+        .and_then(|close| close.sqlstate.as_deref())
+        .unwrap_or("none");
+    format!(
+        "storage-v2 release-candidate verification failed: phase={phase}; \
+         database_sqlstate={sqlstate}; reader_epoch_close_sqlstate={close_sqlstate}; \
+         retention_required={}",
+        close.is_some()
+    )
+}
+
+#[cfg(test)]
+mod qualification_reader_tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_keeps_operation_and_retention_without_private_messages() {
+        let error = anyhow::anyhow!("protected-source-path protected-query-input")
+            .context(CandidateVerificationPhase("intelligence_export"))
+            .context(content_body::ReaderEpochCloseFailure {
+                sqlstate: Some("25P02".to_string()),
+            });
+        let diagnostic = candidate_verification_failure(&error);
+        assert!(diagnostic.contains("phase=intelligence_export"));
+        assert!(diagnostic.contains("reader_epoch_close_sqlstate=25P02"));
+        assert!(diagnostic.contains("retention_required=true"));
+        assert!(!diagnostic.contains("protected"));
+    }
+
+    #[test]
+    fn unclassified_failure_does_not_invent_sqlstate_or_success() {
+        let diagnostic = candidate_verification_failure(&anyhow::anyhow!("protected-input"));
+        assert!(diagnostic.contains("database_sqlstate=none"));
+        assert!(!diagnostic.contains("protected"));
+    }
+}
+
 async fn verify_release_candidate_in_epoch<C>(
     client: &C,
     source_id: i64,
@@ -389,7 +452,8 @@ where
             "SELECT storage_v2_require_test_scope($1, TRUE)",
             &[&source_id],
         )
-        .await?;
+        .await
+        .context(CandidateVerificationPhase("test_scope"))?;
     let identity = client
         .query_opt(
             "SELECT generation.generation_seq, generation.status::TEXT AS status, \
@@ -403,7 +467,8 @@ where
               WHERE generation.id=$1 AND generation.source_id=$2 AND run.status='sealed'",
             &[&input.generation_id, &source_id],
         )
-        .await?
+        .await
+        .context(CandidateVerificationPhase("candidate_identity"))?
         .context("verified generation and sealed ingest run not found")?;
     let status: String = identity.get("status");
     if !matches!(status.as_str(), "verified" | "release_candidate") {
@@ -418,7 +483,8 @@ where
     let expected_root: String = identity.get("generation_root_sha256");
     let reconstructed_root: String = client
         .query_one("SELECT storage_v2_shadow_generation_root($1)", &[&run_id])
-        .await?
+        .await
+        .context(CandidateVerificationPhase("generation_root"))?
         .get(0);
     if reconstructed_root != expected_root {
         bail!("candidate generation root reconstruction failed");
@@ -442,11 +508,15 @@ where
               WHERE item.run_id=$1 ORDER BY body.id",
             &[&run_id],
         )
-        .await?;
+        .await
+        .context(CandidateVerificationPhase("body_inventory"))?;
     let mut verified_logical_bytes = 0_u64;
     for row in &body_rows {
         verified_logical_bytes = verified_logical_bytes
-            .checked_add(verify_stored_body_row(row, pack_root, io_buffer_bytes)?)
+            .checked_add(
+                verify_stored_body_row(row, pack_root, io_buffer_bytes)
+                    .context(CandidateVerificationPhase("body_pack_integrity"))?,
+            )
             .context("verified candidate byte count overflow")?;
     }
 
@@ -456,33 +526,31 @@ where
             "SELECT storage_v2_shadow_source_state($1,$2,TRUE)",
             &[&source_id, &generation_seq.to_string()],
         )
-        .await?
+        .await
+        .context(CandidateVerificationPhase("source_state"))?
         .get(0);
     let expected_item_count: i64 = identity.get("expected_item_count");
     validate_candidate_source_state(&state, expected_item_count, active_generation_id)?;
-    // Reconstructing every segment projection can exceed the API role's
-    // ordinary query deadline on large sources. Raise it only for this bounded
-    // integrity query, then restore the transaction's prior setting.
+    // Complete segment reconstruction and intelligence export can exceed the
+    // ordinary query deadline. Apply a bounded integrity deadline to these
+    // two operations, then restore the transaction's prior setting.
     let previous_statement_timeout: String = client
         .query_one("SHOW statement_timeout", &[])
-        .await?
+        .await
+        .context(CandidateVerificationPhase("timeout_read"))?
         .get(0);
     client
         .query_one("SELECT set_config('statement_timeout', '30min', TRUE)", &[])
-        .await?;
+        .await
+        .context(CandidateVerificationPhase("verification_timeout_set"))?;
     let lexical_segment_verification: serde_json::Value = client
         .query_one(
             "SELECT storage_v2_verify_lexical_segments($1)",
             &[&input.generation_id],
         )
-        .await?
+        .await
+        .context(CandidateVerificationPhase("lexical_segment_integrity"))?
         .get(0);
-    client
-        .query_one(
-            "SELECT set_config('statement_timeout', $1, TRUE)",
-            &[&previous_statement_timeout],
-        )
-        .await?;
     if lexical_segment_verification["schema_version"]
         != "mainrag.storage-v2.lexical-segment-verification.v1"
         || lexical_segment_verification["generation_id"] != input.generation_id
@@ -492,19 +560,29 @@ where
     {
         bail!("candidate lexical segment verification failed");
     }
-    let intelligence_export: serde_json::Value = client
-        .query_one(
-            "SELECT storage_v2_export_intelligence($1,$2,'public')",
-            &[&source_id, &generation_seq.to_string()],
+    let (intelligence_export, intelligence_export_serialized_bytes) =
+        crate::services::intelligence_export::public_export(
+            client,
+            source_id,
+            &generation_seq.to_string(),
         )
-        .await?
-        .get(0);
+        .await
+        .context(CandidateVerificationPhase("intelligence_export"))?;
+    client
+        .query_one(
+            "SELECT set_config('statement_timeout', $1, TRUE)",
+            &[&previous_statement_timeout],
+        )
+        .await
+        .context(CandidateVerificationPhase("verification_timeout_restore"))?;
     if intelligence_export["schema_version"] != "mainrag.storage-v2-intelligence-export.v1"
         || intelligence_export["redaction"] != "public"
     {
         bail!("candidate intelligence export contract failed");
     }
-    let query_seeds = candidate_query_seeds(client, source_id, input.generation_id).await?;
+    let query_seeds = candidate_query_seeds(client, source_id, input.generation_id)
+        .await
+        .context(CandidateVerificationPhase("query_seeds"))?;
     let mut checks = BTreeMap::new();
     for check in [
         "artifact_root",
@@ -542,6 +620,7 @@ where
         verified_logical_bytes,
         lexical_segment_verification,
         intelligence_export,
+        intelligence_export_serialized_bytes,
         query_seeds,
         checks,
     })
