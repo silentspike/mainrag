@@ -165,7 +165,7 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         let migrations = std::fs::read_dir(project.join("migrations"))?
             .map(|entry| entry.map(|value| value.path()))
             .collect::<std::io::Result<Vec<_>>>()?;
-        for number in (66..=105).chain(std::iter::once(119)) {
+        for number in (66..=105).chain([119, 126]) {
             let prefix = format!("{number:03}_");
             let matching = migrations
                 .iter()
@@ -243,6 +243,48 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         let manager = deadpool_postgres::Manager::new(writer_config, NoTls);
         let pool = deadpool_postgres::Pool::builder(manager).max_size(3).build()?;
         let principal = Uuid::parse_str(PRINCIPAL)?;
+        // This isolated database controls only its observation value. Prove a
+        // durable checkpoint waits without a transaction, retains the source
+        // writer fence and revalidates identity before accepting further writes.
+        client.batch_execute("CREATE TABLE fixture_wal_backlog(bytes bigint); \
+            INSERT INTO fixture_wal_backlog VALUES(5); \
+            CREATE TABLE fixture_committed_marker(id integer PRIMARY KEY); \
+            CREATE OR REPLACE FUNCTION public.storage_v2_local_wal_ready_bytes() \
+            RETURNS bigint LANGUAGE sql STABLE STRICT SECURITY DEFINER \
+            SET search_path=pg_catalog,pg_temp SET row_security=on \
+            AS $$ SELECT bytes FROM public.fixture_wal_backlog $$;").await?;
+        let mut waiting_session = crate::db::build_checkpoint::BuildCheckpointSession::open(
+            &pool, principal, 165, &packs).await?;
+        waiting_session.fixture_local_wal_budget();
+        let writer_pid: i32 = waiting_session.client().query_one("SELECT pg_backend_pid()",&[]).await?.get(0);
+        waiting_session.client().execute("INSERT INTO fixture_committed_marker VALUES(1)",&[]).await?;
+        let (notify, receive) = tokio::sync::oneshot::channel();
+        let mut notify = Some(notify);
+        let observer = connect(&config).await?;
+        let observe_wait = async {
+            receive.await.context("writer did not publish the waiting phase")?;
+            ensure!(observer.query_one("SELECT count(*) FROM fixture_committed_marker",&[]).await?.get::<_,i64>(0)==1,
+                "waiting phase preceded durable publication");
+            ensure!(observer.query_one("SELECT xact_start IS NULL FROM pg_stat_activity WHERE pid=$1",&[&writer_pid])
+                .await?.get::<_,bool>(0),"backpressure held an open transaction");
+            ensure!(!observer.query_one("SELECT pg_try_advisory_lock(hashtextextended('mainrag.storage-v2-ingest-source:165',0))",&[])
+                .await?.get::<_,bool>(0),"backpressure released the source writer fence");
+            observer.batch_execute("SET statement_timeout='1s'; UPDATE sources SET path=path||'-changed' WHERE id=165; \
+                UPDATE fixture_wal_backlog SET bytes=0;").await?;
+            Ok::<_,anyhow::Error>(())
+        };
+        let mut committed = false;
+        let wait = waiting_session.checkpoint_with_hooks(|| { committed=true; Ok(()) }, |paused| {
+            if paused { if let Some(notify)=notify.take() { let _=notify.send(()); } }
+            Ok(())
+        });
+        let (checkpoint, observed) = tokio::join!(wait,observe_wait);
+        observed?;
+        ensure!(committed && checkpoint.unwrap_err().to_string().contains("identity or active pointer changed after checkpoint"),
+            "changed source was not rejected after the local WAL wait");
+        drop(waiting_session);
+        client.execute("UPDATE sources SET path=$1 WHERE id=165",&[&resume_root.to_str().unwrap()]).await?;
+        println!("local WAL checkpoint: durable progress, no open transaction, exclusive writer, identity revalidation");
         let session = crate::db::build_checkpoint::BuildCheckpointSession::open(
             &pool, principal, 165, &packs).await?;
         ensure!(session.client().query_one("SHOW statement_timeout", &[]).await?

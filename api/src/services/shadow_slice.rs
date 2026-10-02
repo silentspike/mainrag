@@ -35,6 +35,39 @@ pub const FIXTURE_SEARCH_PROFILE: &str = "mainrag.lexical-simple.v1";
 pub const RELEASE_VIEW_PROFILE: &str = "mainrag.whole-artifact-view.v1";
 pub const RELEASE_SEARCH_PROFILE: &str = "mainrag.lexical-simple.v1";
 
+async fn durable_build_checkpoint(
+    session: &crate::db::build_checkpoint::BuildCheckpointSession,
+    progress: Option<&super::build_progress::BuildProgressRecorder>,
+    items: usize,
+    measurements: &ShadowIngestMeasurements,
+) -> Result<()> {
+    session
+        .checkpoint_with_hooks(
+            || {
+                if let Some(progress) = progress {
+                    progress.advance(items, measurements, true)?;
+                    progress.checkpoint(items)?;
+                }
+                Ok(())
+            },
+            |waiting| {
+                if let Some(progress) = progress {
+                    progress.phase(
+                        if waiting {
+                            "waiting_local_wal_budget"
+                        } else {
+                            "staging"
+                        },
+                        None,
+                        None,
+                    )?;
+                }
+                Ok(())
+            },
+        )
+        .await
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SliceMode {
     PublicFixture,
@@ -1505,6 +1538,12 @@ where
         }
     }
     let mut committed_items = copied_keys.len();
+    if let Some(progress) = progress {
+        // The resumed durable baseline is already verified above. Publish it
+        // before the content reuse pass, rather than displaying zero items.
+        progress.advance(committed_items, &measurements, true)?;
+        progress.checkpoint(committed_items)?;
+    }
     if !managed_full_comparison && copied_keys.is_empty() {
         if let (Some(frontier), Some((_, _, identities))) =
             (managed_frontier.as_ref(), managed_identity.as_ref())
@@ -1703,12 +1742,8 @@ where
     if let Some(session) = checkpoints {
         // Published immutable bodies can be reused after interruption. They
         // become graph roots as complete items are committed below.
-        session.checkpoint().await?;
+        durable_build_checkpoint(session, progress, copied_keys.len(), &measurements).await?;
         committed_items = copied_keys.len();
-        if let Some(progress) = progress {
-            progress.advance(committed_items, &measurements, true)?;
-            progress.checkpoint(committed_items)?;
-        }
     }
     let mut checkpoint_started = Instant::now();
     let mut checkpoint_bytes = 0_u64;
@@ -2094,14 +2129,11 @@ where
                     || checkpoint_bytes >= 32 * 1024 * 1024
                     || checkpoint_started.elapsed().as_secs() >= 30
                 {
-                    session.checkpoint().await?;
+                    durable_build_checkpoint(session, progress, staged_items, &measurements)
+                        .await?;
                     committed_items = staged_items;
                     checkpoint_bytes = 0;
                     checkpoint_started = Instant::now();
-                    if let Some(progress) = progress {
-                        progress.advance(staged_items, &measurements, true)?;
-                        progress.checkpoint(committed_items)?;
-                    }
                 }
             }
         }
@@ -2109,11 +2141,7 @@ where
 
     if let Some(session) = checkpoints {
         if staged_items > committed_items {
-            session.checkpoint().await?;
-        }
-        if let Some(progress) = progress {
-            progress.advance(staged_items, &measurements, true)?;
-            progress.checkpoint(staged_items)?;
+            durable_build_checkpoint(session, progress, staged_items, &measurements).await?;
         }
     }
     if let Some(progress) = progress {
