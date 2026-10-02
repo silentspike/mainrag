@@ -16,6 +16,7 @@ pub struct BuildCheckpointSession {
     source_id: i64,
     identity: Value,
     expected_run_id: Option<i64>,
+    local_wal_budget: Option<super::local_wal_budget::LocalWalBudget>,
     _maintenance: File,
     #[cfg(test)]
     fail_after: std::sync::atomic::AtomicUsize,
@@ -23,6 +24,7 @@ pub struct BuildCheckpointSession {
 
 impl BuildCheckpointSession {
     pub async fn open(pool: &Pool, user_id: Uuid, source_id: i64, root: &Path) -> Result<Self> {
+        let local_wal_budget = super::local_wal_budget::LocalWalBudget::from_env()?;
         // A checkpointing connection never returns to the pool with session
         // state or an open transaction. ClientWrapper aborts its driver on drop.
         let connection = Client::take(pool.get().await?);
@@ -45,6 +47,15 @@ impl BuildCheckpointSession {
             allowed,
             "checkpointed source build requires administrator source access"
         );
+        if local_wal_budget.is_some() {
+            let available: bool = connection.query_one(
+                "SELECT to_regprocedure('public.storage_v2_local_wal_ready_bytes()') IS NOT NULL", &[]
+            ).await?.get(0);
+            ensure!(
+                available,
+                "local WAL backpressure requires its controlled observation function"
+            );
+        }
         // GIN pending-list maintenance measured longer than the ordinary
         // reader deadline. Keep writes bounded in this detached connection;
         // it is destroyed on drop and never returns its settings to the pool.
@@ -83,6 +94,7 @@ impl BuildCheckpointSession {
             source_id,
             identity,
             expected_run_id: None,
+            local_wal_budget,
             _maintenance: maintenance,
             #[cfg(test)]
             fail_after: std::sync::atomic::AtomicUsize::new(0),
@@ -117,6 +129,11 @@ impl BuildCheckpointSession {
             .store(count, std::sync::atomic::Ordering::SeqCst);
     }
 
+    #[cfg(test)]
+    pub fn fixture_local_wal_budget(&mut self) {
+        self.local_wal_budget = Some(super::local_wal_budget::LocalWalBudget::fixture_policy());
+    }
+
     pub fn client(&self) -> &tokio_postgres::Client {
         &self.connection
     }
@@ -136,6 +153,14 @@ impl BuildCheckpointSession {
     }
 
     pub async fn checkpoint(&self) -> Result<()> {
+        self.checkpoint_with_hooks(|| Ok(()), |_| Ok(())).await
+    }
+
+    pub async fn checkpoint_with_hooks<F, W>(&self, committed: F, waiting: W) -> Result<()>
+    where
+        F: FnOnce() -> Result<()>,
+        W: FnMut(bool) -> Result<()>,
+    {
         // Source rows remain share-locked until each COMMIT. Reacquire and
         // compare before allowing any writes in the following transaction.
         ensure!(
@@ -143,6 +168,8 @@ impl BuildCheckpointSession {
             "source identity or active pointer changed before checkpoint"
         );
         self.connection.batch_execute("COMMIT").await?;
+        // Report the durable boundary before waiting or a controlled interruption.
+        committed()?;
         #[cfg(test)]
         {
             use std::sync::atomic::Ordering::SeqCst;
@@ -159,6 +186,11 @@ impl BuildCheckpointSession {
                     Err(actual) => remaining = actual,
                 }
             }
+        }
+        // No transaction or transaction-scoped row/graph lock is held here.
+        // The dedicated source session lock still excludes another writer.
+        if let Some(budget) = &self.local_wal_budget {
+            budget.wait(self.client(), waiting).await?;
         }
         self.connection
             .batch_execute("BEGIN; SET LOCAL statement_timeout='120s'")
