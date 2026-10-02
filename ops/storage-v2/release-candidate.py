@@ -1225,7 +1225,12 @@ def verify_intelligence(api_url: str, token: str, source_id: int, generation: in
     record_counts = export["payload"]["record_counts"]
     if int(record_counts["cards"]) == 0:
         return {"applicability": "unknown_not_applicable", "commands": []}
-    common = {"source_id": source_id, "generation": generation, "include_test": "true"}
+    # Named command reads use the same supported bound as normal API callers.
+    # Full intelligence export/integrity remains part of server verification.
+    common = {"source_id": source_id, "generation": generation,
+              "include_test": "true", "limit": 200}
+    if progress is not None:
+        progress["intelligence_command_query_limit"] = common["limit"]
     layers_query = urllib.parse.urlencode({**common, "command": "layers"})
     name, hashes["layers"] = request_intelligence_layers(
         api_url, token, f"/api/v1/intelligence/shadow?{layers_query}")
@@ -1235,7 +1240,10 @@ def verify_intelligence(api_url: str, token: str, source_id: int, generation: in
         query = urllib.parse.urlencode({**common, "command": command, "name": name})
         value = request(api_url, token, "GET", f"/api/v1/intelligence/shadow?{query}")
         hashes[command] = sha256_text(json.dumps(value, sort_keys=True))
-    return {"applicability": "applicable", "commands": sorted(hashes), "result_sha256": hashes}
+    return {"applicability": "applicable", "commands": sorted(hashes),
+            "command_query_limit": 200,
+            "command_coverage": "complete bounded API responses; full intelligence export verified separately",
+            "result_sha256": hashes}
 
 
 def verify(arguments: argparse.Namespace, token: str) -> None:

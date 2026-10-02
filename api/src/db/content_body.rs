@@ -147,14 +147,89 @@ where
     let epoch = begin_reader_epoch(client).await?;
     let result = work.await;
     let finish = end_reader_epoch(client, epoch).await;
+    finish_reader_epoch(result, finish.map_err(anyhow::Error::new))
+}
+
+/// Keep cleanup failure separate from the original operation error. The
+/// diagnostic deliberately omits database messages and private input values.
+#[derive(Debug)]
+pub(crate) struct ReaderEpochCloseFailure {
+    pub(crate) sqlstate: Option<String>,
+}
+
+impl std::fmt::Display for ReaderEpochCloseFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("pack reader epoch could not be closed; retention remains required")
+    }
+}
+
+impl std::error::Error for ReaderEpochCloseFailure {}
+
+fn finish_reader_epoch<T>(
+    result: anyhow::Result<T>,
+    finish: anyhow::Result<()>,
+) -> anyhow::Result<T> {
     match (result, finish) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(anyhow::Error::new(error)
-            .context("pack reader epoch could not be closed; retention remains required")),
-        (Err(error), Err(finish)) => Err(error.context(format!(
-            "pack reader epoch could not be closed; retention remains required: {finish}"
-        ))),
+        (result, Err(finish)) => {
+            let diagnostic = ReaderEpochCloseFailure {
+                sqlstate: finish
+                    .downcast_ref::<Error>()
+                    .and_then(Error::code)
+                    .map(|code| code.code().to_string()),
+            };
+            // Preserve the original failure as the root cause when both fail.
+            let original = match result {
+                Ok(_) => finish,
+                Err(error) => error,
+            };
+            Err(original.context(diagnostic))
+        }
+    }
+}
+
+#[cfg(test)]
+mod qualification_reader_tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct OriginalFailure;
+
+    impl std::fmt::Display for OriginalFailure {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("protected-original-input")
+        }
+    }
+
+    impl std::error::Error for OriginalFailure {}
+
+    #[test]
+    fn original_failure_survives_failed_epoch_close() {
+        let error = finish_reader_epoch::<()>(
+            Err(anyhow::Error::new(OriginalFailure)),
+            Err(anyhow::anyhow!("protected-close-input")),
+        )
+        .unwrap_err();
+        assert!(error.downcast_ref::<OriginalFailure>().is_some());
+        assert!(error.downcast_ref::<ReaderEpochCloseFailure>().is_some());
+        assert!(!error.to_string().contains("protected"));
+    }
+
+    #[test]
+    fn successful_work_cannot_pass_when_epoch_close_fails() {
+        let error =
+            finish_reader_epoch(Ok(7), Err(anyhow::anyhow!("protected-close-input"))).unwrap_err();
+        assert!(error.downcast_ref::<ReaderEpochCloseFailure>().is_some());
+    }
+
+    #[test]
+    fn successful_epoch_close_preserves_the_original_result() {
+        assert_eq!(finish_reader_epoch(Ok(7), Ok(())).unwrap(), 7);
+        let error = finish_reader_epoch::<()>(Err(anyhow::Error::new(OriginalFailure)), Ok(()))
+            .unwrap_err();
+        assert!(error.downcast_ref::<OriginalFailure>().is_some());
+        assert!(error.downcast_ref::<ReaderEpochCloseFailure>().is_none());
     }
 }
 

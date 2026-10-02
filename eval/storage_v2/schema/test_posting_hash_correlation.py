@@ -1,6 +1,7 @@
 """Exact reader equivalence and sparse/dense posting scope references."""
 import hashlib
 import json
+import re
 from unittest.mock import patch
 
 from eval.storage_v2.schema import test_bound_native_rank_work as parent
@@ -35,8 +36,9 @@ class PostingHashCorrelationTests(parent.BoundNativeRankTests):
             self.fail("collision fixture unavailable")
         body = MIGRATION.read_text().split(
             "CREATE OR REPLACE FUNCTION public.storage_v2_scoped_term_posting", 1
-        )[1].split("CREATE OR REPLACE FUNCTION public.storage_v2_source_segment_rank_candidates", 1)[0]
-        body = "CREATE OR REPLACE FUNCTION public.storage_v2_scoped_term_posting" + body
+        )[1]
+        body = "CREATE OR REPLACE FUNCTION public.storage_v2_scoped_term_posting" + re.split(
+            r"\$function\$\s*;", body, maxsplit=1)[0] + "$function$;"
         body = body.replace("public.storage_v2_scoped_term_posting", "posting_fixture.scoped")
         body = body.replace("public.storage_v2_search_document", "posting_fixture.document")
         body = body.replace("public.storage_v2_search_posting", "posting_fixture.flat")
@@ -69,6 +71,8 @@ ANALYZE posting_fixture.document; ANALYZE posting_fixture.flat; ANALYZE posting_
         self.sql(setup)
         scopes = ["ARRAY[]::bigint[]", "NULL::bigint[]", "ARRAY[NULL]::bigint[]",
                   "ARRAY[1,1,5,NULL]::bigint[]",
+                  "ARRAY(SELECT i::bigint FROM generate_series(1,1024) i)",
+                  "ARRAY(SELECT i::bigint FROM generate_series(1,1025) i)",
                   "ARRAY(SELECT i::bigint FROM generate_series(1,4500) i)",
                   "ARRAY(SELECT i::bigint FROM generate_series(1,6000) i)",
                   "ARRAY(SELECT i::bigint FROM generate_series(1,6000) i) || ARRAY[1,5,NULL]::bigint[]"]

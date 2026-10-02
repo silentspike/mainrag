@@ -11,6 +11,7 @@ import tempfile
 import tracemalloc
 import unittest
 import urllib.error
+from urllib.parse import parse_qs, urlsplit
 import uuid
 from argparse import Namespace
 from pathlib import Path
@@ -941,6 +942,45 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
             self.assertEqual(artifact["query_results"], [])
             self.assertFalse(artifact["qualification_attempted"])
             self.assertNotIn("private-token", arguments.output.read_text())
+
+    def test_all_supported_commands_are_bounded_and_scope_is_explicit(self):
+        progress = {}
+        export = {'payload': {'record_counts': {'cards': 200000}}}
+        with patch.object(MODULE, 'request_intelligence_layers', return_value=('fixture', 'a' * 64)) as layers, \
+             patch.object(MODULE, 'request', return_value={'fixture': True}) as request:
+            result = MODULE.verify_intelligence('http://fixture.invalid', 'fixture-token', 1, 2, export, progress)
+        calls = [layers.call_args.args[2]] + [call.args[3] for call in request.call_args_list]
+        queries = [parse_qs(urlsplit(path).query) for path in calls]
+        self.assertEqual([q['command'][0] for q in queries], ['layers', 'card', 'explain', 'ownership'])
+        for query in queries:
+            self.assertEqual(query['limit'], ['200'])
+            self.assertEqual(query['source_id'], ['1'])
+            self.assertEqual(query['generation'], ['2'])
+        self.assertEqual(result['command_query_limit'], 200)
+        self.assertEqual(progress['intelligence_command_query_limit'], 200)
+        self.assertEqual(result['commands'], ['card', 'explain', 'layers', 'ownership'])
+        self.assertIn('full intelligence export verified separately', result['command_coverage'])
+        self.assertEqual(export['payload']['record_counts']['cards'], 200000)
+
+    def test_failed_layers_keeps_requested_bound_without_claiming_command_success(self):
+        progress = {}
+        with patch.object(MODULE, 'request_intelligence_layers', side_effect=TimeoutError), \
+             patch.object(MODULE, 'request') as request:
+            with self.assertRaises(TimeoutError):
+                MODULE.verify_intelligence('http://fixture.invalid', 'fixture-token', 1, 2,
+                    {'payload': {'record_counts': {'cards': 10}}}, progress)
+        request.assert_not_called()
+        self.assertEqual(progress['intelligence_command_query_limit'], 200)
+        self.assertEqual(progress['intelligence_result_sha256'], {})
+
+    def test_empty_export_does_not_request_commands(self):
+        with patch.object(MODULE, 'request_intelligence_layers') as layers, \
+             patch.object(MODULE, 'request') as request:
+            result = MODULE.verify_intelligence('http://fixture.invalid', 'fixture-token', 1, 2,
+                {'payload': {'record_counts': {'cards': 0}}})
+        layers.assert_not_called()
+        request.assert_not_called()
+        self.assertEqual(result, {'applicability': 'unknown_not_applicable', 'commands': []})
 
     def test_intelligence_failure_retains_completed_command_hashes(self) -> None:
         layers = [{"generic_card": {"name": "private-symbol"}}]

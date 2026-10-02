@@ -376,9 +376,9 @@ pub async fn admin_verify_release_candidate(
                 )
                 .await
                 .map_err(|error| {
-                    AppError::BadRequest(format!(
-                        "storage-v2 release-candidate verification failed: {error}"
-                    ))
+                    AppError::BadRequest(
+                        crate::services::shadow_slice::candidate_verification_failure(&error),
+                    )
                 })?;
                 Ok(Json(result))
             })
