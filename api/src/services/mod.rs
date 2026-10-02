@@ -20,6 +20,8 @@ pub mod gpu_semaphore;
 pub mod index;
 pub mod ingest_observation;
 pub mod intelligence;
+#[cfg(feature = "storage-v2-retrieval")]
+pub mod intelligence_export;
 #[cfg(feature = "storage-v2-intelligence")]
 #[allow(dead_code)]
 pub mod intelligence_v2;
