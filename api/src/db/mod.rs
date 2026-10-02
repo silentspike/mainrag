@@ -8,6 +8,8 @@ pub mod content_graph;
 #[cfg(feature = "storage-v2-shadow-ingest")]
 pub mod generation_ingest;
 pub mod health_pool;
+#[cfg(feature = "storage-v2-retrieval")]
+mod local_wal_budget;
 pub mod models;
 pub mod postgres;
 pub mod rls;

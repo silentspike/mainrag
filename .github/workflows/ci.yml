@@ -195,6 +195,11 @@ jobs:
         run: |
           cargo test -p mainrag-api --features storage-v2-retrieval --lib services::shadow_slice::managed_append_tests::managed_append_producer_to_verified_delta_and_periodic_full -- --ignored --exact --nocapture | tee managed-append-ingest-tests.log
           python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("managed-append-ingest-tests.log").read_text(), "Expected the producer-to-persistence regression to execute"'
+      - name: Verify local WAL checkpoint backpressure policy
+        shell: bash
+        run: |
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib local_wal_ -- --nocapture | tee local-wal-tests.log
+          python3 -c 'from pathlib import Path; assert "3 passed; 0 failed; 0 ignored;" in Path("local-wal-tests.log").read_text(), "Expected the local WAL configuration, hysteresis and interruption regressions to execute"'
       - name: Verify CPU backfill route isolation
         shell: bash
         run: |
@@ -466,6 +471,8 @@ jobs:
               'eval.storage_v2.schema.test_scoped_posting_sets.ScopedPostingSetsTests',
               'eval.storage_v2.schema.test_shared_query_postings.SharedQueryPostingTests',
               'eval.storage_v2.schema.test_empty_and_shared_reader_scopes.EmptyAndSharedReaderScopeTests',
+              'eval.storage_v2.schema.test_bounded_reader_planning.BoundedReaderPlanningTests',
+              'eval.storage_v2.schema.test_local_wal_backpressure.LocalWalBackpressureTests',
               'eval.storage_v2.schema.test_active_source_metrics.ActiveSourceMetricsTests',
               'eval.storage_v2.schema.test_active_explore.ActiveExploreTests',
           ])
