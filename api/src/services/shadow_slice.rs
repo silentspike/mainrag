@@ -386,7 +386,7 @@ impl std::error::Error for CandidateVerificationPhase {}
 
 /// Report stable operation labels and SQLSTATE only. Database messages can
 /// contain private source content, paths, or query values and stay out of HTTP.
-pub(crate) fn candidate_verification_failure(error: &anyhow::Error) -> String {
+pub fn candidate_verification_failure(error: &anyhow::Error) -> String {
     let phase = error
         .downcast_ref::<CandidateVerificationPhase>()
         .map(|phase| phase.0)
