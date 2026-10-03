@@ -41,7 +41,14 @@ LINKS = {
     'storage_v2_search_posting': [('document_id', 'storage_v2_search_document')],
     'storage_v2_compact_posting_block': [('document_id', 'storage_v2_search_document')],
     'storage_v2_document_postings_seal': [('document_id', 'storage_v2_search_document')],
+    'storage_v2_ordinary_first_term': [('occurrence_id', 'occurrence')],
+    'storage_v2_ordinary_first_coverage': [('occurrence_id', 'occurrence')],
 }
+IMMUTABILITY_GUARDS = (
+    'storage_v2_reject_graph_mutation', 'storage_v2_reject_immutable_content',
+    'storage_v2_reject_retrieval_mutation', 'storage_v2_reject_document_mutation',
+    'storage_v2_reject_artifact_mutation',
+)
 
 
 def digest(value):
@@ -366,12 +373,12 @@ BEGIN
    FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_class c ON c.oid=t.tgrelid
    WHERE c.relnamespace='public'::regnamespace
      AND c.relname IN ({','.join(A.literal(n) for n in (*TARGETS,*LINKS))})
-     AND p.proname IN ('storage_v2_reject_graph_mutation','storage_v2_reject_immutable_content','storage_v2_reject_retrieval_mutation','storage_v2_reject_document_mutation');
+     AND p.proname IN ({','.join(A.literal(name) for name in IMMUTABILITY_GUARDS)});
  FOR trigger IN SELECT t.tgname,t.tgrelid FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
    JOIN pg_class c ON c.oid=t.tgrelid
    WHERE c.relnamespace='public'::regnamespace
      AND c.relname IN ({','.join(A.literal(n) for n in (*TARGETS,*LINKS))})
-     AND p.proname IN ('storage_v2_reject_graph_mutation','storage_v2_reject_immutable_content','storage_v2_reject_retrieval_mutation','storage_v2_reject_document_mutation') LOOP
+     AND p.proname IN ({','.join(A.literal(name) for name in IMMUTABILITY_GUARDS)}) LOOP
   EXECUTE format('ALTER TABLE %s DISABLE TRIGGER %I',trigger.tgrelid::regclass,trigger.tgname);
  END LOOP;
  {deletes}

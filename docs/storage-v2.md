@@ -1430,3 +1430,28 @@ needs capacity and WAL admission. The immutable document boundary permits only
 these proven representation transitions; edits to text, profiles, components,
 hashes and other semantic fields continue to fail. Posting immutability is an
 installation prerequisite.
+
+## Indexed first positions for ordinary lexical vectors
+
+Migration 139 materializes the exact minimum original segment order for each
+ordinary-vector lexeme and occurrence. It stores full source/artifact provenance
+and explicit coverage, including occurrences with no ordinary vectors. A bare
+single-lexeme query reads this index for covered occurrences and the original
+vectors for uncovered occurrences. Phrases, Boolean queries, negation and other
+query forms keep the complete vector path. Compact-vector handling is unchanged.
+The read helper resolves source authorization before inspecting metadata; both
+projection tables also enforce source RLS. Private maintenance tables are not
+directly readable or writable by the application role.
+
+The administrator-only materializer processes at most 128 occurrences per call
+and returns scanned/materialized counts, inserted terms and a committed cursor.
+It uses the established lexical writer advisory lock before locking the parent
+occurrence. A real ordinary-vector INSERT atomically invalidates that occurrence's
+projection and coverage. Supported ingestion continues through the full fallback
+until the projection is rebuilt; an idempotent insert leaves coverage intact.
+
+Both tables are occurrence-owned derived metadata in native GC. Retained graphs
+retain their projections; unreachable occurrences lose both tables' rows before
+their parent is collected. Projection installation/materialization does not
+change vector witnesses, search-document identities or generation roots, and
+does not replace production latency or complete candidate-set acceptance.
