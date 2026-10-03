@@ -21,7 +21,7 @@ default = []
 pdf-mupdf = ["dep:mupdf"]
 storage-v2-shadow-ingest = []
 storage-v2-intelligence = ["storage-v2-shadow-ingest"]
-storage-v2-retrieval = ["storage-v2-intelligence"]
+storage-v2-retrieval = ["storage-v2-intelligence", "dep:aho-corasick"]
 
 [dependencies]
 # Async Runtime
@@ -71,6 +71,8 @@ moka = { version = "0.12", features = ["sync"] }
 
 # Utilities
 anyhow = "1.0"
+tempfile = "3"
+aho-corasick = { version = "1.1", optional = true }
 thiserror = "2.0"
 clap = { version = "4.5", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -161,7 +163,6 @@ async-stream = "0.3"
 futures = "0.3"
 
 [dev-dependencies]
-tempfile = "3"
 # PDF Test Fixture Generation
 printpdf = "0.7"
 # Benchmarking
