@@ -879,6 +879,30 @@ results can still use memory or spill; no constant-memory claim is made.
 
 ## Protected legacy cleanup inventory
 
+### Runtime retirement boundary
+
+After complete external-hit bootstrap and accepted activation, install
+`MAINRAG_STORAGE_V2_LEGACY_RETIRED_MANIFEST_SHA256` with the exact cleanup
+manifest SHA-256 alongside the active default-read manifest and native ingest
+commit. Activation alone retains the bootstrap endpoints. Retirement rejects
+legacy candidate construction, candidate/current query comparison, old-hit
+inventory and old-hit production with HTTP 409 before database or pack I/O;
+authentication and administrator checks still precede that rejection.
+Durable external-hit resolution, progress, mapping maintenance, native ingest
+and candidate verification retain their native behavior.
+Retained pre-cutover generations use native query seeds after retirement,
+without changing their original producer witness or the pre-cutover comparison.
+
+Startup reads the catalog before constructing legacy workers. Missing legacy
+`files`, `chunks` or `indexing_outbox` without the native retirement binding
+rejects startup, preventing an accidental configuration rollback after deletion.
+The binding is a runtime declaration, not deletion authority or an acceptance
+receipt. Install it before exact manifest apply, and retain it afterwards.
+The persisted native-ingest fixture removes all six direct legacy SQL helpers
+and the legacy relation names, then verifies native construction, query seeds,
+positive search and idempotent replay. This fixture does not prove production
+cleanup, complete API acceptance or reclaimed space.
+
 `cleanup-plan.py` captures a read-only PostgreSQL catalog and optional Qdrant,
 tracked runtime-source, and retained-generation reachability inventories for
 issue #68. Write its output to a private directory outside Git. The output is

@@ -405,7 +405,41 @@ where
 {
     content_body::with_reader_epoch(
         client,
-        verify_release_candidate_in_epoch(client, source_id, input, pack_root, io_buffer_bytes),
+        verify_release_candidate_in_epoch(
+            client,
+            source_id,
+            input,
+            pack_root,
+            io_buffer_bytes,
+            false,
+        ),
+    )
+    .await
+}
+
+/// Reconstruct retained pre-cutover generations after legacy retirement using
+/// native query seeds. Their original producer witness remains unchanged;
+/// pre-activation verification continues to use legacy comparison seeds.
+pub async fn verify_release_candidate_after_retirement<C>(
+    client: &C,
+    source_id: i64,
+    input: &ReleaseCandidateVerifyInput,
+    pack_root: &Path,
+    io_buffer_bytes: usize,
+) -> Result<ReleaseCandidateVerifyResult>
+where
+    C: GenericClient + Sync,
+{
+    content_body::with_reader_epoch(
+        client,
+        verify_release_candidate_in_epoch(
+            client,
+            source_id,
+            input,
+            pack_root,
+            io_buffer_bytes,
+            true,
+        ),
     )
     .await
 }
@@ -477,6 +511,7 @@ async fn verify_release_candidate_in_epoch<C>(
     input: &ReleaseCandidateVerifyInput,
     pack_root: &Path,
     io_buffer_bytes: usize,
+    force_native_query_seeds: bool,
 ) -> Result<ReleaseCandidateVerifyResult>
 where
     C: GenericClient + Sync,
@@ -620,10 +655,11 @@ where
     {
         bail!("candidate intelligence export contract failed");
     }
-    let native_lexical = identity
-        .get::<_, Option<String>>("lexical_input")
-        .as_deref()
-        == Some("native");
+    let native_lexical = force_native_query_seeds
+        || identity
+            .get::<_, Option<String>>("lexical_input")
+            .as_deref()
+            == Some("native");
     let query_seeds = candidate_query_seeds(client, source_id, input.generation_id, native_lexical)
         .await
         .context(CandidateVerificationPhase("query_seeds"))?;

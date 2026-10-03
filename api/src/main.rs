@@ -107,6 +107,18 @@ async fn main() -> anyhow::Result<()> {
 
 /// Full API server with background event processor
 async fn run_api_server(db_pool: db::PostgresPool, config: Config) -> anyhow::Result<()> {
+    config.server.validate_storage_v2_runtime()?;
+    {
+        let client = db_pool.get().await?;
+        services::runtime_retirement::check_legacy_runtime_state(
+            &**client,
+            config
+                .server
+                .storage_v2_legacy_retired_manifest_sha256
+                .is_some(),
+        )
+        .await?;
+    }
     let cpu_mode = config.server.cpu_mode;
     let active_storage = config
         .server

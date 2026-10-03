@@ -39,6 +39,9 @@ pub struct ServerConfig {
     /// Exact installed runtime identity for regular active storage-v2 ingest.
     /// It is installed together with the approved default-read selector.
     pub storage_v2_active_ingest_commit_sha: Option<String>,
+    /// Exact cleanup manifest whose runtime retirement boundary is installed.
+    /// This disables legacy bootstrap, not durable external-hit resolution.
+    pub storage_v2_legacy_retired_manifest_sha256: Option<String>,
     pub cors_origins: Vec<String>,
     /// HMAC pepper for API-Key hashing (env: API_KEY_PEPPER)
     pub api_key_pepper: String,
@@ -159,6 +162,10 @@ impl Config {
                     }
                 })
                 .transpose()?,
+                storage_v2_legacy_retired_manifest_sha256: env::var(
+                    "MAINRAG_STORAGE_V2_LEGACY_RETIRED_MANIFEST_SHA256",
+                )
+                .ok(),
                 cors_origins: env::var("CORS_ORIGINS")
                     .unwrap_or_default() // Empty = no CORS (fail-closed)
                     .split(',')
@@ -299,16 +306,7 @@ impl Config {
                 .unwrap_or_else(|_| PathBuf::from("data/storage-v2/packs")),
             storage_v2_pack_io_buffer_bytes,
         };
-        if config
-            .server
-            .storage_v2_default_read_manifest_sha256
-            .is_some()
-            != config.server.storage_v2_active_ingest_commit_sha.is_some()
-        {
-            anyhow::bail!(
-                "active storage-v2 read selector and ingest commit must be configured together"
-            );
-        }
+        config.server.validate_storage_v2_runtime()?;
         Ok(config)
     }
 
@@ -330,6 +328,47 @@ impl Config {
             self.database.host, self.database.port, self.database.user, self.database.name
         )
     }
+}
+
+impl ServerConfig {
+    pub fn validate_storage_v2_runtime(&self) -> anyhow::Result<()> {
+        validate_runtime_retirement_bindings(
+            self.storage_v2_default_read_manifest_sha256.as_deref(),
+            self.storage_v2_active_ingest_commit_sha.as_deref(),
+            self.storage_v2_legacy_retired_manifest_sha256.as_deref(),
+        )
+    }
+}
+
+fn validate_runtime_retirement_bindings(
+    activation: Option<&str>,
+    ingest: Option<&str>,
+    retirement: Option<&str>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        activation.is_some() == ingest.is_some(),
+        "active storage-v2 read selector and ingest commit must be configured together"
+    );
+    for (name, value, length) in [
+        ("activation manifest", activation, 64),
+        ("ingest commit", ingest, 40),
+        ("legacy retirement manifest", retirement, 64),
+    ] {
+        if let Some(value) = value {
+            anyhow::ensure!(
+                value.len() == length
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+                "{name} must be an exact lowercase hash"
+            );
+        }
+    }
+    anyhow::ensure!(
+        retirement.is_none() || activation.is_some(),
+        "legacy retirement requires active storage-v2 reads and native ingest"
+    );
+    Ok(())
 }
 
 fn env_flag(name: &str) -> bool {
@@ -357,5 +396,53 @@ mod tests {
         assert!(parse_env_flag("1"));
         assert!(!parse_env_flag("false"));
         assert!(!parse_env_flag("0"));
+    }
+
+    #[test]
+    fn runtime_retirement_requires_valid_native_bindings() {
+        let manifest = "a".repeat(64);
+        let commit = "b".repeat(40);
+        for (activation, ingest, retirement, valid) in [
+            (None, None, None, true),
+            (Some(manifest.as_str()), Some(commit.as_str()), None, true),
+            (
+                Some(manifest.as_str()),
+                Some(commit.as_str()),
+                Some(manifest.as_str()),
+                true,
+            ),
+            (None, None, Some(manifest.as_str()), false),
+            (Some(manifest.as_str()), None, None, false),
+            (None, Some(commit.as_str()), None, false),
+            (
+                Some(manifest.as_str()),
+                Some(commit.as_str()),
+                Some(""),
+                false,
+            ),
+            (
+                Some(manifest.as_str()),
+                Some(commit.as_str()),
+                Some("../manifest"),
+                false,
+            ),
+            (
+                Some("A".repeat(64).as_str()),
+                Some(commit.as_str()),
+                Some(manifest.as_str()),
+                false,
+            ),
+            (
+                Some(manifest.as_str()),
+                Some("bad"),
+                Some(manifest.as_str()),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                validate_runtime_retirement_bindings(activation, ingest, retirement).is_ok(),
+                valid
+            );
+        }
     }
 }

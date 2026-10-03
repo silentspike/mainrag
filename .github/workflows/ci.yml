@@ -224,6 +224,11 @@ jobs:
         run: |
           cargo test -p mainrag-api --features storage-v2-retrieval --lib local_wal_ -- --nocapture | tee local-wal-tests.log
           python3 -c 'from pathlib import Path; assert "3 passed; 0 failed; 0 ignored;" in Path("local-wal-tests.log").read_text(), "Expected the local WAL configuration, hysteresis and interruption regressions to execute"'
+      - name: Verify native runtime retirement configuration and authenticated routes
+        shell: bash
+        run: |
+          cargo test -p mainrag-api --features storage-v2-retrieval --bin mainrag-api runtime_retirement_ -- --nocapture | tee runtime-retirement-tests.log
+          python3 -c 'from pathlib import Path; assert "2 passed; 0 failed; 0 ignored;" in Path("runtime-retirement-tests.log").read_text(), "Expected both retirement binding and authenticated route regressions to execute"'
       - name: Verify CLI native sync and retained legacy responses
         shell: bash
         run: |
