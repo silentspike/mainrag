@@ -215,20 +215,7 @@ SELECT jsonb_build_object(
   'building_run_count', (
     SELECT count(*) FROM storage_v2_ingest_run WHERE status = 'building'
   ),
-  'outbox_classes', (
-    SELECT COALESCE(jsonb_agg(jsonb_build_object(
-      'action', classified.action,
-      'status', classified.status,
-      'row_count', classified.row_count,
-      'min_id', classified.min_id,
-      'max_id', classified.max_id
-    ) ORDER BY classified.action, classified.status), '[]'::jsonb)
-    FROM (
-      SELECT action, status, count(*) AS row_count,
-             min(id) AS min_id, max(id) AS max_id
-      FROM indexing_outbox GROUP BY action, status
-    ) AS classified
-  ),
+  'outbox_classes', (%OUTBOX_CLASSES_SQL%),
   'generations', (
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
       'id', generation.id,
@@ -482,10 +469,28 @@ def reachability_sql(generation_ids: tuple[int, ...], retain_all: bool,
             if historical_hit_roots else "SELECTED_GENERATIONS_MAPPINGS_INTELLIGENCE_BUILDING_RUNS")
 
 
+def catalog_statement(relation_names: tuple[str, ...] = (),
+                      generation_ids: tuple[int, ...] = (), retain_all: bool = False,
+                      *, historical_hit_roots: bool, outbox_present: bool) -> str:
+    """The same observation query is usable inside the apply transaction."""
+    outbox = "'[]'::jsonb"
+    if outbox_present:
+        outbox = """SELECT COALESCE(jsonb_agg(jsonb_build_object(
+          'action', action, 'status', status, 'row_count', row_count,
+          'min_id', min_id, 'max_id', max_id) ORDER BY action, status), '[]'::jsonb)
+          FROM (SELECT action, status, count(*) AS row_count,
+            min(id) AS min_id, max(id) AS max_id
+            FROM public.indexing_outbox GROUP BY action, status) classified"""
+    return CATALOG_SQL.replace("%EXACT_ROWS_SQL%", exact_rows_sql(relation_names)).replace(
+        "%TARGET_LOCK_SQL%", target_lock_sql(relation_names)).replace(
+        "%REACHABILITY_SQL%", reachability_sql(generation_ids, retain_all,
+            historical_hit_roots=historical_hit_roots)).replace("%OUTBOX_CLASSES_SQL%", outbox)
+
+
 def catalog(database: str, local_postgres: bool,
             relation_names: tuple[str, ...] = (),
             generation_ids: tuple[int, ...] = (), retain_all: bool = False) -> dict:
-    count_sql = exact_rows_sql(relation_names)
+    validate_relation_names(relation_names)
     command = (["sudo", "-n", "-u", "postgres"] if local_postgres else []) + [
         "psql", "-X", "--no-psqlrc", "-qAt", "--set=ON_ERROR_STOP=1",
         "--dbname", database,
@@ -496,14 +501,18 @@ def catalog(database: str, local_postgres: bool,
         environment.get("PGOPTIONS", "") + " -c default_transaction_read_only=on"
     ).strip()
     probe = subprocess.run(command + ["--command",
-        "SELECT to_regclass('public.storage_v2_legacy_hit_history') IS NOT NULL"],
+        "SELECT json_build_array(to_regclass('public.storage_v2_legacy_hit_history') IS NOT NULL, "
+        "to_regclass('public.indexing_outbox') IS NOT NULL)"],
         text=True, capture_output=True, env=environment, check=False)
-    if probe.returncode or probe.stdout.strip() not in ("t", "f"):
+    try:
+        presence = json.loads(probe.stdout)
+    except ValueError:
+        presence = None
+    if probe.returncode or not isinstance(presence, list) or len(presence) != 2 \
+            or any(type(value) is not bool for value in presence):
         raise RuntimeError("native legacy retention root inventory failed")
-    statement = CATALOG_SQL.replace("%EXACT_ROWS_SQL%", count_sql).replace(
-        "%TARGET_LOCK_SQL%", target_lock_sql(relation_names)).replace(
-        "%REACHABILITY_SQL%", reachability_sql(generation_ids, retain_all,
-            historical_hit_roots=probe.stdout.strip() == "t"))
+    statement = catalog_statement(relation_names, generation_ids, retain_all,
+        historical_hit_roots=presence[0], outbox_present=presence[1])
     completed = subprocess.run(command, input=statement, text=True,
                                capture_output=True, env=environment, check=False)
     if completed.returncode:
@@ -517,7 +526,9 @@ def catalog(database: str, local_postgres: bool,
     if isinstance(value, dict) and isinstance(value.get("relations"), list):
         history_present = any(isinstance(row, dict)
             and row.get("name") == "storage_v2_legacy_hit_history" for row in value["relations"])
-        if history_present != (probe.stdout.strip() == "t"):
+        outbox_present = any(isinstance(row, dict) and row.get("name") == "indexing_outbox"
+                             for row in value["relations"])
+        if history_present != presence[0] or outbox_present != presence[1]:
             raise RuntimeError("native legacy roots changed during catalog capture")
     required = {"database_oid", "relations", "columns", "constraints", "policies",
                 "triggers", "functions", "indexes", "dependencies",
@@ -565,7 +576,7 @@ def catalog(database: str, local_postgres: bool,
         raise RuntimeError("retained generation reachability is incomplete")
     if reachable is not None:
         expected_scope = "SELECTED_GENERATIONS_MAPPINGS_INTELLIGENCE_BUILDING_RUNS"
-        if probe.stdout.strip() == "t":
+        if presence[0]:
             expected_scope += "_PRESERVED_LEGACY_HITS"
         counts = ("requested_generation_count", "found_generation_count",
                   "active_generation_count", "active_generation_included_count",

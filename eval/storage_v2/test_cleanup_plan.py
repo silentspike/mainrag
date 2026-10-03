@@ -34,7 +34,7 @@ def catalog_fixture():
 
 def capture_responses(value):
     """The cheap schema probe precedes the full protected catalog query."""
-    return [SimpleNamespace(returncode=0,stdout='f\n'),
+    return [SimpleNamespace(returncode=0,stdout='[false, false]\n'),
             SimpleNamespace(returncode=0,stdout=value)]
 
 
@@ -45,7 +45,7 @@ class CleanupPlanCaptureTests(unittest.TestCase):
         def invoke(command, **kwargs):
             calls.append((command, kwargs))
             if '--command' in command:
-                return SimpleNamespace(returncode=0,stdout='f\n')
+                return SimpleNamespace(returncode=0,stdout='[false, false]\n')
             return SimpleNamespace(returncode=0, stdout=json.dumps(catalog_fixture()))
 
         with patch.object(cleanup.subprocess, "run", side_effect=invoke):

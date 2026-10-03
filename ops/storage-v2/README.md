@@ -877,6 +877,89 @@ interchangeable. This synthetic projection is neither full authorized API
 qualification nor an isolated production resource measurement. Materialized
 results can still use memory or spill; no constant-memory claim is made.
 
+## Transactional PostgreSQL legacy retirement
+
+`cleanup-apply.py --plan` compiles a fully dispositioned private catalog draft
+into an exact PostgreSQL phase manifest. Migration 135 must be installed by the
+administrator before the catalog is captured. It also moves the unchanged
+complete-active-set check to the existing protected ordinary-ingest receipt
+owner; the application retains narrow EXECUTE and cannot bypass receipt RLS.
+Planning never removes objects.
+
+```bash
+python3 ops/storage-v2/cleanup-apply.py --plan \
+  --catalog "$PROTECTED_DIR/catalog.json" --catalog-sha256 "$CATALOG_SHA256" \
+  --draft "$PROTECTED_DIR/dispositions.json" --draft-sha256 "$DRAFT_SHA256" \
+  --runtime-package-sha256 "$PACKAGE_SHA256" --manifest "$PROTECTED_DIR/manifest.json"
+
+python3 ops/storage-v2/cleanup-apply.py --apply "$MANIFEST_SHA256" \
+  --manifest "$PROTECTED_DIR/manifest.json" \
+  --catalog "$PROTECTED_DIR/catalog.json" --draft "$PROTECTED_DIR/dispositions.json" \
+  --approval "$PROTECTED_DIR/authority.json" --approval-sha256 "$AUTHORITY_SHA256" \
+  --database "$TARGET_DATABASE" --output "$PROTECTED_DIR/attempt.json"
+```
+
+The private `cleanup-approval.v1` authority receipt names the manifest hash,
+`review_kind`, a nonempty authority reference, `accepts_loss_of_legacy_rollback`,
+`observed_at_unix`, and exactly the seven named gates below. Each gate reference
+contains a `file` basename and `sha256`. Each `cleanup-gate.v1` file contains its
+gate name, PASS status, fresh observation time, exact before-state/pointer/runtime
+package bindings, and nonempty hash-bound underlying `proofs` references. Gate
+and proof filenames resolve only inside that protected evidence directory.
+The activation gate also names the activation manifest and completed regular
+ingest; runtime retirement includes the observed live process identity/startup
+settings. Caller review dispositions bind every affected routine candidate to
+its function OID, relation OID and exact definition digest. Plan and execution
+also bind the contents of all three cleanup operator source files.
+
+`--apply <manifest-sha256>` reopens the original protected catalog and draft,
+reproduces the manifest, and requires a fresh exact-manifest authority receipt
+that explicitly accepts loss of the legacy rollback path. Standing owner
+continuation authority can supply an honestly labeled owner-authorized
+self-review receipt; tooling does not infer authority from a merge or build.
+
+Every gate opens its hash-bound underlying proof files. Required gates cover
+accepted activation and first regular ingest, installed runtime retirement,
+native integrity, actual legacy-hit coverage, dependency/caller review, export
+retention and the recovery boundary. The installed API process must have the
+exact executable digest, process start identity, activation/default/native
+ingest settings and cleanup manifest retirement binding. Hashed lexical routine
+candidates require an explicit definition-bound caller disposition; lexical
+matches alone never establish runtime independence.
+
+The database phase takes one cross-process advisory lease, locks all observed
+public tables against writes and target tables against reads, and checks the
+complete catalog again inside the transaction. It rejects active database work,
+open native reader epochs, building runs, stale activation pointers, a missing
+ordinary-ingest receipt, and actual incomplete or drifted chunk mapping proofs.
+Drops use catalog OIDs and `RESTRICT`; no input SQL and no `CASCADE` are accepted.
+Implicit sequences, indexes, columns and constraints also require DELETE
+rather than silently inheriting a parent disposition. Native/auth objects and
+native functions remain protected; only the six retired bootstrap helpers can
+receive a storage-v2 function DELETE disposition.
+
+The transaction verifies the retained catalog, dependency set, logical caller
+references, exact retained counts, pointer/generation/pack roots and writer
+state before inserting its durable administrator-only commit receipt. A lost
+client response is reconciled through that receipt before any subsequent
+attempt. A currently held PostgreSQL advisory lease blocks a second dispatch;
+recovering an already committed receipt is read-only and does not require
+regenerating expired pre-deletion authority. Local attempt outputs are
+create-only; an interrupted process is
+never treated as a completed cleanup merely because its state file exists.
+
+A receipt has `DB_COMMITTED_POSTCHECK_PENDING`: it proves only the PostgreSQL
+phase. It records database size before deletion and relation bytes targeted;
+these are not a filesystem or thin-pool reclaimed-space claim. A fresh catalog
+readback checks that targets remain absent (including recreation under a new
+OID), native roots remain unchanged, and no reader/writer appeared. It records
+the measured database size delta and cleanup-receipt growth, flags unexplained
+space deltas, and preserves remaining phase requirements. Independent
+post-cleanup integrity/application/ingest checks, measured space reconciliation,
+Qdrant and operational component retirement, protected exports and native
+mark-and-sweep/repack remain required before #68 acceptance. This operator does
+not delete packs, exports, backup files or unrelated operational components.
+
 ## Protected legacy cleanup inventory
 
 ### Runtime retirement boundary
@@ -952,7 +1035,9 @@ Retired bootstrap routines can still receive explicit reviewed dispositions.
 
 This capture has status `OBSERVED_ONLY`. It does not produce an approved cleanup
 manifest, verify body/pack integrity, authorize GC, remove runtime callers, or
-provide an apply path. Accepted activation, fresh owner approval for an exact
+provide deletion authority. The separate transactional PostgreSQL operator
+consumes the reviewed inputs only after its live gates. Accepted activation,
+fresh owner authority for an exact
 manifest, and post-cleanup verification remain separate gates.
 # Durable source batches
 

@@ -514,6 +514,7 @@ jobs:
               'eval.storage_v2.schema.test_bound_query_and_presence_work.BoundQueryAndPresenceTests',
               'eval.storage_v2.schema.test_native_legacy_hit_resolution.NativeLegacyHitResolutionTests',
               'eval.storage_v2.schema.test_cleanup_catalog.CleanupCatalogTests',
+              'eval.storage_v2.schema.test_cleanup_apply.CleanupApplyTests',
               'eval.storage_v2.schema.test_active_source_metrics.ActiveSourceMetricsTests',
               'eval.storage_v2.schema.test_active_explore.ActiveExploreTests',
           ])

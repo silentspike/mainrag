@@ -58,6 +58,11 @@ RETAINED_FUNCTIONS = frozenset({
     "storage_v2_can_access_source", "user_can_access_source",
     "get_accessible_sources", "log_audit_event", "check_rate_limit",
 })
+RETIRED_BOOTSTRAP_FUNCTIONS = frozenset({
+    "storage_v2_lock_legacy_rank_snapshot", "storage_v2_get_legacy_rank_snapshot",
+    "storage_v2_candidate_query_evidence", "storage_v2_copy_legacy_lexical_segments",
+    "storage_v2_legacy_hit_inventory", "storage_v2_materialize_legacy_chunk_ranks",
+})
 
 
 def retained_relation(name: object) -> bool:
@@ -76,7 +81,10 @@ def validate_delete(item: dict, relation_names: dict) -> None:
                 else relation_names.get(observed.get("relation_oid")))
     if retained_relation(relation):
         raise RuntimeError("retained native or authorization object cannot be deleted by legacy cleanup")
-    if kind == "function" and observed.get("name") in RETAINED_FUNCTIONS:
+    function_name = observed.get("name")
+    if kind == "function" and (function_name in RETAINED_FUNCTIONS or (
+            isinstance(function_name, str) and function_name.startswith("storage_v2_")
+            and function_name not in RETIRED_BOOTSTRAP_FUNCTIONS)):
         raise RuntimeError("retained native or authorization function cannot be deleted by legacy cleanup")
 
 
@@ -130,6 +138,11 @@ def observed_objects(inventory: dict) -> list[dict]:
                 if not isinstance(exact_rows, dict):
                     raise RuntimeError("exact relation counts are invalid")
                 exact_count = exact_rows.get(row.get("name"))
+                # PostgreSQL sequences have one state row. Their catalog
+                # parameters/ownership are observed without unsupported LOCK
+                # TABLE operations on a sequence or an unbounded data scan.
+                if exact_count is None and row.get("kind") == "S":
+                    exact_count = 1
                 if exact_count is not None:
                     if type(exact_count) is not int or exact_count < 0:
                         raise RuntimeError("exact relation count is invalid")
