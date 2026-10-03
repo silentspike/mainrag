@@ -10,6 +10,14 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use uuid::Uuid;
 
+// Physical write settings belong to the detached writer. GIN consolidation can
+// outlive a reader deadline; its memory and pending entries remain bounded.
+// SET LOCAL is reapplied after every durable boundary and never reaches readers.
+const WRITE_SETTINGS: &str = "SET LOCAL statement_timeout='10min'; \
+    SET LOCAL maintenance_work_mem='128MB'; \
+    SET LOCAL gin_pending_list_limit='16MB'; \
+    SET LOCAL client_min_messages='warning'";
+
 pub struct BuildCheckpointSession {
     connection: ClientWrapper,
     user_id: Uuid,
@@ -56,12 +64,7 @@ impl BuildCheckpointSession {
                 "local WAL backpressure requires its controlled observation function"
             );
         }
-        // GIN pending-list maintenance measured longer than the ordinary
-        // reader deadline. Keep writes bounded in this detached connection;
-        // it is destroyed on drop and never returns its settings to the pool.
-        connection
-            .batch_execute("SET LOCAL statement_timeout='120s'")
-            .await?;
+        connection.batch_execute(WRITE_SETTINGS).await?;
         let acquired: bool = connection
             .query_one(
                 "SELECT pg_try_advisory_lock(hashtextextended( \
@@ -192,9 +195,8 @@ impl BuildCheckpointSession {
         if let Some(budget) = &self.local_wal_budget {
             budget.wait(self.client(), waiting).await?;
         }
-        self.connection
-            .batch_execute("BEGIN; SET LOCAL statement_timeout='120s'")
-            .await?;
+        self.connection.batch_execute("BEGIN").await?;
+        self.connection.batch_execute(WRITE_SETTINGS).await?;
         self.connection
             .execute(
                 "SELECT set_config('app.user_id',$1,true), \
