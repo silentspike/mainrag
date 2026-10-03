@@ -85,8 +85,17 @@ async fn run() -> Result<()> {
         .create_new(true)
         .mode(0o600)
         .open(output)?;
-    receipt_file.write_all(b"{\"status\":\"DISPATCHED_REQUIRES_READBACK\"}\n")?;
+    serde_json::to_writer(
+        &mut receipt_file,
+        &serde_json::json!({
+            "schema_version":"mainrag.storage-v2.pack-maintenance-attempt.v1",
+            "status":"DISPATCHED_REQUIRES_READBACK","manifest_sha256":manifest,"pack_id":pack,
+            "operation":argument(&args,"--operation")?,"replacement_pack_id":args.get("--replacement"),
+        }),
+    )?;
+    receipt_file.write_all(b"\n")?;
     receipt_file.sync_all()?;
+    fs::File::open(parent)?.sync_all()?;
     let (mut client, connection) = config.connect(NoTls).await?;
     let task = tokio::spawn(connection);
     let accepted = client.query_one(
