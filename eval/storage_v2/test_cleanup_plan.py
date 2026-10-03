@@ -29,6 +29,11 @@ def catalog_fixture():
         "reachability": None,
     }
 
+def capture_responses(value):
+    """The cheap schema probe precedes the full protected catalog query."""
+    return [SimpleNamespace(returncode=0,stdout='f\n'),
+            SimpleNamespace(returncode=0,stdout=value)]
+
 
 class CleanupPlanCaptureTests(unittest.TestCase):
     def test_database_capture_is_read_only_and_rejects_partial_json(self):
@@ -36,11 +41,13 @@ class CleanupPlanCaptureTests(unittest.TestCase):
 
         def invoke(command, **kwargs):
             calls.append((command, kwargs))
+            if '--command' in command:
+                return SimpleNamespace(returncode=0,stdout='f\n')
             return SimpleNamespace(returncode=0, stdout=json.dumps(catalog_fixture()))
 
         with patch.object(cleanup.subprocess, "run", side_effect=invoke):
             self.assertEqual(cleanup.catalog("fixture", True), catalog_fixture())
-        command, kwargs = calls[0]
+        command, kwargs = calls[1]
         self.assertEqual(command[:4], ["sudo", "-n", "-u", "postgres"])
         self.assertIn("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", kwargs["input"])
         self.assertIn("default_transaction_read_only=on", kwargs["env"]["PGOPTIONS"])
@@ -61,14 +68,10 @@ class CleanupPlanCaptureTests(unittest.TestCase):
             cleanup.reachability_sql((7, 7), False)
 
         broken = {**catalog_fixture(), "relations": None}
-        with patch.object(cleanup.subprocess, "run", return_value=SimpleNamespace(
-            returncode=0, stdout=json.dumps(broken)
-        )):
+        with patch.object(cleanup.subprocess, "run", side_effect=capture_responses(json.dumps(broken))):
             with self.assertRaisesRegex(RuntimeError, "incomplete"):
                 cleanup.catalog("fixture", False)
-        with patch.object(cleanup.subprocess, "run", return_value=SimpleNamespace(
-            returncode=0, stdout=json.dumps(catalog_fixture())
-        )):
+        with patch.object(cleanup.subprocess, "run", side_effect=capture_responses(json.dumps(catalog_fixture()))):
             with self.assertRaisesRegex(RuntimeError, "incomplete"):
                 cleanup.catalog("fixture", False, ("files",))
         missing_active = catalog_fixture()
@@ -92,21 +95,15 @@ class CleanupPlanCaptureTests(unittest.TestCase):
         missing_active["reachability"]["requested_generation_count"] = 1
         missing_active["reachability"]["found_generation_count"] = 1
         missing_active["reachability"]["active_generation_count"] = 1
-        with patch.object(cleanup.subprocess, "run", return_value=SimpleNamespace(
-            returncode=0, stdout=json.dumps(missing_active)
-        )):
+        with patch.object(cleanup.subprocess, "run", side_effect=capture_responses(json.dumps(missing_active))):
             with self.assertRaisesRegex(RuntimeError, "incomplete"):
                 cleanup.catalog("fixture", False, generation_ids=(7,))
         missing_active["reachability"]["active_generation_included_count"] = 1
         missing_active["reachability"]["active_pointer_count"] = 1
-        with patch.object(cleanup.subprocess, "run", return_value=SimpleNamespace(
-            returncode=0, stdout=json.dumps(missing_active)
-        )):
+        with patch.object(cleanup.subprocess, "run", side_effect=capture_responses(json.dumps(missing_active))):
             with self.assertRaisesRegex(RuntimeError, "incomplete"):
                 cleanup.catalog("fixture", False, generation_ids=(7,))
-        with patch.object(cleanup.subprocess, "run", return_value=SimpleNamespace(
-            returncode=0, stdout='{"database_oid":"1","database_oid":"2"}'
-        )):
+        with patch.object(cleanup.subprocess, "run", side_effect=capture_responses('{"database_oid":"1","database_oid":"2"}')):
             with self.assertRaisesRegex(RuntimeError, "invalid"):
                 cleanup.catalog("fixture", False)
 

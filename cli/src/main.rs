@@ -144,6 +144,17 @@ enum Commands {
     /// Show system statistics
     Stats,
 
+    /// Resolve an old hit ID to ordered native targets, including retained history
+    ResolveHit {
+        old_hit_id: String,
+        #[arg(short = 'S', long)]
+        source: String,
+        #[arg(long, default_value = "active")]
+        generation: String,
+        #[arg(long)]
+        include_test: bool,
+    },
+
     /// Show configuration
     Config {
         #[command(subcommand)]
@@ -597,6 +608,19 @@ async fn main() -> anyhow::Result<()> {
         Commands::Auth { action } => commands::auth::run(&mut client, action, cli.json).await,
 
         Commands::Stats => commands::stats::run(&client, cli.json).await,
+
+        Commands::ResolveHit {
+            old_hit_id,
+            source,
+            generation,
+            include_test,
+        } => {
+            let value = client
+                .resolve_legacy_hit(&source, &generation, &old_hit_id, include_test)
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
+        }
 
         Commands::Config { action } => commands::config::run(action, cli.json).await,
 

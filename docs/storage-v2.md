@@ -597,6 +597,75 @@ The mapping deliberately has no destructive foreign key to the legacy chunk
 table. It is retained through legacy cleanup and remains subject to occurrence
 authorization; possession of an old ID does not bypass source visibility.
 
+The authenticated `POST /api/v1/legacy-hits/resolve` surface accepts a source,
+an explicit generation sequence or `active`, and an old hit ID. The CLI exposes
+the same operation as `mainrag resolve-hit OLD_ID --source SOURCE --generation N`.
+Resolution first returns targets visible in the selected generation. If none
+remain, it can return mapped occurrences covered by an earlier retained verified
+generation, labeled `retained_history` with their own generation identities.
+Unverified, abandoned, future, and unauthorized roots are excluded. The primary
+ordinal is the smallest returned mapping ordinal; a filtered split need not
+retain ordinal zero. An unknown ID returns an explicit unresolved envelope.
+
+An old hit absent from every retained generation can instead have a dedicated
+native history root. `storage_v2_preserve_legacy_hit` checks the administrator's
+source access, native body digest and length, publication state, complete old
+chunk/file identity, and expected mapping hash. It creates the immutable native
+artifact, occurrence, proof record, and mapping in one transaction. Identical
+retries reuse the root; changed proof identities or stale mapping hashes fail.
+These roots allocate no source generation, membership interval, or active pointer.
+They resolve as `retained_legacy_hit` with a null target generation, never as a
+current source hit. No legacy table is needed for their subsequent resolution.
+
+The byte-alignment producer core decodes and hashes original legacy chunks,
+checks the optional text projection, and scans a complete verified native file
+for a bounded batch of patterns in one pass. It supports overlapping patterns
+and fragment/window boundaries using UTF-8 byte coordinates. Only a unique exact
+position with complete, gap-free fragment coverage yields native overlap targets.
+Empty, absent, or ambiguous patterns require preserved history. A corrupt digest,
+truncated file, inconsistent projection, or range gap produces no accepted plan.
+The administrator producer endpoint processes one bounded batch of a named
+verified generation and legacy file. The request binds the expected legacy file
+SHA-256, file revision, global legacy mutation epoch, hit cursor, test scope and
+admitted native source spool budget. The source writer and legacy snapshot locks
+bind that inventory while the batch executes. Original
+legacy chunks are decoded and verified before any mapping is applied. Existing
+historical bodies are reused only after the native pack reader verifies them;
+missing unique bodies use one verified pack per batch. Native mappings, history
+roots and completion proofs commit together. Unknown commit outcomes are resolved
+by observing the live source-writer lease before retrying the same bounded
+request: committed proofs are reused, never inferred
+from a local progress counter. Published packs are never deleted on an HTTP error.
+
+A private source spool under the pack root caches at most one decoded native file
+per source across its batches. Its key binds source, generation and the complete
+ordered native body/range identities; every reuse checks the complete byte digest.
+The producer removes its two owned spool files when that file is finished. An
+interrupted file retains this owned cache until resume or explicit job cleanup.
+This budget is independent of the chunk batch budget and requires caller resource
+admission before a production run.
+
+The inventory endpoint pages legacy files and returns exact hit/completion counts
+for the named generation. Mapping mutations invalidate completion proofs in the
+same transaction, so inventory cannot count a changed mapping as complete. Native
+history rows are independent GC roots even if their mapping is later replaced.
+Retire the bootstrap inventory/producer readers and snapshot-lock functions before
+legacy table removal. Actual all-hit coverage, end-to-end producer validation and
+frozen-package acceptance are still required before cleanup. The serial operator
+freezes source/generation inventories and the installed reader package, records
+committed cursors durably, checks physical capacity before each batch, and
+rechecks every source's coverage at the end. Its completion receipt proves that
+plan's old-hit coverage; it does not activate generations or authorize deletion.
+
+Administrator mapping batches are source scoped, bounded to 512 old IDs and
+2,048 total targets, and require the observed mapping hash for every old ID.
+They share ordered transaction locks with single-hit replacement, reject drift
+atomically, and cannot move an existing old ID to another source. These surfaces
+read native mappings and roots, so resolution does not require legacy chunk or
+file tables. They do not automatically construct mappings, prove source byte
+overlaps, or authorize legacy deletion; the compatibility inventory and its
+source-backed mapping producer must establish those before cleanup.
+
 ## Exact retrieval contract
 
 Storage v2 indexes unique content/search documents and relates their postings to
