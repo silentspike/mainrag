@@ -448,7 +448,7 @@ pub async fn produce_batch<C: GenericClient + Sync>(
             "old chunk batch exceeds byte budget"
         );
         proofs.push(json!({"chunk_sha256":hex::encode(digest),"file_sha256":input.expected_file_sha256,
-            "file_id":input.file_id,
+            "file_id":input.file_id,"file_revision":input.expected_file_revision,
             "source_path":path,"logical_bytes":chunk.bytes().len(),"start_line":row.get::<_,i32>("start_line"),
             "end_line":row.get::<_,i32>("end_line")}));
         chunks.push(chunk);
