@@ -1,12 +1,18 @@
 use axum::{extract::Request, middleware::Next, response::Response};
 use metrics::{counter, histogram};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 pub fn setup_metrics() -> PrometheusHandle {
-    PrometheusBuilder::new()
-        .install_recorder()
-        .expect("Failed to install Prometheus recorder")
+    static HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+    HANDLE
+        .get_or_init(|| {
+            PrometheusBuilder::new()
+                .install_recorder()
+                .expect("Failed to install Prometheus recorder")
+        })
+        .clone()
 }
 
 pub async fn metrics_middleware(request: Request, next: Next) -> Response {

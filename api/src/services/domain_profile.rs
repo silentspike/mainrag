@@ -305,10 +305,14 @@ mod tests {
 
     #[test]
     fn legacy_profile_gets_a_compatibility_version_and_content_hash() {
-        let path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../data/domain_profiles/bitwig.toml");
-        let profile = DomainProfileRegistry::load_profile(&path).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let content = "[profile]\nname = 'public-fixture'\ndescription = 'legacy profile fixture'\nlanguage = 'text'\n";
+        std::fs::write(file.path(), content).unwrap();
+        let profile = DomainProfileRegistry::load_profile(file.path()).unwrap();
         assert_eq!(profile.version, 1);
-        assert_ne!(profile.content_sha256, [0; 32]);
+        assert_eq!(
+            profile.content_sha256,
+            <[u8; 32]>::from(Sha256::digest(content.as_bytes()))
+        );
     }
 }
