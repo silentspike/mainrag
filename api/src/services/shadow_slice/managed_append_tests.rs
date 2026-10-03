@@ -507,6 +507,52 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             "SELECT active_generation_id FROM logical_source WHERE id=63", &[],
         ).await?.get(0);
         ensure!(pointer.is_none(), "managed fixture changed the active pointer");
+        // Exercise the same native writer selected by regular active sync after
+        // the bootstrap routine and legacy table names have been retired.
+        // A false CASE arm alone still leaves a parse-time function dependency.
+        client.batch_execute(
+            "DROP FUNCTION storage_v2_copy_legacy_lexical_segments(bigint,bigint); \
+             ALTER TABLE files RENAME TO retired_files; \
+             ALTER TABLE chunks RENAME TO retired_chunks; \
+             ALTER TABLE symbols RENAME TO retired_symbols; \
+             ALTER TABLE call_graph RENAME TO retired_call_graph;"
+        ).await?;
+        let native_root = directory.0.join("native-source");
+        std::fs::create_dir(&native_root)?;
+        let native_text = "native Über 東京 lexical content\n".repeat(400);
+        std::fs::write(native_root.join("native.txt"), &native_text)?;
+        let native_path = native_root.to_str().context("fixture source path is not UTF-8")?;
+        client.execute("INSERT INTO sources(id,name,type,path) VALUES(166,'native-retired','fs',$1)",
+            &[&native_path]).await?;
+        let transaction = client.transaction().await?;
+        transaction.batch_execute(&format!("SET LOCAL app.user_id='{PRINCIPAL}'")).await?;
+        let native = Box::pin(run_active_source_build(
+            &transaction,166,"fs",&native_root,&packs,4096,COMMIT,
+        )).await?;
+        let native_verified = Box::pin(verify_release_candidate(
+            &transaction,166,&ReleaseCandidateVerifyInput {generation_id:native.generation_id},
+            &packs,4096,
+        )).await?;
+        ensure!(native.item_count==1
+            && native.telemetry["ablauf"]["lexical_segments_copied"]==0
+            && native.telemetry["ablauf"]["lexical_segments_generated"].as_u64().unwrap_or(0)>0
+            && native_verified.checks.values().all(|state| state=="PASS"),
+            "native successor did not preserve complete lexical, body and intelligence verification");
+        let lexical_input: String = transaction.query_one(
+            "SELECT witness->>'lexical_input' FROM source_generation WHERE id=$1",
+            &[&native.generation_id],
+        ).await?.get(0);
+        ensure!(lexical_input=="native", "native producer identity is missing");
+        transaction.commit().await?;
+        let transaction = client.transaction().await?;
+        transaction.batch_execute(&format!("SET LOCAL app.user_id='{PRINCIPAL}'")).await?;
+        let repeated = Box::pin(run_active_source_build(
+            &transaction,166,"fs",&native_root,&packs,4096,COMMIT,
+        )).await?;
+        ensure!(repeated.reused_generation && repeated.generation_id==native.generation_id,
+            "native successor replay duplicated its generation");
+        transaction.commit().await?;
+        println!("native source writer and verification pass without bootstrap routine or legacy tables");
         Ok(())
     }.await;
     drop(admin);

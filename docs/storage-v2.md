@@ -1362,3 +1362,21 @@ nondeferrable occurrence foreign key proves source and artifact identity, and
 the validated block-order check proves a nonempty segment array. Installation
 checks these constraints and their predicate function before removing redundant
 array reads. Forced RLS and the outer source authorization remain in place.
+
+
+### Native regular sync after legacy retirement
+
+Regular active-source sync builds successors from native lexical inputs. Its
+staging statement omits the legacy bootstrap routine completely, so PostgreSQL
+can prepare it after that routine and the legacy table names have been retired.
+Pre-activation release-candidate construction retains its explicit compatibility
+bootstrap. Native successor witnesses and idempotency keys identify the native
+lexical path; candidate verification still reconstructs bodies, roots, segments
+and intelligence evidence before any active-pointer commit.
+
+CLI source sync and file watchers accept both `ACTIVE_INGEST_COMMITTED` and
+`NO_CHANGE` responses. Native JSON preserves generation identity, item counts,
+source I/O, telemetry and the activation receipt without inventing legacy chunk
+or embedding counts. Watch statistics use complete active membership and exclude
+test sources. These runtime contracts do not establish production activation or
+cleanup acceptance; the real complete-set and post-cleanup gates remain required.

@@ -309,15 +309,7 @@ pub async fn watch(client: &ApiClient, source_name: Option<&str>, daemon: bool) 
                 // Trigger incremental sync via API
                 match client.sync_files(&source_name, &files).await {
                     Ok(result) => {
-                        println!(
-                            "  {} +{} ~{} skip:{} chunks:{} embed:{}",
-                            "✓".green(),
-                            result.stats.files_processed,
-                            result.stats.files_processed, // Updated
-                            0i64,                         // Skipped not in response
-                            result.stats.chunks_created,
-                            result.stats.embeddings_generated
-                        );
+                        println!("  {} {}", "✓".green(), result.summary());
 
                         // Mark completed
                         let completed_time = Instant::now();

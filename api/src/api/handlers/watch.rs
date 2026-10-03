@@ -149,6 +149,35 @@ pub struct WatchStatsResponse {
 pub async fn get_watch_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<WatchStatsResponse>, StatusCode> {
+    if let Some(manifest) = state
+        .config
+        .server
+        .storage_v2_default_read_manifest_sha256
+        .clone()
+    {
+        return state
+            .rls_client
+            .with_system(move |txn| {
+                Box::pin(async move {
+                    txn.query_one(
+                        "SELECT storage_v2_require_complete_active_set($1)",
+                        &[&manifest],
+                    )
+                    .await?;
+                    let row = txn.query_one(ACTIVE_WATCH_STATS_SQL, &[&manifest]).await?;
+                    Ok(Json(WatchStatsResponse {
+                        total_watched_sources: row.get("watched_sources"),
+                        files_monitored: row.get("monitored_files"),
+                        debounce_ms: debounce_ms(),
+                        last_scan: row
+                            .get::<_, Option<chrono::DateTime<chrono::Utc>>>("last_scan")
+                            .map(|value| value.to_rfc3339()),
+                    }))
+                })
+            })
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+    }
     state
         .rls_client
         .with_system(|txn| {
@@ -170,10 +199,7 @@ pub async fn get_watch_stats(
                     .await?
                     .get(0);
 
-                let debounce_ms = std::env::var("MAINRAG_WATCH_DEBOUNCE_MS")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(500);
+                let debounce_ms = debounce_ms();
 
                 let last_scan = txn
                     .query_opt(
@@ -194,4 +220,22 @@ pub async fn get_watch_stats(
         })
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+// Watch toggles remain source metadata. Counts and scan timestamps come from
+// complete active membership; cached legacy counters are never consulted.
+const ACTIVE_WATCH_STATS_SQL: &str = r#"
+SELECT count(*)::bigint AS watched_sources,
+       coalesce(sum((metrics.value->>'file_count')::bigint),0)::bigint AS monitored_files,
+       max((metrics.value->>'last_synced')::timestamptz) AS last_scan
+FROM sources source
+CROSS JOIN LATERAL storage_v2_active_source_metrics($1,source.id,false) metrics(value)
+WHERE source.watch_enabled=true AND NOT source.is_test
+"#;
+
+fn debounce_ms() -> u64 {
+    std::env::var("MAINRAG_WATCH_DEBOUNCE_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(500)
 }

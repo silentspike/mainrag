@@ -204,9 +204,15 @@ pub async fn stage_shadow_document<C>(
 where
     C: GenericClient + Sync,
 {
-    client
-        .query_one(
-            "WITH node AS MATERIALIZED ( \
+    // Omit the bootstrap symbol entirely: PostgreSQL resolves functions even
+    // inside a CASE branch that will not execute after legacy retirement.
+    let lexical = if item.copy_legacy_lexical {
+        "storage_v2_copy_legacy_lexical_segments(item.occurrence_id,item.artifact_version_id)"
+    } else {
+        "0::BIGINT"
+    };
+    let statement = format!(
+        "WITH node AS MATERIALIZED ( \
             SELECT id FROM storage_v2_put_leaf_node($7, 'artifact', $6) \
          ), view_row AS MATERIALIZED ( \
             SELECT view_value.id FROM node CROSS JOIN LATERAL \
@@ -228,11 +234,13 @@ where
                 item.occurrence_id,stage,$20,'unavailable',NULL,$21)) \
               FROM item CROSS JOIN unnest($22::TEXT[]) stage CROSS JOIN binding \
          ), lexical AS MATERIALIZED ( \
-            SELECT CASE WHEN $23::BOOLEAN THEN \
-                storage_v2_copy_legacy_lexical_segments(item.occurrence_id,item.artifact_version_id) \
-                ELSE 0::BIGINT END AS copied_segments \
+            SELECT {lexical} AS copied_segments \
               FROM item CROSS JOIN binding CROSS JOIN scores \
-         ) SELECT item.*,lexical.copied_segments FROM item CROSS JOIN lexical",
+         ) SELECT item.*,lexical.copied_segments FROM item CROSS JOIN lexical"
+    );
+    client
+        .query_one(
+            &statement,
             &[
                 &item.run_id,
                 &item.item_key,
@@ -256,7 +264,6 @@ where
                 &item.score_profile,
                 item.score_evidence,
                 &item.score_stages,
-                &item.copy_legacy_lexical,
             ],
         )
         .await
