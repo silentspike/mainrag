@@ -486,13 +486,20 @@ BEGIN
             AND verification_manifest_sha256 IS NOT NULL) THEN
         RAISE EXCEPTION 'legacy inventory requires verified source generation and file cursor';
     END IF;
+    WITH files_scope AS MATERIALIZED (
+        SELECT id,path,hash,coalesce((SELECT revision FROM storage_v2_legacy_rank_revision WHERE file_id=files.id),0)
+            AS legacy_revision
+        FROM files WHERE source_id=p_source_id AND id>p_after_file_id ORDER BY id LIMIT 128
+    )
     SELECT coalesce(jsonb_agg(jsonb_build_object('file_id',file.id,'file_sha256',encode(file.hash,'hex'),
-        'legacy_revision',coalesce((SELECT revision FROM storage_v2_legacy_rank_revision WHERE file_id=file.id),0),
+        'legacy_revision',file.legacy_revision,
         'hit_count',coverage.hit_count,'completed_hits',coverage.completed_hits) ORDER BY file.id),'[]'::JSONB) INTO v_result
-    FROM (SELECT id,path,hash FROM files WHERE source_id=p_source_id AND id>p_after_file_id ORDER BY id LIMIT 128) file
+    FROM files_scope file
     CROSS JOIN LATERAL (SELECT count(*) AS hit_count,count(proof.old_hit_id) AS completed_hits
         FROM chunks chunk LEFT JOIN storage_v2_legacy_hit_proof proof ON proof.old_hit_id=chunk.id::TEXT
             AND proof.source_id=p_source_id AND proof.generation_id=p_generation_id
+            AND proof.proof->>'file_id'=file.id::TEXT
+            AND proof.proof->>'file_revision'=file.legacy_revision::TEXT
             AND proof.proof->>'chunk_sha256'=encode(chunk.content_hash,'hex')
             AND proof.proof->>'file_sha256'=encode(file.hash,'hex') AND proof.proof->>'source_path'=file.path
             AND proof.proof->>'start_line'=chunk.start_line::TEXT AND proof.proof->>'end_line'=chunk.end_line::TEXT

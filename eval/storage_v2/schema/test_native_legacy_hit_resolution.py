@@ -196,11 +196,11 @@ class NativeLegacyHitResolutionTests(unittest.TestCase):
         generation=int(self.sql(f'SELECT generation_id FROM storage_v2_ingest_run WHERE id={run}'))
         digest=hashlib.sha256(text.encode()).hexdigest()
         path='/synthetic/proof.txt'
-        native_proof=dict(chunk_sha256=hashlib.sha256(b'alpha').hexdigest(),file_sha256=digest,
+        native_proof=dict(chunk_sha256=hashlib.sha256(b'alpha').hexdigest(),file_sha256=digest,file_id=700,file_revision=0,
             source_path=path,logical_bytes=5,start_line=1,end_line=1,native_file_sha256=digest,byte_start=0,byte_end=5)
         old='retained original 東京'
         body=int(self.sql(self.admin(f"SELECT id FROM storage_v2_put_inline_body(convert_to({self.quote(old)},'UTF8'))")))
-        history_proof=dict(chunk_sha256=hashlib.sha256(old.encode()).hexdigest(),file_sha256=digest,
+        history_proof=dict(chunk_sha256=hashlib.sha256(old.encode()).hexdigest(),file_sha256=digest,file_id=700,file_revision=0,
             source_path=path,logical_bytes=len(old.encode()),start_line=2,end_line=2)
         native=dict(mapping=self.record(3,'70001',[target],[5],[0]),proof=native_proof,history_body_id=None)
         history=dict(mapping=self.record(3,'70002',[target]),proof=history_proof,history_body_id=body)
@@ -226,6 +226,16 @@ class NativeLegacyHitResolutionTests(unittest.TestCase):
         self.assertEqual(self.sql("SELECT count(*) FROM storage_v2_legacy_hit_proof WHERE old_hit_id='70001'"),'0')
         self.assertEqual(inventory()['files'][0]['completed_hits'],1)
         native['mapping']=self.record(3,'70001',[target],[5],[0])
+        apply([native,history])
+        self.assertEqual(inventory()['files'][0]['completed_hits'],2)
+        # Any old-file/chunk mutation invalidates coverage, even if the stored
+        # hash/path/line columns remain unchanged. A new inventory cannot skip
+        # the byte verification based on an earlier completion proof.
+        self.sql('INSERT INTO storage_v2_legacy_rank_revision VALUES(700,1)')
+        self.assertEqual(inventory()['files'][0]['completed_hits'],0)
+        native_proof['file_revision']=history_proof['file_revision']=1
+        native['mapping']=self.record(3,'70001',[target],[5],[0])
+        history['mapping']=self.record(3,'70002',[target])
         apply([native,history])
         self.assertEqual(inventory()['files'][0]['completed_hits'],2)
         bad=dict(mapping=self.record(3,'70004',[target],[5],[1]),proof=native_proof,history_body_id=None)
