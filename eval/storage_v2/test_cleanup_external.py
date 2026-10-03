@@ -158,13 +158,15 @@ class CleanupExternalTests(unittest.TestCase):
         parent = {'pointer_set_sha256': plan['pointer_set_sha256'],
                   'runtime_package_sha256': plan['runtime_package_sha256'],
                   'result': {'status': 'DB_COMMITTED_POSTCHECK_PENDING'}}
-        lease = unittest.mock.Mock()
+        lease = unittest.mock.Mock(backend_pid=17)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary);s = root.stat()
             plan['vector_space_before'].update(root=str(root), device=s.st_dev, inode=s.st_ino)
             with patch.object(E.A, 'validate_runtime'), patch.object(E.A, 'receipt', return_value=parent), \
-                    patch.object(E.C, 'catalog', return_value=plan['catalog']), patch.object(E.A, 'psql', return_value='f'):
+                    patch.object(E.C, 'catalog', return_value=plan['catalog']), patch.object(E.A, 'psql', return_value='f') as clients:
                 E.native_guard(plan, {}, 'fixture', False, lease)
+                self.assertIn('AND pid<>17', clients.call_args.args[2])
+                self.assertNotIn('application_name<>', clients.call_args.args[2])
                 with patch.object(E.A, 'receipt', return_value=None), self.assertRaisesRegex(RuntimeError, 'committed'):
                     E.native_guard(plan, {}, 'fixture', False, lease)
                 with patch.object(E.C, 'catalog', return_value={**plan['catalog'], 'building_run_count': 1}), \
