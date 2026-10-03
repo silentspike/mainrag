@@ -543,6 +543,17 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             &[&native.generation_id],
         ).await?.get(0);
         ensure!(lexical_input=="native", "native producer identity is missing");
+        let seed = native_verified.query_seeds.iter().find(|seed| seed.expects_match)
+            .context("native successor must retain a positive source-backed query seed")?;
+        let search: serde_json::Value = transaction.query_one(
+            "SELECT storage_v2_search_exact($1,$2,$3,$4,10)",
+            &[&166_i64,&native.generation_seq.to_string(),
+              &json!({"type":"term","value":seed.query}),&json!({})],
+        ).await?.get(0);
+        ensure!(search["results"].as_array().is_some_and(|hits| hits.iter().any(|hit|
+            hit["source_path"].as_str().is_some_and(|path|
+                hex::encode(Sha256::digest(path.as_bytes()))==seed.expected_path_sha256))),
+            "native query seed did not resolve its source-backed path after legacy retirement");
         transaction.commit().await?;
         let transaction = client.transaction().await?;
         transaction.batch_execute(&format!("SET LOCAL app.user_id='{PRINCIPAL}'")).await?;
