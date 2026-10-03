@@ -1,5 +1,6 @@
 """Active metadata isolation, fragment counts and legacy-table independence."""
 import json
+import re
 import unittest
 import uuid
 
@@ -106,6 +107,18 @@ SELECT storage_v2_record_call({occurrence},NULL,'unknown_function','call',
         self.begin(1,'91'*32,'92'*32,user_id=parent.ADMIN)
         self.sql('UPDATE sources SET file_count=999,total_size=999; ALTER TABLE files RENAME TO retired_files; ALTER TABLE chunks RENAME TO retired_chunks; ALTER TABLE symbols RENAME TO retired_symbols; ALTER TABLE call_graph RENAME TO retired_call_graph;')
         self.assertEqual(self.metrics(digest),before)
+        # Execute the actual handler query against renamed legacy tables and
+        # deliberately wrong cached counts. Test sources cannot inflate it.
+        self.sql('ALTER TABLE sources ADD COLUMN IF NOT EXISTS watch_enabled BOOLEAN; '
+                 'UPDATE sources SET watch_enabled=(id IN (1,3));')
+        handler = (parent.ROOT / 'api/src/api/handlers/watch.rs').read_text()
+        watch_sql = re.search(r'const ACTIVE_WATCH_STATS_SQL: &str = r#"(.*?)"#;',
+                              handler, re.S).group(1).replace('$1', f"'{digest}'")
+        watch = json.loads(self.sql(self.admin(
+            f'SELECT row_to_json(watched) FROM ({watch_sql}) watched')))
+        self.assertEqual(watch['watched_sources'],1)
+        self.assertEqual(watch['monitored_files'],before['file_count'])
+        self.assertIsNotNone(watch['last_scan'])
         self.command(self.database,file=migration)
         self.assertEqual(self.metrics(digest),before)
         self.assertEqual(self.sql("SELECT has_function_privilege('public','storage_v2_active_source_metrics(text,bigint,boolean)','execute')"),'f')

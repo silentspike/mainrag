@@ -14,7 +14,7 @@ use tokio_postgres::GenericClient;
 
 use super::shadow_slice::{
     observe_release_watermark_configured, observe_release_watermark_with_prefix,
-    run_release_candidate_build, verify_release_candidate, ReleaseCandidateVerifyInput,
+    run_active_source_build, verify_release_candidate, ReleaseCandidateVerifyInput,
     ReleaseCandidateVerifyResult, ReleaseWatermarkObservation, ShadowSliceResult,
 };
 use crate::plugins::managed_append::TrustedPrefix;
@@ -248,7 +248,7 @@ where
         "storage-v2 pack filesystem cannot hold the observed source and reserve"
     );
 
-    let built = run_release_candidate_build(
+    let built = run_active_source_build(
         client,
         source_id,
         &source_type,

@@ -795,6 +795,7 @@ where
         io_buffer_bytes,
         commit_sha,
         SliceMode::PublicFixture,
+        false,
         None,
         None,
         None,
@@ -805,6 +806,7 @@ where
 
 /// Build and verify a complete source generation without changing an active
 /// pointer. Qualification and the release-candidate transition are separate.
+#[allow(dead_code)]
 pub async fn run_release_candidate_build<C>(
     client: &C,
     source_id: i64,
@@ -826,6 +828,39 @@ where
         io_buffer_bytes,
         commit_sha,
         SliceMode::ReleaseCandidate,
+        true,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Build an ordinary active-source successor using only native lexical inputs.
+/// Legacy bootstrap readers are deliberately absent from this path.
+pub async fn run_active_source_build<C>(
+    client: &C,
+    source_id: i64,
+    source_type: &str,
+    source_path: &Path,
+    pack_root: &Path,
+    io_buffer_bytes: usize,
+    commit_sha: &str,
+) -> Result<ShadowSliceResult>
+where
+    C: GenericClient + Sync,
+{
+    run_storage_v2_slice(
+        client,
+        source_id,
+        source_type,
+        source_path,
+        pack_root,
+        io_buffer_bytes,
+        commit_sha,
+        SliceMode::ReleaseCandidate,
+        false,
         None,
         None,
         None,
@@ -888,6 +923,7 @@ where
         io_buffer_bytes,
         commit_sha,
         SliceMode::ReleaseCandidate,
+        true,
         git_snapshot_commit_sha,
         expected_source_watermark_sha256,
         progress,
@@ -918,6 +954,7 @@ pub async fn run_release_candidate_build_checkpointed(
         io_buffer_bytes,
         commit_sha,
         SliceMode::ReleaseCandidate,
+        true,
         git_snapshot_commit_sha,
         expected_source_watermark_sha256,
         progress,
@@ -1118,6 +1155,7 @@ async fn run_storage_v2_slice<C>(
     io_buffer_bytes: usize,
     commit_sha: &str,
     mode: SliceMode,
+    copy_legacy_lexical: bool,
     git_snapshot_commit_sha: Option<&str>,
     expected_source_watermark_sha256: Option<&str>,
     progress: Option<&super::build_progress::BuildProgressRecorder>,
@@ -1345,6 +1383,9 @@ where
         "is_test": is_test,
         "adapter_profile_id": adapter_profile,
     });
+    if mode == SliceMode::ReleaseCandidate && !copy_legacy_lexical {
+        witness["lexical_input"] = json!("native");
+    }
     if checkpoints.is_some() {
         witness["checkpoint_protocol"] = json!("complete-items-v1");
     }
@@ -1361,6 +1402,9 @@ where
     let mut idempotency_identity=format!(
         "{idempotency_domain}:{source_id}:{predecessor_generation_id}:{source_watermark_sha256}:{adapter_profile}:{commit_sha}"
     );
+    if mode == SliceMode::ReleaseCandidate && !copy_legacy_lexical {
+        idempotency_identity.push_str(":native-lexical-v1");
+    }
     if let Some(cut) = &filesystem_cut {
         idempotency_identity.push(':');
         idempotency_identity.push_str(&cut.cut.descriptor_sha256);
@@ -1978,7 +2022,7 @@ where
                     score_profile,
                     score_evidence: &score_evidence,
                     score_stages: &score_stages,
-                    copy_legacy_lexical: mode == SliceMode::ReleaseCandidate,
+                    copy_legacy_lexical,
                 },
             )
             .await?;
