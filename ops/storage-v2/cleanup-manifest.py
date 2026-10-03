@@ -168,6 +168,18 @@ def observed_objects(inventory: dict) -> list[dict]:
                                 "kind": kind, "identity": {name_field: row[name_field]},
                                 "observed_sha256": hashlib.sha256(CAPTURE.canonical(row)).hexdigest(),
                                 "observed": row})
+    components = inventory.get("components")
+    if components is not None:
+        if not isinstance(components, list) or len(components) > 128:
+            raise RuntimeError("component inventory is incomplete")
+        for row in components:
+            if not isinstance(row, dict) or row.get("kind") not in ("systemd_unit", "docker_container") \
+                    or not isinstance(row.get("identity"), str) or not isinstance(row.get("role"), str):
+                raise RuntimeError("component identity is incomplete")
+            objects.append({"key": object_key(row["kind"], (row["identity"],)),
+                            "kind": row["kind"], "identity": {"identity": row["identity"]},
+                            "observed_sha256": hashlib.sha256(CAPTURE.canonical(row)).hexdigest(),
+                            "observed": row})
     runtime = inventory.get("runtime_search")
     if runtime is not None:
         if not isinstance(runtime, dict) or not isinstance(runtime.get("matches"), list):
