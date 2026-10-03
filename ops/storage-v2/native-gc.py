@@ -40,6 +40,7 @@ LINKS = {
     'storage_v2_legacy_rank_binding': [('occurrence_id', 'occurrence')],
     'storage_v2_search_posting': [('document_id', 'storage_v2_search_document')],
     'storage_v2_compact_posting_block': [('document_id', 'storage_v2_search_document')],
+    'storage_v2_document_postings_seal': [('document_id', 'storage_v2_search_document')],
 }
 
 
@@ -365,12 +366,12 @@ BEGIN
    FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_class c ON c.oid=t.tgrelid
    WHERE c.relnamespace='public'::regnamespace
      AND c.relname IN ({','.join(A.literal(n) for n in (*TARGETS,*LINKS))})
-     AND p.proname IN ('storage_v2_reject_graph_mutation','storage_v2_reject_immutable_content','storage_v2_reject_retrieval_mutation');
+     AND p.proname IN ('storage_v2_reject_graph_mutation','storage_v2_reject_immutable_content','storage_v2_reject_retrieval_mutation','storage_v2_reject_document_mutation');
  FOR trigger IN SELECT t.tgname,t.tgrelid FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
    JOIN pg_class c ON c.oid=t.tgrelid
    WHERE c.relnamespace='public'::regnamespace
      AND c.relname IN ({','.join(A.literal(n) for n in (*TARGETS,*LINKS))})
-     AND p.proname IN ('storage_v2_reject_graph_mutation','storage_v2_reject_immutable_content','storage_v2_reject_retrieval_mutation') LOOP
+     AND p.proname IN ('storage_v2_reject_graph_mutation','storage_v2_reject_immutable_content','storage_v2_reject_retrieval_mutation','storage_v2_reject_document_mutation') LOOP
   EXECUTE format('ALTER TABLE %s DISABLE TRIGGER %I',trigger.tgrelid::regclass,trigger.tgname);
  END LOOP;
  {deletes}
