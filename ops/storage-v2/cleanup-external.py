@@ -358,6 +358,7 @@ class DatabaseLease:
             raise RuntimeError('database must be a local database name')
         self.database, self.privileged, self.catalog = database, privileged, catalog
         self.process = None
+        self.backend_pid = None
 
     def query(self, statement):
         if self.process is None or self.process.poll() is not None:
@@ -398,13 +399,16 @@ class DatabaseLease:
             if self.query("BEGIN; SET LOCAL lock_timeout='2s'; SET LOCAL idle_in_transaction_session_timeout='600s';\n"+
                           locks+"\nSELECT 'ADMITTED';") != 'ADMITTED':
                 raise RuntimeError('native write exclusion could not be proven')
+            self.backend_pid = int(self.query('SELECT pg_backend_pid();'))
+            if self.backend_pid <= 1:
+                raise RuntimeError('database lease backend identity is invalid')
             return self
         except BaseException:
             self.close()
             raise
 
     def check(self):
-        if self.query("SELECT 'LIVE';") != 'LIVE':
+        if self.backend_pid is None or self.query('SELECT pg_backend_pid();') != str(self.backend_pid):
             raise RuntimeError('database cleanup lease is no longer live')
 
     def close(self):
@@ -491,7 +495,7 @@ def native_guard(plan, gates, database, privileged, lease):
     active = A.psql(database, privileged, "SELECT EXISTS(SELECT 1 FROM pg_stat_activity "
         "WHERE datid=(SELECT oid FROM pg_database WHERE datname=current_database()) "
         "AND pid<>pg_backend_pid() AND backend_type='client backend' AND state<>'idle' "
-        "AND application_name<>'mainrag-storage-v2-external-cleanup');")
+        f"AND pid<>{int(lease.backend_pid)});")
     if active != 'f':
         raise RuntimeError('another database reader/writer appeared during external retirement')
     script = """import json,os,stat,sys
