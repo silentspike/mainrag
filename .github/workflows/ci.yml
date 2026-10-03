@@ -134,6 +134,29 @@ jobs:
         run: |
           cargo test -p mainrag-api --features storage-v2-retrieval --lib qualification_reader_tests -- --nocapture | tee qualification-reader-tests.log
           python3 -c 'from pathlib import Path; assert "8 passed; 0 failed; 0 ignored;" in Path("qualification-reader-tests.log").read_text(), "Expected all complete export and reader diagnostic regressions to execute"'
+      - name: Verify native legacy hit production, committed replay and corrupt body rejection
+        shell: bash
+        env:
+          STORAGE_V2_TEST_SOCKET: '127.0.0.1'
+          PGUSER: fixture
+          PGPASSWORD: fixture_only
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y postgresql-client
+          fixture_metadata="$RUNNER_TEMP/legacy-hit-fixture.json"
+          python3 -m eval.storage_v2.schema.legacy_hit_fixture --output "$fixture_metadata" > legacy-hit-fixture.log 2>&1 &
+          fixture_pid=$!
+          trap 'kill "$fixture_pid" 2>/dev/null || true; wait "$fixture_pid" || true' EXIT
+          for attempt in $(seq 1 120); do
+            test -f "$fixture_metadata" && break
+            kill -0 "$fixture_pid" 2>/dev/null || { cat legacy-hit-fixture.log; exit 1; }
+            sleep 1
+          done
+          test -f "$fixture_metadata"
+          fixture_database=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["database"])' "$fixture_metadata")
+          export MAINRAG_LEGACY_HIT_FIXTURE_URL="postgresql://fixture:fixture_only@127.0.0.1:5432/$fixture_database"
+          cargo test --locked -p mainrag-api --features storage-v2-retrieval --lib services::legacy_hit_producer -- --include-ignored --nocapture | tee legacy-hit-producer-tests.log
+          python3 -c 'from pathlib import Path; assert "3 passed; 0 failed; 0 ignored;" in Path("legacy-hit-producer-tests.log").read_text(), "Expected the real producer and both byte matcher regressions to execute"'
       - name: Verify final storage-v2 source read accounting
         shell: bash
         run: |
@@ -478,6 +501,7 @@ jobs:
               'eval.storage_v2.schema.test_cached_legacy_rank_snapshots.CachedLegacyRankSnapshotTests',
               'eval.storage_v2.schema.test_native_reader_inputs.NativeReaderInputTests',
               'eval.storage_v2.schema.test_bound_query_and_presence_work.BoundQueryAndPresenceTests',
+              'eval.storage_v2.schema.test_native_legacy_hit_resolution.NativeLegacyHitResolutionTests',
               'eval.storage_v2.schema.test_active_source_metrics.ActiveSourceMetricsTests',
               'eval.storage_v2.schema.test_active_explore.ActiveExploreTests',
           ])

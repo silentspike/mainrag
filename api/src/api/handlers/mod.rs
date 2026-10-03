@@ -1,6 +1,10 @@
 #[cfg(feature = "storage-v2-retrieval")]
 mod active_intelligence;
 mod active_metadata;
+#[cfg(feature = "storage-v2-retrieval")]
+mod legacy_hits;
+#[cfg(feature = "storage-v2-retrieval")]
+pub use legacy_hits::*;
 pub mod admin;
 pub mod agents;
 pub mod auth;

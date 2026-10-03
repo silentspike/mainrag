@@ -541,6 +541,41 @@ impl ApiClient {
         ))
     }
 
+    /// Resolve a durable legacy ID using authorized native generation roots.
+    pub async fn resolve_legacy_hit(
+        &self,
+        source: &str,
+        generation: &str,
+        old_hit_id: &str,
+        include_test: bool,
+    ) -> Result<serde_json::Value> {
+        let source_id = match source.parse::<i64>() {
+            Ok(id) if id > 0 => id,
+            _ => self.get_source_id_by_name(source).await?,
+        };
+        let response = self
+            .client
+            .post(format!("{}/api/v1/legacy-hits/resolve", self.base_url))
+            .bearer_auth(self.token.as_deref().unwrap_or(""))
+            .json(
+                &serde_json::json!({"source_id":source_id,"generation":generation,
+                "old_hit_id":old_hit_id,"include_test":include_test}),
+            )
+            .send()
+            .await
+            .context("Legacy hit resolution failed")?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "Legacy hit resolution returned HTTP {}",
+                response.status()
+            ));
+        }
+        response
+            .json()
+            .await
+            .context("Invalid legacy hit resolution response")
+    }
+
     pub async fn sync_source(&self, source_name: &str) -> Result<SyncSourceResponse> {
         // Resolve name to ID
         let source_id = self.get_source_id_by_name(source_name).await?;

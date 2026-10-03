@@ -225,6 +225,7 @@ visible_artifact AS (
 ),
 protected_occurrence AS (
   SELECT occurrence_id AS id FROM legacy_hit_mapping
+  %HISTORICAL_HIT_ROOTS%
   UNION
   SELECT occurrence_id FROM storage_v2_symbol_occurrence
   UNION
@@ -407,7 +408,8 @@ def target_lock_sql(relation_names: tuple[str, ...]) -> str:
     )
 
 
-def reachability_sql(generation_ids: tuple[int, ...], retain_all: bool) -> str:
+def reachability_sql(generation_ids: tuple[int, ...], retain_all: bool,
+                     historical_hit_roots: bool = False) -> str:
     if retain_all and generation_ids:
         raise RuntimeError("explicit retention and retain-all are mutually exclusive")
     if len(generation_ids) > 4096 or len(set(generation_ids)) != len(generation_ids) \
@@ -418,16 +420,18 @@ def reachability_sql(generation_ids: tuple[int, ...], retain_all: bool) -> str:
     requested = ("SELECT id FROM source_generation" if retain_all else
                  "SELECT unnest(ARRAY[" + ",".join(map(str, generation_ids))
                  + "]::bigint[]) AS id")
-    return REACHABILITY_SQL.replace("%RETAINED_QUERY%", requested)
+    return REACHABILITY_SQL.replace("%RETAINED_QUERY%", requested).replace(
+        "%HISTORICAL_HIT_ROOTS%", "UNION SELECT occurrence_id FROM storage_v2_legacy_hit_history"
+        if historical_hit_roots else "").replace(
+            "SELECTED_GENERATIONS_MAPPINGS_INTELLIGENCE_BUILDING_RUNS",
+            "SELECTED_GENERATIONS_MAPPINGS_INTELLIGENCE_BUILDING_RUNS_PRESERVED_LEGACY_HITS"
+            if historical_hit_roots else "SELECTED_GENERATIONS_MAPPINGS_INTELLIGENCE_BUILDING_RUNS")
 
 
 def catalog(database: str, local_postgres: bool,
             relation_names: tuple[str, ...] = (),
             generation_ids: tuple[int, ...] = (), retain_all: bool = False) -> dict:
     count_sql = exact_rows_sql(relation_names)
-    statement = CATALOG_SQL.replace("%EXACT_ROWS_SQL%", count_sql).replace(
-        "%TARGET_LOCK_SQL%", target_lock_sql(relation_names)).replace(
-        "%REACHABILITY_SQL%", reachability_sql(generation_ids, retain_all))
     command = (["sudo", "-n", "-u", "postgres"] if local_postgres else []) + [
         "psql", "-X", "--no-psqlrc", "-qAt", "--set=ON_ERROR_STOP=1",
         "--dbname", database,
@@ -437,6 +441,15 @@ def catalog(database: str, local_postgres: bool,
     environment["PGOPTIONS"] = (
         environment.get("PGOPTIONS", "") + " -c default_transaction_read_only=on"
     ).strip()
+    probe = subprocess.run(command + ["--command",
+        "SELECT to_regclass('public.storage_v2_legacy_hit_history') IS NOT NULL"],
+        text=True, capture_output=True, env=environment, check=False)
+    if probe.returncode or probe.stdout.strip() not in ("t", "f"):
+        raise RuntimeError("native legacy retention root inventory failed")
+    statement = CATALOG_SQL.replace("%EXACT_ROWS_SQL%", count_sql).replace(
+        "%TARGET_LOCK_SQL%", target_lock_sql(relation_names)).replace(
+        "%REACHABILITY_SQL%", reachability_sql(generation_ids, retain_all,
+            historical_hit_roots=probe.stdout.strip() == "t"))
     completed = subprocess.run(command, input=statement, text=True,
                                capture_output=True, env=environment, check=False)
     if completed.returncode:
@@ -447,6 +460,11 @@ def catalog(database: str, local_postgres: bool,
         value = json.loads(completed.stdout, object_pairs_hook=unique_keys)
     except (ValueError, UnicodeError) as error:
         raise RuntimeError("cleanup catalog response is invalid") from error
+    if isinstance(value, dict) and isinstance(value.get("relations"), list):
+        history_present = any(isinstance(row, dict)
+            and row.get("name") == "storage_v2_legacy_hit_history" for row in value["relations"])
+        if history_present != (probe.stdout.strip() == "t"):
+            raise RuntimeError("native legacy roots changed during catalog capture")
     required = {"database_oid", "relations", "columns", "constraints", "policies",
                 "triggers", "functions", "indexes", "dependencies",
                 "active_pointer_count", "pointer_set_sha256", "open_reader_count",
@@ -487,6 +505,9 @@ def catalog(database: str, local_postgres: bool,
     if (reachable is not None) != bool(generation_ids or retain_all):
         raise RuntimeError("retained generation reachability is incomplete")
     if reachable is not None:
+        expected_scope = "SELECTED_GENERATIONS_MAPPINGS_INTELLIGENCE_BUILDING_RUNS"
+        if probe.stdout.strip() == "t":
+            expected_scope += "_PRESERVED_LEGACY_HITS"
         counts = ("requested_generation_count", "found_generation_count",
                   "active_generation_count", "active_generation_included_count",
                   "active_pointer_count", "active_pointer_included_count",
@@ -496,8 +517,7 @@ def catalog(database: str, local_postgres: bool,
                   "outside_selected_roots_body_count")
         if not isinstance(reachable, dict) \
                 or reachable.get("status") != "REACHABILITY_ONLY_NOT_GC_AUTHORITY" \
-                or reachable.get("root_scope") != \
-                    "SELECTED_GENERATIONS_MAPPINGS_INTELLIGENCE_BUILDING_RUNS" \
+                or reachable.get("root_scope") != expected_scope \
                 or reachable.get("root_coverage") != \
                     "PARTIAL_EXTERNAL_RETENTION_UNVERIFIED" \
                 or any(type(reachable.get(key)) is not int or reachable[key] < 0

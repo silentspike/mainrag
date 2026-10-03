@@ -2622,6 +2622,7 @@ checksum = "670fdfda89751bc4a84ac13eaa63e205cf0fd22b4c9a5fbfa085b63c1f1d3a30"
 name = "mainrag-api"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "argon2",
  "async-recursion",
