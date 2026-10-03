@@ -1260,3 +1260,25 @@ complete search envelopes, check mutation invalidation and exercise a sparse
 binding probe over 100,000 requested occurrences. They also capture nested
 execution plans for 100 warm native fragments and require zero executed legacy
 chunk scans. Both migrations retain the compatible application binary.
+
+### Filtering native reader inputs before scope expansion
+
+Migration 131 makes the compact fingerprint predicate directly indexable for
+simple conjunctive queries before joining the requested occurrence set. Every
+emitted segment still matches the complete weighted vector; fingerprint
+collisions or terms spread across different segments never establish a match.
+Phrases, disjunctions and negation retain complete vector evaluation. Existing
+source authorization and forced row policies remain in effect.
+
+Canonical-document matching uses separate small-ID and broad-ID branches so
+the exact ID restriction is visible to the planner. Both retain the original
+canonical provenance, complete query predicate and legacy-segment fallback.
+Presence checks read immutable native bindings directly, whose source and
+payload foreign keys already prove dictionary membership. The outer source
+and occurrence checks stay intact. Exact preceding definitions and execution
+permissions are required before any reader replacement.
+
+Migration 132 adds fixed-width covering indexes for view bindings and document
+token counts. Corpus size, token totals, floating point calculations, score
+components and rank ties are unchanged. Installation and workload-specific
+latency remain separate from the native equivalence and execution-plan tests.
