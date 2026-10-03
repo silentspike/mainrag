@@ -1373,6 +1373,9 @@ Pre-activation release-candidate construction retains its explicit compatibility
 bootstrap. Native successor witnesses and idempotency keys identify the native
 lexical path; candidate verification still reconstructs bodies, roots, segments
 and intelligence evidence before any active-pointer commit.
+Native verification derives bounded positive query probes from verified native
+membership without consulting retired file or chunk tables. Pre-activation
+comparison seeds retain their independent legacy expectations.
 
 CLI source sync and file watchers accept both `ACTIVE_INGEST_COMMITTED` and
 `NO_CHANGE` responses. Native JSON preserves generation identity, item counts,
