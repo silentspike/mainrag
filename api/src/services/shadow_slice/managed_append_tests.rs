@@ -165,7 +165,7 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         let migrations = std::fs::read_dir(project.join("migrations"))?
             .map(|entry| entry.map(|value| value.path()))
             .collect::<std::io::Result<Vec<_>>>()?;
-        for number in (66..=105).chain([119, 126]) {
+        for number in (66..=105).chain([119, 126, 127]) {
             let prefix = format!("{number:03}_");
             let matching = migrations
                 .iter()
@@ -288,10 +288,16 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         let session = crate::db::build_checkpoint::BuildCheckpointSession::open(
             &pool, principal, 165, &packs).await?;
         ensure!(session.client().query_one("SHOW statement_timeout", &[]).await?
-            .get::<_, String>(0)=="2min", "writer inherited the short reader deadline");
+            .get::<_, String>(0)=="10min", "writer inherited the short reader deadline");
         session.checkpoint().await?;
         ensure!(session.client().query_one("SHOW statement_timeout", &[]).await?
-            .get::<_, String>(0)=="2min", "writer deadline was lost at COMMIT");
+            .get::<_, String>(0)=="10min", "writer deadline was lost at COMMIT");
+        let physical = session.client().query_one(
+            "SELECT current_setting('maintenance_work_mem'), \
+             current_setting('gin_pending_list_limit'), current_setting('client_min_messages')", &[]).await?;
+        ensure!(physical.get::<_, String>(0)=="128MB"
+            && physical.get::<_, String>(1)=="16MB"
+            && physical.get::<_, String>(2)=="warning", "writer physical settings were lost at COMMIT");
         let reader = pool.get().await?;
         ensure!(reader.query_one("SHOW statement_timeout", &[]).await?
             .get::<_, String>(0)=="30s", "writer deadline leaked to an ordinary reader");
@@ -392,6 +398,12 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             verified.lexical_segment_verification["invalid_count"] == 0,
             "managed lexical projection differs"
         );
+        let cached_export = crate::services::intelligence_export::public_export(
+            &transaction, 63, &initial.generation_seq.to_string()).await?;
+        ensure!(cached_export.2 && cached_export.0==verified.intelligence_export
+            && cached_export.1==verified.intelligence_export_serialized_bytes,
+            "unchanged intelligence export was streamed again or changed its proof");
+        println!("intelligence export: complete proof reused without another record stream");
         let restored_timeout: String = transaction
             .query_one("SHOW statement_timeout", &[])
             .await?

@@ -115,7 +115,31 @@ pub async fn public_export<C: GenericClient + Sync>(
     client: &C,
     source_id: i64,
     generation: &str,
-) -> Result<(Value, u64)> {
+) -> Result<(Value, u64, bool)> {
+    // Cache availability is discovered before use so older fixture schemas and
+    // readers retain the complete uncached path. Authorization is checked by
+    // the controlled getter on every hit. Source writes invalidate transactionally.
+    let cache_available: bool = client.query_one(
+        "SELECT to_regprocedure('public.storage_v2_cached_intelligence_export_proof(bigint,text)') IS NOT NULL",
+        &[]).await?.get(0);
+    let identity = if cache_available {
+        let state: Value = client
+            .query_one(
+                "SELECT storage_v2_cached_intelligence_export_proof($1,$2)",
+                &[&source_id, &generation],
+            )
+            .await?
+            .get(0);
+        if let Some(proof) = state.get("proof").filter(|proof| !proof.is_null()) {
+            let bytes = proof["serialized_bytes"]
+                .as_u64()
+                .context("cached export byte count is invalid")?;
+            return Ok((proof["public_envelope"].clone(), bytes, true));
+        }
+        Some(state["identity"].clone())
+    } else {
+        None
+    };
     let collections = COLLECTIONS.map(str::to_string).to_vec();
     let parameters: [&(dyn tokio_postgres::types::ToSql + Sync); 3] =
         [&source_id, &generation, &collections];
@@ -160,7 +184,24 @@ pub async fn public_export<C: GenericClient + Sync>(
             ],
         )
         .await?;
-    Ok((row.try_get(0)?, serialized_bytes))
+    let envelope: Value = row.try_get(0)?;
+    if let Some(identity) = identity {
+        // A concurrent source change refuses storage of this snapshot's proof.
+        // It cannot create a cache entry for the changed source revision.
+        client
+            .query_one(
+                "SELECT storage_v2_store_intelligence_export_proof($1,$2,$3,$4,$5)",
+                &[
+                    &source_id,
+                    &generation,
+                    &identity,
+                    &envelope,
+                    &i64::try_from(serialized_bytes)?,
+                ],
+            )
+            .await?;
+    }
+    Ok((envelope, serialized_bytes, false))
 }
 
 #[cfg(test)]
