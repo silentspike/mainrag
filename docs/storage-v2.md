@@ -1282,3 +1282,14 @@ Migration 132 adds fixed-width covering indexes for view bindings and document
 token counts. Corpus size, token totals, floating point calculations, score
 components and rank ties are unchanged. Installation and workload-specific
 latency remain separate from the native equivalence and execution-plan tests.
+# Bounded request and presence work
+
+The named-generation and active readers evaluate the simple-AND request shape
+once per call. Row evaluation, candidate selection and score explanations reuse
+that request value without changing the AST, corpus population or ranking.
+
+Compact segment presence uses immutable occurrence keys. The validated,
+nondeferrable occurrence foreign key proves source and artifact identity, and
+the validated block-order check proves a nonempty segment array. Installation
+checks these constraints and their predicate function before removing redundant
+array reads. Forced RLS and the outer source authorization remain in place.
