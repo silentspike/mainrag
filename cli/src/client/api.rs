@@ -168,8 +168,37 @@ pub struct HealthServices {
     pub tei: bool,
 }
 
-#[derive(Deserialize, Debug, Clone)]
-pub struct SyncSourceResponse {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum SyncSourceResponse {
+    Active(ActiveSyncResponse),
+    Legacy(LegacySyncResponse),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ActiveSyncResponse {
+    pub source_id: i64,
+    pub status: ActiveSyncStatus,
+    pub sync_mode: String,
+    pub generation_id: i64,
+    pub generation_seq: i64,
+    pub item_count: u64,
+    pub changed_item_count: u64,
+    pub source_io: serde_json::Value,
+    pub telemetry: serde_json::Value,
+    pub receipt: Option<serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum ActiveSyncStatus {
+    #[serde(rename = "ACTIVE_INGEST_COMMITTED")]
+    Committed,
+    #[serde(rename = "NO_CHANGE")]
+    NoChange,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LegacySyncResponse {
     pub source_id: i64,
     pub status: String,
     pub stats: SyncStats,
@@ -178,7 +207,30 @@ pub struct SyncSourceResponse {
     pub error_details: Vec<String>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+impl SyncSourceResponse {
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Active(result) => format!(
+                "{}: generation {}, {} items, {} changed items",
+                match result.status {
+                    ActiveSyncStatus::Committed => "Committed",
+                    ActiveSyncStatus::NoChange => "Unchanged",
+                },
+                result.generation_id,
+                result.item_count,
+                result.changed_item_count,
+            ),
+            Self::Legacy(result) => format!(
+                "{} files, {} chunks, {} embeddings",
+                result.stats.files_processed,
+                result.stats.chunks_created,
+                result.stats.embeddings_generated,
+            ),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SyncStats {
     pub files_processed: i64,
     pub chunks_created: i64,
@@ -1640,5 +1692,54 @@ mod source_statistics_contract_tests {
                 .unwrap();
         assert_eq!(legacy.qdrant_vectors, Some(47));
         assert_eq!(legacy.read_path, None);
+    }
+}
+
+#[cfg(test)]
+mod sync_response_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn active(status: &str) -> serde_json::Value {
+        json!({"source_id":7,"status":status,"sync_mode":"full_source_observation",
+            "generation_id":42,"generation_seq":3,"item_count":12,"changed_item_count":2,
+            "source_io":{"application_read_bytes":512},"telemetry":{"generation_reused":false},
+            "receipt":{"generation_id":42}})
+    }
+
+    #[test]
+    fn committed_and_unchanged_native_sync_preserve_receipts_without_legacy_stats() {
+        for status in ["ACTIVE_INGEST_COMMITTED", "NO_CHANGE"] {
+            let mut input = active(status);
+            if status == "NO_CHANGE" {
+                input["changed_item_count"] = json!(0);
+                input["receipt"] = serde_json::Value::Null;
+            }
+            let parsed: SyncSourceResponse = serde_json::from_value(input.clone()).unwrap();
+            assert!(matches!(&parsed, SyncSourceResponse::Active(_)));
+            assert_eq!(serde_json::to_value(&parsed).unwrap(), input);
+            assert!(parsed.summary().contains("generation 42"));
+            assert!(!parsed.summary().contains("chunks"));
+        }
+        let mut invalid = active("FAILED");
+        assert!(serde_json::from_value::<SyncSourceResponse>(invalid.clone()).is_err());
+        invalid["status"] = json!("ACTIVE_INGEST_COMMITTED");
+        invalid.as_object_mut().unwrap().remove("generation_id");
+        assert!(serde_json::from_value::<SyncSourceResponse>(invalid).is_err());
+    }
+
+    #[test]
+    fn legacy_sync_still_requires_and_reports_actual_legacy_stats() {
+        let response: SyncSourceResponse = serde_json::from_value(json!({
+            "source_id":7,"status":"completed",
+            "stats":{"files_processed":3,"chunks_created":9,"embeddings_generated":9}
+        }))
+        .unwrap();
+        assert!(matches!(&response, SyncSourceResponse::Legacy(_)));
+        assert_eq!(response.summary(), "3 files, 9 chunks, 9 embeddings");
+        assert!(serde_json::from_value::<SyncSourceResponse>(json!({
+            "source_id":7,"status":"completed"
+        }))
+        .is_err());
     }
 }
