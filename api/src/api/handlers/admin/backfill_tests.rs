@@ -8,7 +8,7 @@ use std::net::TcpListener;
 use std::time::Duration;
 use tower::ServiceExt;
 
-fn isolated_state(cpu_mode: bool, listener: &TcpListener) -> Arc<AppState> {
+pub(super) fn isolated_state(cpu_mode: bool, listener: &TcpListener) -> Arc<AppState> {
     let address = listener.local_addr().unwrap();
     let url = format!("http://{address}");
     let config: crate::config::Config = serde_json::from_value(json!({

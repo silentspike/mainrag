@@ -179,6 +179,7 @@ pub async fn admin_build_release_candidate(
     Path(source_id): Path<i64>,
     JsonBody(request): JsonBody<ShadowSliceRequest>,
 ) -> Result<Json<crate::services::shadow_slice::ShadowSliceResult>> {
+    super::legacy_hits::require_legacy_bootstrap(&state.config.server)?;
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
     let commit_sha = request.commit_sha;
@@ -363,18 +364,34 @@ pub async fn admin_verify_release_candidate(
         .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
     let pack_root = state.config.storage_v2_pack_root.clone();
     let pack_io_buffer_bytes = state.config.storage_v2_pack_io_buffer_bytes;
+    let retired = state
+        .config
+        .server
+        .storage_v2_legacy_retired_manifest_sha256
+        .is_some();
     state
         .rls_client
         .with_rls(user_id, true, move |transaction| {
             Box::pin(async move {
-                let result = crate::services::shadow_slice::verify_release_candidate(
-                    &**transaction,
-                    source_id,
-                    &request,
-                    &pack_root,
-                    pack_io_buffer_bytes,
-                )
-                .await
+                let result = if retired {
+                    crate::services::shadow_slice::verify_release_candidate_after_retirement(
+                        &**transaction,
+                        source_id,
+                        &request,
+                        &pack_root,
+                        pack_io_buffer_bytes,
+                    )
+                    .await
+                } else {
+                    crate::services::shadow_slice::verify_release_candidate(
+                        &**transaction,
+                        source_id,
+                        &request,
+                        &pack_root,
+                        pack_io_buffer_bytes,
+                    )
+                    .await
+                }
                 .map_err(|error| {
                     AppError::BadRequest(
                         crate::services::shadow_slice::candidate_verification_failure(&error),
@@ -393,6 +410,7 @@ pub async fn admin_candidate_query_evidence(
     Path(source_id): Path<i64>,
     JsonBody(request): JsonBody<crate::services::shadow_slice::CandidateQueryEvidenceInput>,
 ) -> Result<Json<serde_json::Value>> {
+    super::legacy_hits::require_legacy_bootstrap(&state.config.server)?;
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| AppError::Unauthorized("invalid user id".to_string()))?;
     let pack_root = state.config.storage_v2_pack_root.clone();
@@ -1940,3 +1958,6 @@ pub async fn admin_backfill_qdrant_user_ids(
 
 #[cfg(test)]
 mod backfill_tests;
+
+#[cfg(all(test, feature = "storage-v2-retrieval"))]
+mod runtime_retirement_tests;
