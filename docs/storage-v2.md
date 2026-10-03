@@ -1208,3 +1208,34 @@ metadata instead of reporting configured values as serving models.
 These routes are part of runtime retirement. They do not establish that every
 other intelligence/MCP route is retired, authorize deletion, or demonstrate
 production activation, normal ingest, latency, or physical space reclamation.
+
+## Shared legacy rank payloads
+
+Migration 128 factors the immutable native legacy-rank projection into a
+source-bound payload dictionary and occurrence/chunk bindings. Fragmented
+documents retain every existing chunk association, file witness and vector
+weight, while repeated vectors and their GIN entries are stored once per source
+and canonical vector digest. The compatibility view retains the original
+reader columns and applies the underlying source policies to direct callers.
+Controlled readers retain their explicit source and artifact authorization.
+The rank evaluator scores each matching dictionary payload once before
+expanding requested occurrence bindings, preserving the original rank ties and
+canonical-document checks.
+
+The installation requires the expected preceding materializer, one quiescent
+writer boundary and an atomic transaction. It compares the complete old and new
+relations, including actual vectors, before removing the redundant native
+relation. A missing association or different vector aborts the transaction.
+Legacy files/chunks, immutable bodies, generations and active pointers are
+preserved. The materializer retains its original fragment fallback and replay
+semantics. One source advisory fence and two relation locks protect the legacy
+snapshot without accumulating a row lock for every chunk; the limited writer
+receives no new mutation privilege on legacy files or chunks.
+
+The native regression fixture compares complete search envelopes, weighted
+Unicode vectors, source isolation, failed-install rollback and repeated staging
+of one hundred fragments. Fixture byte reduction demonstrates the storage
+layout only. Production resource admission, latency, complete source acceptance,
+activation and legacy retirement remain separate outcomes. SQL installation
+can retain the existing application binary because reader signatures and the
+logical projection remain compatible.
