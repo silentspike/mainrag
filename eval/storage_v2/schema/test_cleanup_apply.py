@@ -5,6 +5,9 @@ import importlib.util
 import json
 import os
 import subprocess
+import tempfile
+import time
+from pathlib import Path
 from unittest.mock import patch
 
 from eval.storage_v2.schema import test_active_set_search as base
@@ -12,6 +15,9 @@ from eval.storage_v2.schema import test_active_set_search as base
 SPEC=importlib.util.spec_from_file_location('cleanup_apply_sql',base.ROOT/'ops/storage-v2/cleanup-apply.py')
 A=importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(A)
+EXTERNAL_SPEC=importlib.util.spec_from_file_location('cleanup_external_sql',base.ROOT/'ops/storage-v2/cleanup-external.py')
+E=importlib.util.module_from_spec(EXTERNAL_SPEC)
+EXTERNAL_SPEC.loader.exec_module(E)
 
 
 class CleanupApplyTests(base.ActiveSetSearchTests):
@@ -153,6 +159,7 @@ BEGIN RETURN (SELECT count(*) FROM cleanup_parent); END $$;
         self.assertEqual(self.sql('SELECT jsonb_build_array((SELECT count(*) FROM content_body),(SELECT count(*) FROM occurrence),'
                                  '(SELECT count(*) FROM generation_item_version),(SELECT count(*) FROM storage_v2_active_ingest_receipt))::text'),protected)
         self.assertEqual(self.sql("SELECT has_table_privilege('mainrag','storage_v2_legacy_cleanup_receipt','INSERT')"),'f')
+        self.exercise_external_phase(active)
         # The anti-replay decision observes a currently held backend lease,
         # rather than treating a state file or old RUNNING label as liveness.
         child=subprocess.Popen(['psql','-X','--no-psqlrc','-qAt','--set=ON_ERROR_STOP=1',
@@ -178,3 +185,113 @@ BEGIN RETURN (SELECT count(*) FROM cleanup_parent); END $$;
             A.post_readback(plan,self.database,False,receipt)
         self.sql('DROP TABLE cleanup_parent')
         print('PASS: atomic restricted drop, count/pointer/dependency drift, rollback, native search and durable commit readback',flush=True)
+
+    def exercise_external_phase(self, active):
+        from eval.storage_v2.cleanup_external_fixture import FixtureQdrant
+        environment=os.environ.copy()
+        environment.update(PGHOST=str(self.socket),
+            MAINRAG_STORAGE_V2_DEFAULT_READ_MANIFEST_SHA256=active,
+            MAINRAG_STORAGE_V2_ACTIVE_INGEST_COMMIT_SHA='b'*40,
+            MAINRAG_STORAGE_V2_LEGACY_RETIRED_MANIFEST_SHA256='7'*64)
+        child=subprocess.Popen([os.sys.executable,'-c','import time;time.sleep(300)'],env=environment)
+        try:
+            runtime=E.A.runtime_readback(child.pid)
+            self.sql('CREATE TABLE cleanup_external_fixture(id BIGINT); INSERT INTO cleanup_external_fixture VALUES (1);')
+            with patch.dict(os.environ,{'PGHOST':str(self.socket)}):
+                catalog=E.C.catalog(self.database,False,('cleanup_external_fixture',),retain_all=True)
+            inventory={'schema_version':'mainrag.storage-v2.cleanup-catalog.v1','status':'OBSERVED_ONLY',
+                'catalog':catalog,'before_state_sha256':E.A.digest(catalog),'operator_sha256':'a'*64}
+            deleted={r['oid'] for r in catalog['relations'] if r['name']=='cleanup_external_fixture'}
+            decisions={r['key']:{'key':r['key'],'disposition':'DELETE' if
+                r['kind']=='relation' and r['observed']['oid'] in deleted or
+                r['kind']=='column' and r['observed']['relation_oid'] in deleted else 'KEEP',
+                'reason':'public fixture','authority':'fixture'} for r in E.M.observed_objects(inventory)}
+            draft=E.M.draft(inventory,'c'*64,decisions)
+            parent=E.A.build_plan(inventory,'c'*64,draft,'d'*64,runtime['binary_sha256'])
+            self.sql(E.A.sql_for(parent,'7'*64,'8'*64,active))
+            search_before=self.search(base.ADMIN,active)
+            with tempfile.TemporaryDirectory(prefix='mainrag-external-fixture-') as temporary, FixtureQdrant() as server:
+                root=Path(temporary);root.chmod(0o700)
+                vector=root/'vector';vector.mkdir()
+                with patch.dict(os.environ,{'PGHOST':str(self.socket)}):
+                    catalog=E.C.catalog(self.database,False,retain_all=True)
+                    with E.DatabaseLease(self.database,False,catalog) as lease:
+                        lease.check()
+                        with self.assertRaisesRegex(RuntimeError,'lease is live'):
+                            with E.DatabaseLease(self.database,False,catalog):
+                                self.fail('another dispatcher acquired a held cleanup lease')
+                        self.assert_sql_fails("SET lock_timeout='100ms'; UPDATE logical_source SET name=name WHERE id=1",
+                                              'lock timeout')
+                        for key in ('mainrag.legacy-cleanup','mainrag.native-gc'):
+                            self.assertEqual(self.sql(f"SELECT pg_try_advisory_lock(hashtextextended('{key}',0))"),'f')
+                    # Negative concurrency probes precede the fresh admission
+                    # snapshot; their connection/statistics side effects must
+                    # not be mistaken for part of an already frozen manifest.
+                    self.sql('VACUUM ANALYZE')
+                    catalog=E.C.catalog(self.database,False,retain_all=True)
+                inventory.update(catalog=catalog,before_state_sha256=E.A.digest(catalog),
+                                 qdrant=E.C.qdrant_inventory(server.origin,None),components=[])
+                catalog_sha=E.C.private_create(root/'catalog.json',inventory)
+                decisions={r['key']:{'key':r['key'],'disposition':'DELETE' if
+                    r['kind']=='qdrant_collection' and r['observed']['name']=='fixture_old' or
+                    r['kind']=='qdrant_alias' and r['observed']['alias_name']=='fixture_old_alias' else 'KEEP',
+                    'reason':'public fixture','authority':'fixture'} for r in E.M.observed_objects(inventory)}
+                draft=E.M.draft(inventory,catalog_sha,decisions)
+                draft_sha=E.C.private_create(root/'draft.json',draft)
+                plan=E.build_plan(inventory,catalog_sha,draft,draft_sha,runtime['binary_sha256'],
+                                  '7'*64,E.vector_space(vector),server.origin)
+                manifest_sha=E.C.private_create(root/'manifest.json',plan)
+                now=int(time.time())
+                proof_sha=E.C.private_create(root/'proof.json',{'fixture':'actual PostgreSQL cleanup and native search',
+                    'search_sha256':E.A.digest(search_before),'http_fixture_not_real_qdrant':True})
+                bindings={k:plan[k] for k in ('before_state_sha256','pointer_set_sha256','runtime_package_sha256')}
+                references={}
+                for name in E.A.GATES:
+                    gate={'schema_version':'mainrag.storage-v2.cleanup-gate.v1','gate':name,'status':'PASS',
+                          'bindings':bindings,'observed_at_unix':now,'proofs':[{'file':'proof.json','sha256':proof_sha}]}
+                    if name=='post_activation_and_regular_ingest':
+                        gate.update(activation_manifest_sha256=active,regular_ingest_completed=True)
+                    if name=='dependency_and_caller_review':
+                        gate.update(callers=[],external_consumers=[{'key':r['key'],'observed_sha256':r['observed_sha256'],
+                            'legacy_exclusive':True,'other_consumers_absent':True} for r in plan['targets']])
+                    if name=='runtime_retirement':
+                        gate.update(runtime=runtime,vector_storage={k:plan['vector_space_before'][k] for k in ('root','device','inode')},
+                                    exclusive_qdrant_storage=True)
+                    sha=E.C.private_create(root/(name+'.json'),gate)
+                    references[name]={'file':name+'.json','sha256':sha}
+                approval={'schema_version':'mainrag.storage-v2.cleanup-approval.v1','manifest_sha256':manifest_sha,
+                    'review_kind':'OWNER_AUTHORIZED_SELF_REVIEW','authority':'public fixture owner',
+                    'accepts_loss_of_legacy_rollback':True,'observed_at_unix':now,'gates':references}
+                approval_sha=E.C.private_create(root/'approval.json',approval)
+                args=[os.sys.executable,str(base.ROOT/'ops/storage-v2/cleanup-external.py'),
+                    '--manifest',str(root/'manifest.json'),'--catalog',str(root/'catalog.json'),
+                    '--draft',str(root/'draft.json'),'--approval',str(root/'approval.json'),
+                    '--approval-sha256',approval_sha,'--database',self.database,'--attempt',str(root/'attempt')]
+                result=subprocess.run(args+['--apply',manifest_sha],env=environment,capture_output=True,text=True,timeout=90)
+                if result.returncode:
+                    with patch.dict(os.environ,{'PGHOST':str(self.socket)}):
+                        current=E.C.catalog(self.database,False,retain_all=True)
+                    changes=[]
+                    for field in ('relations','indexes'):
+                        before_rows={r['oid']:r for r in catalog[field]}
+                        for row in current[field]:
+                            before=before_rows.get(row['oid'],{})
+                            changed=sorted(k for k in set(row)|set(before) if row.get(k)!=before.get(k))
+                            if changed:changes.append({'class':field,'fixture_object':row['name'],'fields':changed})
+                    events=len(list((root/'attempt').glob('[0-9]*.json')))
+                    print('External fixture drift diagnostic: '+json.dumps({'journal_events':events,'changes':changes}),flush=True)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual(server.mutations,[('alias','fixture_old_alias'),('collection','fixture_old')])
+                self.assertEqual(server.collections,{'fixture_keep':2})
+                self.assertEqual(server.aliases,{'fixture_keep_alias':'fixture_keep'})
+                replay=subprocess.run(args+['--apply',manifest_sha],env=environment,capture_output=True,text=True,timeout=90)
+                self.assertNotEqual(replay.returncode,0)
+                self.assertEqual(len(server.mutations),2)
+                result=subprocess.run(args+['--reconcile',manifest_sha,'--output',str(root/'reconciled.json')],
+                    env=environment,capture_output=True,text=True,timeout=90)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertTrue(json.loads((root/'reconciled.json').read_text())['last_step_confirmed'])
+                self.assertEqual(self.search(base.ADMIN,active),search_before)
+                print('PASS: external CLI runtime/root/receipt binding, real PostgreSQL lease/write exclusion, exact HTTP deletes, retained set and read-only reconciliation',flush=True)
+        finally:
+            child.terminate();child.wait(timeout=5)
