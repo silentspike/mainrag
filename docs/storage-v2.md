@@ -1239,3 +1239,24 @@ layout only. Production resource admission, latency, complete source acceptance,
 activation and legacy retirement remain separate outcomes. SQL installation
 can retain the existing application binary because reader signatures and the
 logical projection remain compatible.
+
+### Reusing file rank snapshots across fragments
+
+Migration 129 caches the complete legacy chunk ID to native payload ID map at
+an authorized file identity and revision. Warm fragment staging reads this map
+instead of rereading and hashing every legacy vector. Each hit still validates
+the source, file hash and write authorization under the existing relation fence.
+Statement transition tables invalidate the affected old and new file IDs on
+insert, update or delete, including changes that keep the file hash and row
+count unchanged. Truncation changes a global epoch. Cache creation, completeness
+proof and occurrence bindings remain transactional; existing bindings retain
+their immutable replay behavior. Cached maps contain IDs, counts and hashes,
+with no retained legacy text or foreign keys to legacy files/chunks.
+
+Migration 130 adds a covering payload-to-occurrence index so a sparse matching
+payload can expand its bindings directly. The reader definition, authorization,
+ranking, query matching and tie order remain unchanged. Native tests compare
+complete search envelopes, check mutation invalidation and exercise a sparse
+binding probe over 100,000 requested occurrences. They also capture nested
+execution plans for 100 warm native fragments and require zero executed legacy
+chunk scans. Both migrations retain the compatible application binary.
