@@ -25,6 +25,8 @@ pub mod intelligence_export;
 #[cfg(feature = "storage-v2-intelligence")]
 #[allow(dead_code)]
 pub mod intelligence_v2;
+#[cfg(feature = "storage-v2-retrieval")]
+pub mod legacy_hit_producer;
 pub mod outbox_worker;
 #[allow(dead_code)]
 pub mod pack_maintenance;

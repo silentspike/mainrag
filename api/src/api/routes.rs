@@ -133,6 +133,26 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     #[cfg(feature = "storage-v2-retrieval")]
     let long_running_routes = long_running_routes
         .route(
+            "/api/v1/admin/sources/:id/storage-v2-legacy-hit-mappings",
+            post(handlers::admin_replace_legacy_hit_mappings),
+        )
+        .route(
+            "/api/v1/admin/sources/:id/storage-v2-legacy-hit-mapping-states",
+            post(handlers::admin_legacy_hit_mapping_states),
+        )
+        .route(
+            "/api/v1/admin/sources/:id/storage-v2-legacy-hit-producer",
+            post(handlers::admin_produce_legacy_hits),
+        )
+        .route(
+            "/api/v1/admin/sources/:id/storage-v2-legacy-hit-inventory",
+            post(handlers::admin_legacy_hit_inventory),
+        )
+        .route(
+            "/api/v1/admin/sources/:id/storage-v2-legacy-hit-progress",
+            post(handlers::admin_legacy_hit_progress),
+        )
+        .route(
             "/api/v1/admin/sources/:id/storage-v2-filesystem-cut-configuration",
             post(handlers::admin_configure_filesystem_cut),
         )
@@ -284,10 +304,12 @@ fn authenticated_routes(auth_layer: AuthLayer) -> Router<Arc<AppState>> {
         get(handlers::shadow_intelligence_command),
     );
     #[cfg(feature = "storage-v2-retrieval")]
-    let routes = routes.route(
-        "/sources/:id/shadow-state",
-        get(handlers::shadow_source_state),
-    );
+    let routes = routes
+        .route("/legacy-hits/resolve", post(handlers::resolve_legacy_hit))
+        .route(
+            "/sources/:id/shadow-state",
+            get(handlers::shadow_source_state),
+        );
     routes
         // Auth middleware (validates JWT or API-Key and adds Claims extension)
         .layer(middleware::from_fn(move |req, next| {

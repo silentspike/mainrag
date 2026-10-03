@@ -32,7 +32,7 @@ fn open_lease(root: &Path) -> Result<File> {
         .open(path)?)
 }
 
-pub(super) fn writer_lease(root: &Path) -> Result<Arc<File>> {
+pub(crate) fn writer_lease(root: &Path) -> Result<Arc<File>> {
     let file = open_lease(root)?;
     file.try_lock_shared().map_err(|error| {
         io::Error::other(format!(

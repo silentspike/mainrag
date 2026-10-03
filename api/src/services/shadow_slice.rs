@@ -2786,7 +2786,7 @@ fn verify_stored_body_row(
     deliver_stored_body_row(row, pack_root, io_buffer_bytes, None)
 }
 
-fn deliver_stored_body_row(
+pub(crate) fn deliver_stored_body_row(
     row: &tokio_postgres::Row,
     pack_root: &Path,
     io_buffer_bytes: usize,
