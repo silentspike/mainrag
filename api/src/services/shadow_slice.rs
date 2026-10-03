@@ -406,7 +406,12 @@ where
     content_body::with_reader_epoch(
         client,
         verify_release_candidate_in_epoch(
-            client, source_id, input, pack_root, io_buffer_bytes, false,
+            client,
+            source_id,
+            input,
+            pack_root,
+            io_buffer_bytes,
+            false,
         ),
     )
     .await
@@ -428,7 +433,12 @@ where
     content_body::with_reader_epoch(
         client,
         verify_release_candidate_in_epoch(
-            client, source_id, input, pack_root, io_buffer_bytes, true,
+            client,
+            source_id,
+            input,
+            pack_root,
+            io_buffer_bytes,
+            true,
         ),
     )
     .await

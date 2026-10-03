@@ -36,9 +36,9 @@ pub mod qdrant;
 pub mod quality;
 pub mod query_expander;
 pub mod rerank;
-pub mod runtime_retirement;
 #[cfg(feature = "storage-v2-retrieval")]
 pub mod retrieval_v2;
+pub mod runtime_retirement;
 pub mod search;
 #[cfg(feature = "storage-v2-retrieval")]
 pub mod shadow_slice;
