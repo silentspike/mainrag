@@ -419,7 +419,7 @@ jobs:
   schema-search:
     name: storage-v2 empty search branches
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     services:
       postgres:
         image: pgvector/pgvector@sha256:1d50c689b0a6511b9ea0a15615281c81a59fd04a08eb35057ec8646fb3a2118a
@@ -473,6 +473,7 @@ jobs:
               'eval.storage_v2.schema.test_empty_and_shared_reader_scopes.EmptyAndSharedReaderScopeTests',
               'eval.storage_v2.schema.test_bounded_reader_planning.BoundedReaderPlanningTests',
               'eval.storage_v2.schema.test_local_wal_backpressure.LocalWalBackpressureTests',
+              'eval.storage_v2.schema.test_intelligence_export_proofs.IntelligenceExportProofTests',
               'eval.storage_v2.schema.test_active_source_metrics.ActiveSourceMetricsTests',
               'eval.storage_v2.schema.test_active_explore.ActiveExploreTests',
           ])

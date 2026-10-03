@@ -381,6 +381,10 @@ pub struct ReleaseCandidateVerifyResult {
     pub intelligence_export: serde_json::Value,
     #[serde(default)]
     pub intelligence_export_serialized_bytes: u64,
+    #[serde(default)]
+    pub intelligence_export_proof_reused: bool,
+    #[serde(default)]
+    pub intelligence_export_bytes_streamed: u64,
     pub query_seeds: Vec<CandidateQuerySeed>,
     pub checks: BTreeMap<String, String>,
 }
@@ -593,14 +597,17 @@ where
     {
         bail!("candidate lexical segment verification failed");
     }
-    let (intelligence_export, intelligence_export_serialized_bytes) =
-        crate::services::intelligence_export::public_export(
-            client,
-            source_id,
-            &generation_seq.to_string(),
-        )
-        .await
-        .context(CandidateVerificationPhase("intelligence_export"))?;
+    let (
+        intelligence_export,
+        intelligence_export_serialized_bytes,
+        intelligence_export_proof_reused,
+    ) = crate::services::intelligence_export::public_export(
+        client,
+        source_id,
+        &generation_seq.to_string(),
+    )
+    .await
+    .context(CandidateVerificationPhase("intelligence_export"))?;
     client
         .query_one(
             "SELECT set_config('statement_timeout', $1, TRUE)",
@@ -654,6 +661,12 @@ where
         lexical_segment_verification,
         intelligence_export,
         intelligence_export_serialized_bytes,
+        intelligence_export_proof_reused,
+        intelligence_export_bytes_streamed: if intelligence_export_proof_reused {
+            0
+        } else {
+            intelligence_export_serialized_bytes
+        },
         query_seeds,
         checks,
     })
