@@ -41,6 +41,8 @@ async fn install(client: &Client) -> Result<()> {
     client
         .batch_execute(&format!(
             "
+        DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='mainrag')
+          THEN CREATE ROLE mainrag; END IF; END $$;
         CREATE TABLE artifact_version(id BIGINT PRIMARY KEY, raw_body_id BIGINT);
         CREATE TABLE storage_v2_gc_epoch(id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             source_id BIGINT NOT NULL, status TEXT NOT NULL);
@@ -65,6 +67,11 @@ async fn install(client: &Client) -> Result<()> {
     client
         .batch_execute(include_str!(
             "../../../../migrations/056_storage_v2_pack_removal_receipts.sql"
+        ))
+        .await?;
+    client
+        .batch_execute(include_str!(
+            "../../../../migrations/136_storage_v2_gc_body_identity.sql"
         ))
         .await?;
     Ok(())
@@ -403,6 +410,98 @@ async fn exercise_maintenance(client: &mut Client, observer: &Client, root: &Pat
     Ok(())
 }
 
+async fn exercise_collected_pack_bodies(client: &mut Client, root: &Path) -> Result<()> {
+    use super::super::pack_maintenance::{self, RepackPolicy};
+    let mut builder = PackBuilder::new(root, Uuid::new_v4(), Uuid::new_v4(), 4096)?;
+    builder.add_reader(Cursor::new(vec![0x41; 100000]), BodyCodec::Zstd, None)?;
+    builder.add_reader(Cursor::new(vec![0x43; 100000]), BodyCodec::Zstd, None)?;
+    let mixed = builder.seal()?.publish()?;
+    let bodies = register_multiple(client, &mixed).await?;
+    let epoch: i64 = client.query_one(
+        "INSERT INTO storage_v2_gc_epoch(source_id,status) VALUES(NULL,'sweeping') RETURNING id", &[],
+    ).await?.get(0);
+    // The separate complete-schema GC rehearsal proves root authority. This
+    // isolated pack fixture exercises the resulting real metadata deletion.
+    let transaction = client.transaction().await?;
+    transaction
+        .batch_execute("ALTER TABLE content_body DISABLE TRIGGER content_body_immutable_delete")
+        .await?;
+    transaction
+        .execute("DELETE FROM content_body WHERE id=$1", &[&bodies[1]])
+        .await?;
+    transaction
+        .batch_execute("ALTER TABLE content_body ENABLE TRIGGER content_body_immutable_delete")
+        .await?;
+    transaction.commit().await?;
+    let policy = RepackPolicy {
+        minimum_dead_bytes: 1,
+        minimum_dead_basis_points: 0,
+        max_entries: 16,
+        max_logical_bytes: 1048576,
+        reserve_free_bytes: 0,
+        io_buffer_bytes: 4096,
+        codec: BodyCodec::Zstd,
+    };
+    let replacement = Uuid::new_v4();
+    let moved = pack_maintenance::repack(
+        client,
+        root,
+        mixed.manifest.pack_id,
+        replacement,
+        epoch,
+        &policy,
+    )
+    .await?;
+    ensure!(
+        moved.moved_entries == 1 && moved.excluded_entry_bytes > 0,
+        "collected body was copied"
+    );
+    let removal = pack_maintenance::finish(client, root, mixed.manifest.pack_id, 16, 4096).await?;
+    ensure!(
+        removal.unlinked_this_call
+            && !root
+                .join(format!("{}.pack", mixed.manifest.pack_id))
+                .exists()
+    );
+    let empty = pack(root, &vec![0x42; 100000], BodyCodec::Zstd)?;
+    let body = register(client, &empty, None).await?;
+    ensure!(
+        pack_maintenance::retire_empty(client, root, empty.manifest.pack_id, epoch, 16, 4096)
+            .await
+            .is_err(),
+        "live pack was retired"
+    );
+    let transaction = client.transaction().await?;
+    transaction
+        .batch_execute("ALTER TABLE content_body DISABLE TRIGGER content_body_immutable_delete")
+        .await?;
+    transaction
+        .execute("DELETE FROM content_body WHERE id=$1", &[&body])
+        .await?;
+    transaction
+        .batch_execute("ALTER TABLE content_body ENABLE TRIGGER content_body_immutable_delete")
+        .await?;
+    transaction.commit().await?;
+    pack_maintenance::retire_empty(client, root, empty.manifest.pack_id, epoch, 16, 4096).await?;
+    pack_maintenance::retire_empty(client, root, empty.manifest.pack_id, epoch, 16, 4096).await?;
+    let removal = pack_maintenance::finish(client, root, empty.manifest.pack_id, 16, 4096).await?;
+    ensure!(removal.unlinked_this_call);
+    let retry = pack_maintenance::finish(client, root, empty.manifest.pack_id, 16, 4096).await?;
+    ensure!(retry.receipt_already_present && !retry.unlinked_this_call);
+    ensure!(
+        client
+            .query_one(
+                "SELECT count(*) FROM storage_v2_body_identity WHERE id=$1",
+                &[&body]
+            )
+            .await?
+            .get::<_, i64>(0)
+            == 1
+    );
+    println!("collected packed bodies: mixed-pack repack, empty-pack retirement, actual unlink, retry and retained manifest identity PASS");
+    Ok(())
+}
+
 async fn exercise(client: &mut Client, observer: &Client, root: &Path) -> Result<()> {
     let bytes = vec![b'x'; 256 * 1024];
     let old = pack(root, &bytes, BodyCodec::Identity)?;
@@ -553,6 +652,7 @@ async fn exercise(client: &mut Client, observer: &Client, root: &Path) -> Result
     process_crashes::exercise(client, observer, root).await?;
     #[cfg(target_os = "linux")]
     maintenance_resources::exercise(client, root).await?;
+    exercise_collected_pack_bodies(client, root).await?;
     Ok(())
 }
 

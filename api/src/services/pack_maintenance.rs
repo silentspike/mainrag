@@ -138,8 +138,9 @@ async fn load<C: GenericClient + Sync>(client: &C, id: Uuid, limit: usize) -> Re
     );
     let rows = client.query(
         "SELECT entry.ordinal, entry.body_id, entry.pack_offset, entry.stored_length, entry.codec::TEXT, entry.entry_digest, \
-         body.digest, body.logical_length, body.pack_id=$1 AS assigned_here, entry.dictionary_id, dictionary.digest AS dictionary_digest \
-         FROM content_pack_entry entry JOIN content_body body ON body.id=entry.body_id \
+         identity.digest, identity.logical_length, COALESCE(body.pack_id=$1,FALSE) AS assigned_here, entry.dictionary_id, dictionary.digest AS dictionary_digest \
+         FROM content_pack_entry entry JOIN storage_v2_body_identity identity ON identity.id=entry.body_id \
+         LEFT JOIN content_body body ON body.id=entry.body_id \
          LEFT JOIN content_dictionary dictionary ON dictionary.id=entry.dictionary_id \
          WHERE entry.pack_id=$1 ORDER BY entry.ordinal LIMIT $2",
         &[&id, &i64::try_from(limit + 1)?],
@@ -272,7 +273,8 @@ pub async fn repack(
     if matches!(old.status.as_str(), "retired" | "reclaimed") {
         let retirement = transaction.query_one("SELECT replacement_pack_id,gc_epoch_id FROM content_pack_retirement WHERE pack_id=$1", &[&old_pack]).await?;
         ensure!(
-            retirement.get::<_, Uuid>(0) == new_pack && retirement.get::<_, i64>(1) == gc_epoch,
+            retirement.get::<_, Option<Uuid>>(0) == Some(new_pack)
+                && retirement.get::<_, i64>(1) == gc_epoch,
             "repack retry identity differs"
         );
         let new = load(&transaction, new_pack, policy.max_entries).await?;
@@ -479,6 +481,51 @@ fn report(
 /// Re-verify replacement bytes on every unfinished attempt. Commit DB permission before
 /// unlink and fsync, then issue the durable receipt. A retry after unlink but
 /// before receipt observes reclaimed state and safely completes accounting.
+/// Retire an entirely unreachable pack without creating an empty replacement.
+/// File removal remains a separate invocation after the reader drain fence.
+pub async fn retire_empty(
+    client: &mut Client,
+    root: &Path,
+    pack: Uuid,
+    gc_epoch: i64,
+    max_entries: usize,
+    buffer: usize,
+) -> Result<()> {
+    ensure!(
+        (4096..=1048576).contains(&buffer),
+        "invalid verification buffer"
+    );
+    ensure!(
+        client
+            .query_one("SELECT storage_v2_is_admin()", &[])
+            .await?
+            .get::<_, bool>(0),
+        "pack maintenance requires administrator authority"
+    );
+    let (root, _lock) = lock_root(root)?;
+    let transaction = client.transaction().await?;
+    let old = load(&transaction, pack, max_entries).await?;
+    ensure!(
+        old.assigned_here.iter().all(|assigned| !assigned),
+        "pack still has live bodies"
+    );
+    if old.status == "published" {
+        verify(&transaction, &root, &old, buffer).await?;
+        transaction
+            .execute(
+                "SELECT storage_v2_retire_empty_pack($1,$2)",
+                &[&pack, &gc_epoch],
+            )
+            .await?;
+    } else {
+        ensure!(transaction.query_opt(
+            "SELECT 1 FROM content_pack_retirement WHERE pack_id=$1 AND gc_epoch_id=$2 AND replacement_pack_id IS NULL",
+            &[&pack,&gc_epoch]).await?.is_some(), "empty retirement retry identity differs");
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
 pub async fn finish(
     client: &mut Client,
     root: &Path,
@@ -539,12 +586,22 @@ pub async fn finish(
             &[&old_pack],
         )
         .await?;
-    let new = load(&transaction, retirement.get(0), max_entries).await?;
-    ensure!(
-        new.status == "published",
-        "replacement requires separate chain recovery"
-    );
-    verify(&transaction, &root, &new, buffer).await?;
+    if let Some(replacement) = retirement.get::<_, Option<Uuid>>(0) {
+        let new = load(&transaction, replacement, max_entries).await?;
+        ensure!(
+            new.status == "published",
+            "replacement requires separate chain recovery"
+        );
+        verify(&transaction, &root, &new, buffer).await?;
+    } else {
+        ensure!(
+            old.assigned_here.iter().all(|assigned| !assigned),
+            "empty pack has live assignments"
+        );
+        if old.status == "retired" {
+            verify(&transaction, &root, &old, buffer).await?;
+        }
+    }
     if old.status == "retired" {
         content_body::mark_pack_readers_drained(&transaction, old_pack).await?;
         content_body::reclaim_pack(&transaction, old_pack).await?;

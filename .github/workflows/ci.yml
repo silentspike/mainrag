@@ -267,7 +267,7 @@ jobs:
           MAINRAG_INDEX_TEST_DATABASE_URL: postgres://fixture:fixture_only@localhost:5432/mainrag_index_fixture
         run: |
           cargo test -p mainrag-api --features storage-v2-retrieval --lib services::shadow_slice::pack_reader_tests::postgres_pack_readers_retain_real_bytes_through_switch -- --ignored --exact --nocapture | tee pack-reader-tests.log
-          python3 -c 'from pathlib import Path; log = Path("pack-reader-tests.log").read_text(); stages = ["before_publish", "after_publish", "after_switch", "after_commit", "before_unlink", "after_unlink", "after_receipt"]; assert "1 passed; 0 failed; 0 ignored;" in log and "pack maintenance:" in log and all(f"pack process crash: {stage}: SIGKILL" in log for stage in stages), "Expected reader, maintenance and all seven process-crash regression blocks to execute"'
+          python3 -c 'from pathlib import Path; log = Path("pack-reader-tests.log").read_text(); stages = ["before_publish", "after_publish", "after_switch", "after_commit", "before_unlink", "after_unlink", "after_receipt"]; assert "1 passed; 0 failed; 0 ignored;" in log and "pack maintenance:" in log and "collected packed bodies:" in log and all(f"pack process crash: {stage}: SIGKILL" in log for stage in stages), "Expected reader, collected-body maintenance and all seven process-crash regression blocks to execute"'
       - name: Verify bounded build recovery
         shell: bash
         run: |
@@ -515,6 +515,7 @@ jobs:
               'eval.storage_v2.schema.test_native_legacy_hit_resolution.NativeLegacyHitResolutionTests',
               'eval.storage_v2.schema.test_cleanup_catalog.CleanupCatalogTests',
               'eval.storage_v2.schema.test_cleanup_apply.CleanupApplyTests',
+              'eval.storage_v2.schema.test_native_gc.NativeGcTests',
               'eval.storage_v2.schema.test_active_source_metrics.ActiveSourceMetricsTests',
               'eval.storage_v2.schema.test_active_explore.ActiveExploreTests',
           ])
