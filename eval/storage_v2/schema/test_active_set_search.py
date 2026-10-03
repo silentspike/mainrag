@@ -135,7 +135,11 @@ SET search_path = pg_catalog, public AS $$
                      AND CASE p_action WHEN 'read' THEN can_read
                                        WHEN 'write' THEN can_write ELSE FALSE END)
 $$;
-CREATE ROLE storage_v2_active_fixture_worker;
+DO $fixture_role$ BEGIN
+    IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='storage_v2_active_fixture_worker') THEN
+        CREATE ROLE storage_v2_active_fixture_worker;
+    END IF;
+END $fixture_role$;
 GRANT USAGE ON SCHEMA public TO storage_v2_active_fixture_worker;
 GRANT INSERT ON storage_v2_activation_set_evidence
     TO storage_v2_active_fixture_worker;
