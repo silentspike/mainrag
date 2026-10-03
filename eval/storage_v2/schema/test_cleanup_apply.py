@@ -88,7 +88,19 @@ BEGIN RETURN (SELECT count(*) FROM cleanup_parent); END $$;
 
         legacy_names=('cleanup_parent','cleanup_child','files','chunks','symbols','embeddings',
                       'chunk_embeddings','call_graph','entities','entity_relations','indexing_outbox')
+        # This disposable database has no concurrent product writers. Keep
+        # automatic maintenance from changing measured sizes or reltuples
+        # between its manifest and apply; the production drift guard remains
+        # exact. Complete explicit maintenance before each fresh snapshot.
+        self.sql("""DO $fixture_maintenance$ DECLARE relation record;
+BEGIN
+ FOR relation IN SELECT relname FROM pg_class
+   WHERE relnamespace='public'::regnamespace AND relkind IN ('r','m') LOOP
+  EXECUTE format('ALTER TABLE public.%I SET (autovacuum_enabled=false)',relation.relname);
+ END LOOP;
+END $fixture_maintenance$;""")
         def plan_for():
+            self.sql('VACUUM ANALYZE')
             with patch.dict(os.environ,{'PGHOST':str(self.socket)}):
                 catalog=A.C.catalog(self.database,False,legacy_names,retain_all=True)
             inventory={'schema_version':'mainrag.storage-v2.cleanup-catalog.v1','status':'OBSERVED_ONLY',

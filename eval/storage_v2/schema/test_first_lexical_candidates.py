@@ -5,6 +5,7 @@ import unittest
 from eval.storage_v2.schema import test_bound_query_and_presence_work as previous
 
 MIGRATION = previous.previous.ROOT / 'migrations/137_storage_v2_first_lexical_candidates.sql'
+INDEXED = MIGRATION.parent / '139_storage_v2_index_ordinary_first_terms.sql'
 FULL = 'storage_v2_authorized_lexical_candidates(bigint[],bigint[],text)'
 FIRST = 'storage_v2_authorized_lexical_first_candidates(bigint[],bigint[],text)'
 RANKS = ('storage_v2_source_segment_rank_candidates(bigint[],text)',
@@ -121,6 +122,65 @@ class FirstLexicalCandidateTests(unittest.TestCase):
         before = envelopes()
         self.file(MIGRATION)
         self.assertEqual(before, envelopes())
+        first_original = self.sql(f"SELECT pg_get_functiondef('{FIRST}'::REGPROCEDURE)")
+        indexed_body = INDEXED.read_text().replace('BEGIN;', '', 1).rsplit('COMMIT;', 1)[0]
+        self.assert_sql_fails('BEGIN;' + first_original.replace(
+            'RETURN QUERY', '/* fixture drift */ RETURN QUERY', 1) + ';' + indexed_body + 'ROLLBACK;',
+            'ordinary first-term reader definition differs')
+        self.assert_sql_fails('BEGIN; GRANT EXECUTE ON FUNCTION ' + FIRST
+            + ' TO storage_v2_shadow_worker;' + indexed_body + 'ROLLBACK;',
+            'ordinary first-term reader authority differs')
+        self.assert_sql_fails('BEGIN; ALTER TABLE storage_v2_lexical_segment '
+            'DISABLE TRIGGER storage_v2_flat_lexical_identity;' + indexed_body + 'ROLLBACK;',
+            'ordinary first-term vector immutability differs')
+        self.file(INDEXED)
+        self.assertEqual(before, envelopes())
+        self.assert_sql_fails(self.actor(self.schema.WRITER_ID,
+            'SELECT * FROM storage_v2_materialize_ordinary_first_terms(6,0,128)'),
+            'administrator authority')
+        self.assert_sql_fails(self.admin(
+            'SELECT * FROM storage_v2_materialize_ordinary_first_terms(6,0,129)'),
+            'bounded ordinary first-term cursor')
+        self.assert_sql_fails('SET ROLE mainrag; SELECT * FROM storage_v2_ordinary_first_term',
+                              'permission denied')
+        partial = json.loads(self.sql(self.admin(
+            'SELECT row_to_json(x) FROM storage_v2_materialize_ordinary_first_terms(6,0,1) x')))
+        self.assertEqual(partial['scanned'], 1)
+        self.assertEqual(partial['materialized'], 1)
+        self.assertEqual(before, envelopes())
+        for source in (6, 9):
+            built = json.loads(self.sql(self.admin(
+                f'SELECT row_to_json(x) FROM storage_v2_materialize_ordinary_first_terms({source},0,128) x')))
+            self.assertGreater(built['scanned'], 0)
+            repeated = json.loads(self.sql(self.admin(
+                f'SELECT row_to_json(x) FROM storage_v2_materialize_ordinary_first_terms({source},0,128) x')))
+            self.assertEqual(repeated['materialized'], 0)
+            self.assertEqual(repeated['inserted_terms'], 0)
+        self.assertEqual(before, envelopes())
+        self.assertEqual(self.sql("""WITH expected AS (
+            SELECT segment.occurrence_id,item.lexeme,min(segment.segment_order) segment_order
+            FROM storage_v2_lexical_segment segment CROSS JOIN LATERAL unnest(segment.fts_vector) item
+            WHERE segment.source_id IN (6,9) GROUP BY 1,2
+        ), actual AS (SELECT occurrence_id,lexeme,segment_order FROM storage_v2_ordinary_first_term)
+        SELECT NOT EXISTS(SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+           AND NOT EXISTS(SELECT * FROM actual EXCEPT ALL SELECT * FROM expected)"""), 't')
+        # A supported writer inserts a lower sparse order. Publication must
+        # invalidate just that occurrence; complete vector fallback stays exact.
+        changed = next(row for row in rows if row['text'].endswith('gamma'))
+        coverage_before = int(self.sql('SELECT count(*) FROM storage_v2_ordinary_first_coverage'))
+        self.sql(self.actor(self.schema.ADMIN_ID, 'SELECT storage_v2_put_lexical_segments_located('
+            f"{changed['id']},{changed['artifact']},ARRAY[1000::BIGINT],"
+            f"ARRAY[{self.quote(changed['text'])}],ARRAY[''],ARRAY['text'],"
+            'ARRAY[1::BIGINT],ARRAY[1::BIGINT])'))
+        self.assertEqual(int(self.sql('SELECT count(*) FROM storage_v2_ordinary_first_coverage')),
+                         coverage_before - 1)
+        self.assertEqual(self.sql('SELECT count(*) FROM storage_v2_ordinary_first_term '
+                                 f"WHERE occurrence_id={changed['id']}"), '0')
+        self.assertEqual(before, envelopes())
+        self.sql(self.admin('SELECT * FROM storage_v2_materialize_ordinary_first_terms(6,0,128)'))
+        self.sql(self.admin('SELECT * FROM storage_v2_materialize_ordinary_first_terms(9,0,128)'))
+        self.assertEqual(self.sql("SELECT segment_order FROM storage_v2_ordinary_first_term "
+                                 f"WHERE occurrence_id={changed['id']} AND lexeme='alpha'"), '1000')
         self.assertEqual(original[FULL], self.sql(f"SELECT pg_get_functiondef('{FULL}'::REGPROCEDURE)"))
         self.assert_sql_fails(self.actor(self.schema.ADMIN_ID,
             "SELECT * FROM storage_v2_authorized_lexical_first_candidates(ARRAY[1::BIGINT],ARRAY[6::BIGINT],'alpha')"),
