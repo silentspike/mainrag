@@ -509,14 +509,34 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         ensure!(pointer.is_none(), "managed fixture changed the active pointer");
         // Exercise the same native writer selected by regular active sync after
         // the bootstrap routine and legacy table names have been retired.
-        // A false CASE arm alone still leaves a parse-time function dependency.
+        // All six direct legacy SQL helpers are gone, including rank snapshots
+        // and old-hit inventory. Native ingest must not resolve any of them.
+        crate::services::runtime_retirement::check_legacy_runtime_state(&client, false).await?;
         client.batch_execute(
             "DROP FUNCTION storage_v2_copy_legacy_lexical_segments(bigint,bigint); \
+             DROP FUNCTION storage_v2_lock_legacy_rank_snapshot(bigint,bigint,bytea); \
+             DROP FUNCTION storage_v2_get_legacy_rank_snapshot(bigint,bigint,bytea); \
+             DROP FUNCTION storage_v2_candidate_query_evidence(bigint,bigint,text,text,bigint[],bigint[]); \
+             DROP FUNCTION storage_v2_legacy_hit_inventory(bigint,bigint,bigint); \
+             DROP FUNCTION storage_v2_materialize_legacy_chunk_ranks(bigint,bigint); \
              ALTER TABLE files RENAME TO retired_files; \
              ALTER TABLE chunks RENAME TO retired_chunks; \
              ALTER TABLE symbols RENAME TO retired_symbols; \
              ALTER TABLE call_graph RENAME TO retired_call_graph;"
         ).await?;
+        ensure!(crate::services::runtime_retirement::check_legacy_runtime_state(&client, false)
+            .await.is_err(), "missing retirement binding must reject removed legacy schema");
+        crate::services::runtime_retirement::check_legacy_runtime_state(&client, true).await?;
+        let retained = client.transaction().await?;
+        retained.batch_execute(&format!("SET LOCAL app.user_id='{PRINCIPAL}'")).await?;
+        let retained_verification = Box::pin(verify_release_candidate_after_retirement(
+            &retained,63,&ReleaseCandidateVerifyInput {generation_id:initial.generation_id},
+            &packs,4096,
+        )).await?;
+        ensure!(retained_verification.checks.values().all(|state| state=="PASS")
+            && retained_verification.query_seeds.iter().any(|seed| seed.expects_match),
+            "retained bootstrap generation must verify using native seeds after retirement");
+        retained.commit().await?;
         let native_root = directory.0.join("native-source");
         std::fs::create_dir(&native_root)?;
         let native_text = "native Über 東京 lexical content\n".repeat(400);
