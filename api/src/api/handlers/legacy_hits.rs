@@ -31,6 +31,15 @@ fn database_error(error: tokio_postgres::Error) -> AppError {
     }
 }
 
+pub(super) fn require_legacy_bootstrap(config: &crate::config::ServerConfig) -> Result<()> {
+    if config.storage_v2_legacy_retired_manifest_sha256.is_some() {
+        return Err(AppError::Conflict(
+            "legacy bootstrap is retired; native ingest and durable hit resolution remain available".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn resolve_legacy_hit(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Arc<crate::auth::Claims>>,
@@ -104,6 +113,7 @@ pub async fn admin_produce_legacy_hits(
             "administrator authority required".into(),
         ));
     }
+    require_legacy_bootstrap(&state.config.server)?;
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| AppError::Unauthorized("invalid user id".into()))?;
     let root = state.config.storage_v2_pack_root.clone();
@@ -165,6 +175,7 @@ pub async fn admin_legacy_hit_inventory(
             "administrator authority required".into(),
         ));
     }
+    require_legacy_bootstrap(&state.config.server)?;
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| AppError::Unauthorized("invalid user id".into()))?;
     state
