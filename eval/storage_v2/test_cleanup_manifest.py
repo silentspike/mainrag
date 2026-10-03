@@ -72,6 +72,37 @@ class CleanupManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "cannot be deleted"):
             MANIFEST.draft(inventory, "c" * 64, {relation["key"]: delete})
 
+    def test_native_history_children_and_export_roots_cannot_inherit_delete(self) -> None:
+        for name in ("storage_v2_legacy_hit_history", "storage_v2_legacy_hit_proof",
+                     "content_body", "source_generation", "source_permissions"):
+            inventory = fixture()
+            inventory["catalog"]["relations"][0]["name"] = name
+            inventory["catalog"]["exact_rows"] = {name: 3}
+            inventory["catalog"]["indexes"] = [{"oid": 8, "relation_oid": 7}]
+            inventory["catalog"]["columns"] = [{"relation_oid": 7, "number": 1}]
+            inventory["before_state_sha256"] = hashlib.sha256(
+                MANIFEST.CAPTURE.canonical(inventory["catalog"])).hexdigest()
+            for item in MANIFEST.observed_objects(inventory):
+                if item["kind"] not in {"relation", "index", "column"}:
+                    continue
+                with self.subTest(name=name, kind=item["kind"]):
+                    decision = {"key": item["key"], "disposition": "DELETE",
+                                "reason": "fixture", "authority": "fixture"}
+                    with self.assertRaisesRegex(RuntimeError, "cannot be deleted"):
+                        MANIFEST.draft(inventory, "c" * 64, {item["key"]: decision})
+        for kind in ("generation", "pack", "export_file"):
+            with self.subTest(kind=kind), self.assertRaisesRegex(RuntimeError, "cannot be deleted"):
+                MANIFEST.validate_delete({"kind": kind, "disposition": "DELETE",
+                                          "observed": {}}, {})
+        for name in MANIFEST.RETAINED_FUNCTIONS:
+            with self.subTest(function=name), self.assertRaisesRegex(RuntimeError, "cannot be deleted"):
+                MANIFEST.validate_delete({"kind": "function", "disposition": "DELETE",
+                                          "observed": {"name": name}}, {})
+        # Retired bootstrap helpers can be reviewed for deletion. The guard
+        # must not prevent the actual legacy runtime retirement contract.
+        MANIFEST.validate_delete({"kind": "function", "disposition": "DELETE",
+            "observed": {"name": "storage_v2_copy_legacy_lexical_segments"}}, {})
+
     def test_private_input_and_exact_catalog_decisions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "private"

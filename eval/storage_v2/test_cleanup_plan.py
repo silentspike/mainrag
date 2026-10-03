@@ -27,6 +27,9 @@ def catalog_fixture():
         "activation_receipt_relation_oid": None,
         "exact_rows": {},
         "reachability": None,
+        "dependency_coverage": "PUBLIC_RELATIONS_FUNCTIONS_TYPES_WITH_EXTERNAL_DEPENDENTS",
+        "routine_relation_references": [],
+        "routine_reference_coverage": "LEXICAL_CANDIDATES_NOT_EXECUTION_PROOF",
     }
 
 def capture_responses(value):

@@ -45,6 +45,20 @@ SELECT jsonb_build_object(
       'name', relation.relname,
       'kind', relation.relkind,
       'owner', pg_get_userbyid(relation.relowner),
+      'acl', relation.relacl::text,
+      'row_security', relation.relrowsecurity,
+      'force_row_security', relation.relforcerowsecurity,
+      'sequence_parameters', (SELECT jsonb_build_object(
+        'type', format_type(sequence.seqtypid, NULL),
+        'start', sequence.seqstart, 'increment', sequence.seqincrement,
+        'minimum', sequence.seqmin, 'maximum', sequence.seqmax,
+        'cache', sequence.seqcache, 'cycle', sequence.seqcycle)
+        FROM pg_sequence sequence WHERE sequence.seqrelid=relation.oid),
+      'owned_by_relation_oid', (SELECT dependency.refobjid
+        FROM pg_depend dependency
+        WHERE relation.relkind='S' AND dependency.classid='pg_class'::regclass
+          AND dependency.objid=relation.oid AND dependency.refclassid='pg_class'::regclass
+          AND dependency.deptype IN ('a','i') LIMIT 1),
       'total_bytes', pg_total_relation_size(relation.oid),
       'estimated_rows', relation.reltuples
     ) ORDER BY relation.oid), '[]'::jsonb)
@@ -58,10 +72,16 @@ SELECT jsonb_build_object(
       'number', attribute.attnum,
       'name', attribute.attname,
       'type', format_type(attribute.atttypid, attribute.atttypmod),
-      'not_null', attribute.attnotnull
+      'not_null', attribute.attnotnull,
+      'identity', attribute.attidentity,
+      'generated', attribute.attgenerated,
+      'default_sha256', encode(digest(COALESCE(pg_get_expr(default_row.adbin,
+        default_row.adrelid), ''), 'sha256'), 'hex')
     ) ORDER BY attribute.attrelid, attribute.attnum), '[]'::jsonb)
     FROM pg_attribute AS attribute
     JOIN pg_class AS relation ON relation.oid = attribute.attrelid
+    LEFT JOIN pg_attrdef default_row
+      ON default_row.adrelid=attribute.attrelid AND default_row.adnum=attribute.attnum
     WHERE relation.relnamespace = 'public'::regnamespace
       AND attribute.attnum > 0 AND NOT attribute.attisdropped
   ),
@@ -83,7 +103,12 @@ SELECT jsonb_build_object(
       'name', policy.polname,
       'relation_oid', policy.polrelid,
       'command', policy.polcmd,
-      'permissive', policy.polpermissive
+      'permissive', policy.polpermissive,
+      'roles', policy.polroles,
+      'using_sha256', encode(digest(COALESCE(pg_get_expr(policy.polqual,
+        policy.polrelid), ''), 'sha256'), 'hex'),
+      'check_sha256', encode(digest(COALESCE(pg_get_expr(policy.polwithcheck,
+        policy.polrelid), ''), 'sha256'), 'hex')
     ) ORDER BY policy.oid), '[]'::jsonb)
     FROM pg_policy AS policy
     JOIN pg_class AS relation ON relation.oid = policy.polrelid
@@ -95,7 +120,8 @@ SELECT jsonb_build_object(
       'name', trigger.tgname,
       'relation_oid', trigger.tgrelid,
       'function_oid', trigger.tgfoid,
-      'enabled', trigger.tgenabled
+      'enabled', trigger.tgenabled,
+      'definition_sha256', encode(digest(pg_get_triggerdef(trigger.oid), 'sha256'), 'hex')
     ) ORDER BY trigger.oid), '[]'::jsonb)
     FROM pg_trigger AS trigger
     JOIN pg_class AS relation ON relation.oid = trigger.tgrelid
@@ -108,6 +134,10 @@ SELECT jsonb_build_object(
       'name', routine.proname,
       'arguments', pg_get_function_identity_arguments(routine.oid),
       'kind', routine.prokind,
+      'owner', pg_get_userbyid(routine.proowner),
+      'acl', routine.proacl::text,
+      'security_definer', routine.prosecdef,
+      'configuration', routine.proconfig,
       'definition_sha256', CASE WHEN routine.prokind IN ('f', 'p')
         THEN encode(digest(pg_get_functiondef(routine.oid), 'sha256'), 'hex')
         ELSE NULL END
@@ -122,6 +152,8 @@ SELECT jsonb_build_object(
       'relation_oid', index_relation.indrelid,
       'valid', index_relation.indisvalid,
       'ready', index_relation.indisready,
+      'owner', pg_get_userbyid(index_class.relowner),
+      'definition_sha256', encode(digest(pg_get_indexdef(index_class.oid), 'sha256'), 'hex'),
       'total_bytes', pg_total_relation_size(index_class.oid)
     ) ORDER BY index_class.oid), '[]'::jsonb)
     FROM pg_index AS index_relation
@@ -140,11 +172,33 @@ SELECT jsonb_build_object(
     ) ORDER BY dependency.classid, dependency.objid, dependency.objsubid,
                dependency.refclassid, dependency.refobjid, dependency.refobjsubid), '[]'::jsonb)
     FROM pg_depend AS dependency
-    WHERE dependency.refclassid = 'pg_class'::regclass
+    WHERE (dependency.refclassid = 'pg_class'::regclass
       AND dependency.refobjid IN (
         SELECT oid FROM pg_class WHERE relnamespace = 'public'::regnamespace
-      )
+      )) OR (dependency.refclassid = 'pg_proc'::regclass
+      AND dependency.refobjid IN (
+        SELECT oid FROM pg_proc WHERE pronamespace = 'public'::regnamespace
+      )) OR (dependency.refclassid = 'pg_type'::regclass
+      AND dependency.refobjid IN (
+        SELECT oid FROM pg_type WHERE typnamespace = 'public'::regnamespace
+      ))
   ),
+  'dependency_coverage', 'PUBLIC_RELATIONS_FUNCTIONS_TYPES_WITH_EXTERNAL_DEPENDENTS',
+  'routine_relation_references', (
+    -- PL/pgSQL and string-bodied SQL do not have complete pg_depend edges.
+    -- These hashed lexical candidates must be reviewed separately; they do
+    -- not establish executable reachability or absence of dynamic SQL.
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+      'function_oid', routine.oid, 'relation_oid', relation.oid
+    ) ORDER BY routine.oid, relation.oid), '[]'::jsonb)
+    FROM pg_proc routine CROSS JOIN pg_class relation
+    WHERE routine.pronamespace = 'public'::regnamespace
+      AND routine.prokind IN ('f', 'p')
+      AND relation.relnamespace = 'public'::regnamespace
+      AND relation.relkind IN ('r', 'p', 'm', 'S', 'v', 'f')
+      AND strpos(lower(routine.prosrc), lower(relation.relname)) > 0
+  ),
+  'routine_reference_coverage', 'LEXICAL_CANDIDATES_NOT_EXECUTION_PROOF',
   'active_pointer_count', (
     SELECT count(*) FROM logical_source WHERE active_generation_id IS NOT NULL
   ),
@@ -467,6 +521,7 @@ def catalog(database: str, local_postgres: bool,
             raise RuntimeError("native legacy roots changed during catalog capture")
     required = {"database_oid", "relations", "columns", "constraints", "policies",
                 "triggers", "functions", "indexes", "dependencies",
+                "dependency_coverage", "routine_relation_references", "routine_reference_coverage",
                 "active_pointer_count", "pointer_set_sha256", "open_reader_count",
                 "building_run_count", "outbox_classes", "generations", "packs",
                 "activation_receipt_relation_oid", "exact_rows", "reachability"}
@@ -474,7 +529,7 @@ def catalog(database: str, local_postgres: bool,
             or any(not isinstance(value[key], list) for key in required - {
                 "database_oid", "active_pointer_count", "activation_receipt_relation_oid",
                 "exact_rows", "reachability", "pointer_set_sha256", "open_reader_count",
-                "building_run_count"
+                "building_run_count", "dependency_coverage", "routine_reference_coverage"
             }) or not (isinstance(value["database_oid"], str)
                        and value["database_oid"].isdecimal()) \
             or any(type(value[key]) is not int or value[key] < 0 for key in (
@@ -489,6 +544,10 @@ def catalog(database: str, local_postgres: bool,
             or any(type(count) is not int or count < 0
                    for count in value["exact_rows"].values()):
         raise RuntimeError("cleanup catalog response is incomplete")
+    if value["dependency_coverage"] != "PUBLIC_RELATIONS_FUNCTIONS_TYPES_WITH_EXTERNAL_DEPENDENTS" \
+            or value["routine_reference_coverage"] != "LEXICAL_CANDIDATES_NOT_EXECUTION_PROOF" \
+            or len(value["routine_relation_references"]) > 100000:
+        raise RuntimeError("cleanup dependency coverage is incomplete")
     if len(value["generations"]) > 100000 or len(value["packs"]) > 100000:
         raise RuntimeError("cleanup catalog generation or pack inventory exceeds its bound")
     if not isinstance(value["outbox_classes"], list) or len(value["outbox_classes"]) > 256 \
