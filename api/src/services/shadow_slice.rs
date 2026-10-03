@@ -497,7 +497,7 @@ where
                     generation.verification_manifest_sha256, source.active_generation_id, \
                     run.id AS run_id, run.semantic_manifest_sha256, run.adapter_profile_id, \
                     run.expected_active_generation_id, run.expected_item_count, \
-                    run.generation_root_sha256 \
+                    run.generation_root_sha256, generation.witness->>'lexical_input' AS lexical_input \
                FROM source_generation generation \
                JOIN logical_source source ON source.id=generation.source_id \
                JOIN storage_v2_ingest_run run ON run.generation_id=generation.id \
@@ -620,7 +620,11 @@ where
     {
         bail!("candidate intelligence export contract failed");
     }
-    let query_seeds = candidate_query_seeds(client, source_id, input.generation_id)
+    let native_lexical = identity
+        .get::<_, Option<String>>("lexical_input")
+        .as_deref()
+        == Some("native");
+    let query_seeds = candidate_query_seeds(client, source_id, input.generation_id, native_lexical)
         .await
         .context(CandidateVerificationPhase("query_seeds"))?;
     let mut checks = BTreeMap::new();
@@ -795,6 +799,7 @@ where
         io_buffer_bytes,
         commit_sha,
         SliceMode::PublicFixture,
+        false,
         None,
         None,
         None,
@@ -805,6 +810,7 @@ where
 
 /// Build and verify a complete source generation without changing an active
 /// pointer. Qualification and the release-candidate transition are separate.
+#[allow(dead_code)]
 pub async fn run_release_candidate_build<C>(
     client: &C,
     source_id: i64,
@@ -826,6 +832,39 @@ where
         io_buffer_bytes,
         commit_sha,
         SliceMode::ReleaseCandidate,
+        true,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Build an ordinary active-source successor using only native lexical inputs.
+/// Legacy bootstrap readers are deliberately absent from this path.
+pub async fn run_active_source_build<C>(
+    client: &C,
+    source_id: i64,
+    source_type: &str,
+    source_path: &Path,
+    pack_root: &Path,
+    io_buffer_bytes: usize,
+    commit_sha: &str,
+) -> Result<ShadowSliceResult>
+where
+    C: GenericClient + Sync,
+{
+    run_storage_v2_slice(
+        client,
+        source_id,
+        source_type,
+        source_path,
+        pack_root,
+        io_buffer_bytes,
+        commit_sha,
+        SliceMode::ReleaseCandidate,
+        false,
         None,
         None,
         None,
@@ -888,6 +927,7 @@ where
         io_buffer_bytes,
         commit_sha,
         SliceMode::ReleaseCandidate,
+        true,
         git_snapshot_commit_sha,
         expected_source_watermark_sha256,
         progress,
@@ -918,6 +958,7 @@ pub async fn run_release_candidate_build_checkpointed(
         io_buffer_bytes,
         commit_sha,
         SliceMode::ReleaseCandidate,
+        true,
         git_snapshot_commit_sha,
         expected_source_watermark_sha256,
         progress,
@@ -1118,6 +1159,7 @@ async fn run_storage_v2_slice<C>(
     io_buffer_bytes: usize,
     commit_sha: &str,
     mode: SliceMode,
+    copy_legacy_lexical: bool,
     git_snapshot_commit_sha: Option<&str>,
     expected_source_watermark_sha256: Option<&str>,
     progress: Option<&super::build_progress::BuildProgressRecorder>,
@@ -1345,6 +1387,9 @@ where
         "is_test": is_test,
         "adapter_profile_id": adapter_profile,
     });
+    if mode == SliceMode::ReleaseCandidate && !copy_legacy_lexical {
+        witness["lexical_input"] = json!("native");
+    }
     if checkpoints.is_some() {
         witness["checkpoint_protocol"] = json!("complete-items-v1");
     }
@@ -1361,6 +1406,9 @@ where
     let mut idempotency_identity=format!(
         "{idempotency_domain}:{source_id}:{predecessor_generation_id}:{source_watermark_sha256}:{adapter_profile}:{commit_sha}"
     );
+    if mode == SliceMode::ReleaseCandidate && !copy_legacy_lexical {
+        idempotency_identity.push_str(":native-lexical-v1");
+    }
     if let Some(cut) = &filesystem_cut {
         idempotency_identity.push(':');
         idempotency_identity.push_str(&cut.cut.descriptor_sha256);
@@ -1978,7 +2026,7 @@ where
                     score_profile,
                     score_evidence: &score_evidence,
                     score_stages: &score_stages,
-                    copy_legacy_lexical: mode == SliceMode::ReleaseCandidate,
+                    copy_legacy_lexical,
                 },
             )
             .await?;
@@ -2912,21 +2960,40 @@ async fn candidate_query_seeds<C>(
     client: &C,
     source_id: i64,
     generation_id: i64,
+    native_lexical: bool,
 ) -> Result<Vec<CandidateQuerySeed>>
 where
     C: GenericClient + Sync,
 {
-    let legacy = client
-        .query(
-            "SELECT file.path, chunk.content_text \
+    let inputs = if native_lexical {
+        client.query(
+            "SELECT occurrence_row.source_path AS path, left(document.search_text,32768) AS content_text \
+             FROM source_generation generation \
+             JOIN generation_item_version membership ON membership.source_id=generation.source_id \
+              AND membership.valid_from_seq<=generation.generation_seq \
+              AND (membership.valid_to_seq IS NULL OR membership.valid_to_seq>generation.generation_seq) \
+             JOIN occurrence occurrence_row ON occurrence_row.artifact_version_id=membership.artifact_version_id \
+              AND occurrence_row.source_id=generation.source_id \
+             JOIN storage_v2_search_view_document binding ON binding.view_id=occurrence_row.view_id \
+              AND binding.ordinal=0 \
+             JOIN storage_v2_search_document document ON document.id=binding.document_id \
+             WHERE generation.id=$1 AND generation.source_id=$2 \
+             ORDER BY occurrence_row.id LIMIT 64",
+            &[&generation_id,&source_id],
+        ).await?
+    } else {
+        client
+            .query(
+                "SELECT file.path, chunk.content_text \
                FROM chunks chunk JOIN files file ON file.id=chunk.file_id \
               WHERE file.source_id=$1 AND chunk.content_text IS NOT NULL \
               ORDER BY chunk.id LIMIT 64",
-            &[&source_id],
-        )
-        .await?;
+                &[&source_id],
+            )
+            .await?
+    };
     let mut candidates = BTreeSet::new();
-    for row in legacy {
+    for row in inputs {
         let path: String = row.get("path");
         let content: String = row.get("content_text");
         let mut preferred = search_exact_identifiers(&content);
@@ -2934,7 +3001,7 @@ where
             content
                 .split(|character: char| !(character.is_alphanumeric() || character == '_'))
                 .map(str::to_lowercase)
-                .filter(|token| token.len() >= 12),
+                .filter(|token| token.len() >= if native_lexical { 3 } else { 12 }),
         );
         for token in preferred.into_iter().filter(|token| token.len() <= 128) {
             candidates.insert((token, path.clone()));
@@ -2950,7 +3017,7 @@ where
         if selected_queries.contains(&query) {
             continue;
         }
-        if !top_paths_by_query.contains_key(&query) {
+        if !native_lexical && !top_paths_by_query.contains_key(&query) {
             let top_paths = client
                 .query(
                     "SELECT file.path FROM chunks chunk \
@@ -2967,7 +3034,7 @@ where
                 .collect();
             top_paths_by_query.insert(query.clone(), top_paths);
         }
-        if !top_paths_by_query[&query].contains(&path) {
+        if !native_lexical && !top_paths_by_query[&query].contains(&path) {
             continue;
         }
         let found = client

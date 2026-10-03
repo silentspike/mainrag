@@ -196,30 +196,24 @@ async fn sync_source(client: &ApiClient, name: &str, json_output: bool) -> anyho
     let result = client.sync_source(name).await?;
 
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "source_id": result.source_id,
-                "source_name": name,
-                "status": result.status,
-                "files_processed": result.stats.files_processed,
-                "chunks_created": result.stats.chunks_created,
-                "embeddings_generated": result.stats.embeddings_generated,
-            }))?
-        );
+        let mut output = match &result {
+            crate::client::api::SyncSourceResponse::Legacy(legacy) => json!({
+                "source_id": legacy.source_id,
+                "status": legacy.status,
+                "files_processed": legacy.stats.files_processed,
+                "chunks_created": legacy.stats.chunks_created,
+                "embeddings_generated": legacy.stats.embeddings_generated,
+            }),
+            crate::client::api::SyncSourceResponse::Active(_) => serde_json::to_value(&result)?,
+        };
+        output["source_name"] = json!(name);
+        println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
 
     println!(
         "{}",
-        format!(
-            "\r✓ Synced '{}' ({} files, {} chunks, {} embeddings)",
-            name,
-            result.stats.files_processed,
-            result.stats.chunks_created,
-            result.stats.embeddings_generated
-        )
-        .green()
+        format!("\r✓ Synced '{}' ({})", name, result.summary()).green()
     );
 
     Ok(())
