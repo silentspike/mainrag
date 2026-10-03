@@ -2,6 +2,10 @@
 -- No content bytes, pointers or existing generations are removed here.
 BEGIN;
 
+-- Freeze registration before backfill, then install the identity trigger and
+-- entry FK under the same lock. Concurrent inserts cannot fall between them.
+LOCK TABLE content_body,content_pack_entry IN SHARE ROW EXCLUSIVE MODE;
+
 CREATE TABLE storage_v2_body_identity (
     id BIGINT PRIMARY KEY,
     digest_algorithm TEXT NOT NULL CHECK (digest_algorithm='sha256-v1'),
