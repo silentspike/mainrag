@@ -1,8 +1,8 @@
 # Storage-v2 database preparation gates
 
-This directory implements issue #65's fail-closed preparation boundary. It
-does not backfill a source, change an active generation, deploy an application,
-or remove legacy PostgreSQL or Qdrant state.
+This directory contains issue #65's preparation checks and the issue-scoped
+operators for storage-v2 qualification, activation and retirement. The
+read-only preflight below does not modify source generations or remove data.
 
 ## Read-only check
 
@@ -1385,3 +1385,87 @@ receipts. Database DELETE is not database compaction or filesystem/thinpool
 space recovery. Qdrant/components, database compaction, all protected root
 integrity checks, API/CLI/intelligence/search/ingest acceptance and measured
 physical space deltas remain separate required phases of issue #68.
+
+## Exact Qdrant and operational component retirement
+
+`cleanup-external.py` implements the external phase after the committed
+PostgreSQL cleanup. Its protected manifest binds the complete disposition
+catalog, Qdrant collection/alias observations, systemd/container identities,
+native pointers, installed runtime digest, original PostgreSQL cleanup
+manifest, local Qdrant origin, vector-directory identity and operator hashes.
+It does not infer deletion targets from names, sizes or a failed HTTP request.
+
+Capture operational components with `cleanup-plan.py --component-config`.
+The protected configuration uses schema
+`mainrag.storage-v2.cleanup-components-config.v1` and a `components` list.
+Each entry has `kind` (`systemd_unit` or `docker_container`), `identity` (one
+canonical service/socket/timer name or a complete 64-character container ID)
+and `role` (`producer`, `qdrant_backend`, `legacy_backend` or `retained`).
+Observation hashes unit definitions and container configuration; raw container
+environment and health logs are not retained. Every inventoried object needs
+an explicit KEEP/DELETE disposition through `cleanup-manifest.py`.
+When Docker targets are present, the complete container-ID set is also bound
+and observed after each step. A replacement container with a new ID therefore
+fails the readback even if the original exact target is absent.
+
+Planning takes `--plan --manifest`, the protected `--catalog` and `--draft`
+with their exact `--catalog-sha256` and `--draft-sha256`,
+`--runtime-package-sha256`, `--legacy-cleanup-manifest-sha256`, `--qdrant-url`
+and `--vector-storage-root`. The runtime digest is the running API binary
+digest, matching the PostgreSQL cleanup/runtime contract. The Qdrant endpoint
+must be an explicit local origin; redirects and ambient proxies are rejected.
+An optional protected `--qdrant-api-key-file` supplies credentials only to the
+request header. Credentials never belong in arguments, URLs or evidence.
+
+Apply takes `--apply MANIFEST_SHA256 --manifest --catalog --draft --approval
+--approval-sha256 --database --attempt`. `--local-postgres` selects the local
+administrator transport. The attempt directory is create-only. The exact
+fresh approval uses the same seven opened-proof gates as PostgreSQL cleanup.
+The caller-review gate additionally contains one `external_consumers` entry
+per target, binding `key`, `observed_sha256`, `legacy_exclusive: true` and
+`other_consumers_absent: true`. The runtime-retirement gate binds
+`vector_storage` (`root`, `device`, `inode`) and
+`exclusive_qdrant_storage: true`. The API's retirement setting remains bound
+to the original committed PostgreSQL manifest; the new external manifest
+does not require a needless application restart.
+
+One live database connection owns the external, PostgreSQL-cleanup and
+native-GC advisory leases plus native relation SHARE locks. A stale PID/file
+never establishes ownership. Runtime, committed SQL receipt, complete native
+catalog, readers, writers, pointers and root identity are checked before each
+mutation and afterward. Approved producers/activators retire first, then
+aliases, collections and backends. Retained aliases block collection deletion;
+retained collections block Qdrant-backend retirement. A native API process
+inside a proposed unit/container blocks retirement. Docker removal keeps
+volumes. Custom unit definitions are preserved by an exclusive hardlink before
+masking; no existing definition archive is overwritten.
+
+Each dispatched operation has a create-only, fsynced, hash-chained intent
+record before external I/O and a subsequent complete live readback. Retained
+objects must remain unchanged. On an unknown outcome, use
+`--reconcile MANIFEST_SHA256` with the original protected inputs, `--attempt`
+and a create-only `--output`. This validates the complete manifest prefix and
+observes current state without repeating a mutation. Historical approval is
+identified as historical during reconciliation. Partial failure requires
+reconciliation and a new reviewed manifest of the remaining targets; there is
+no automatic retry or continuation based on an old RUNNING label.
+
+A stopped Qdrant backend requires a previously confirmed empty API inventory,
+the exact retired component, explicit TCP refusal and no remaining collection
+storage entries. A timeout, authorization error or arbitrary HTTP failure
+never becomes proof of absence. Receipts explicitly distinguish the last
+confirmed HTTP observation from the subsequent component/endpoint check.
+Vector allocation and filesystem-availability deltas are measured separately;
+they do not prove thinpool reclamation or complete issue #68. Native GC/repack,
+database compaction and full post-cleanup integrity/search/ingest acceptance
+remain required.
+
+The hosted integration service runs
+`python3 -m eval.storage_v2.external_cleanup_rehearsal --qdrant-url` against
+real Qdrant with uniquely owned synthetic collections, aliases and a retained
+point/vector. The PostgreSQL cleanup fixture exercises the complete external
+CLI, actual live lease/write exclusion, native result preservation and
+read-only reconciliation using an explicitly labeled HTTP protocol fixture.
+An explicitly invoked `--systemd` rehearsal owns and removes temporary units,
+their activator and preserved definitions. These fixtures are not production
+cleanup or physical-reclamation acceptance.
