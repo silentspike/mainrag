@@ -626,6 +626,11 @@ def private_create(path: Path, value: object) -> str:
             output.flush()
             os.fsync(output.fileno())
         os.link(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -882,6 +887,7 @@ def main() -> int:
     retention.add_argument("--retain-all-generations", action="store_true")
     parser.add_argument("--qdrant-url")
     parser.add_argument("--qdrant-api-key-file", type=Path)
+    parser.add_argument("--component-config", type=Path)
     parser.add_argument("--runtime-root", type=Path)
     parser.add_argument("--export-root", action="append", type=Path, default=[])
     parser.add_argument("--output", required=True, type=Path)
@@ -903,11 +909,30 @@ def main() -> int:
                    if arguments.runtime_root is not None else None)
         exports = (export_inventory(tuple(arguments.export_root))
                    if arguments.export_root else None)
+        components = None
+        container_ids = None
+        if arguments.component_config is not None:
+            import importlib.util
+            component_spec = importlib.util.spec_from_file_location(
+                "cleanup_components_capture", Path(__file__).with_name("cleanup-components.py"))
+            provider = importlib.util.module_from_spec(component_spec)
+            component_spec.loader.exec_module(provider)
+            metadata = arguments.component_config.lstat()
+            if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077 \
+                    or metadata.st_size > 1024*1024:
+                raise RuntimeError("component configuration must be a bounded private file")
+            config = json.loads(arguments.component_config.read_bytes(), object_pairs_hook=unique_keys)
+            components = [provider.observe(item, arguments.local_postgres)
+                          for item in provider.validate_specs(config)]
+            if any(row['kind'] == 'docker_container' for row in components):
+                container_ids = provider.container_ids(arguments.local_postgres)
         artifact = {"schema_version": "mainrag.storage-v2.cleanup-catalog.v1",
                     "status": "OBSERVED_ONLY", "catalog": observed,
                     "qdrant": qdrant,
                     "runtime_search": runtime,
                     "exports": exports,
+                    "components": components,
+                    "container_ids": container_ids,
                     "observed_at_unix": int(time.time()),
                     "before_state_sha256": hashlib.sha256(canonical(observed)).hexdigest(),
                     "operator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),

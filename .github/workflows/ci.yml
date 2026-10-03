@@ -449,6 +449,8 @@ jobs:
         run: |
           curl -sf http://localhost:6333/readyz
           curl -sf http://localhost:6333/collections | python3 -m json.tool
+      - name: Verify exact external retirement against real Qdrant
+        run: python3 -m eval.storage_v2.external_cleanup_rehearsal --qdrant-url http://127.0.0.1:6333
 
   schema-search:
     name: storage-v2 empty search branches
