@@ -1302,3 +1302,86 @@ understands flat projections is forbidden. Keep compatible readers and verified
 backups. Capacity admission must include measured database/index growth, packs,
 retained WAL/archive growth, backup growth and the final-delta reserve. A small
 vector compression result alone is not a full-source resource gate.
+
+## Global native GC and pack reclamation
+
+`native-gc.py` implements the database mark/sweep phase after accepted activation,
+ordinary ingest and the committed legacy database cleanup. It preserves every
+existing generation and every durable membership, producer identity, ingest
+receipt, intelligence reference, current hit mapping and immutable hit-history
+reference. Incoming foreign keys from tables outside its deletion allowlist are
+additional roots, including references outside the public schema. An artifact
+root retains all of its occurrences. View components, search documents and
+directed content-node edges carry reachability through the graph. Unfinished
+pack publication remains protected recovery state.
+
+Protected exports supply explicit typed roots in a private
+`mainrag.storage-v2.gc-retention.v1` file: `preserve_all_generations: true`, a
+nonempty `authority`, `roots` containing exact `table` and positive integer `id`
+pairs, and nonempty hash-bound `proofs`. Proof files must be protected local
+basenames. An empty root list requires an actual reviewed export inventory;
+missing proofs never mean that no exports exist.
+
+The private resource policy binds `data_filesystem`, `root_filesystem`,
+`thinpool_uuid` and the canonical `pack_root`. Plan/apply measure actual thinpool
+and filesystem capacity plus queued local WAL. Admission keeps 42 GiB physical
+reserve, the 75% pool-data and 60% metadata ceilings, 20 GiB root reserve and the
+24/28 GiB local WAL low/high budget. Detoasted candidate sizes, full-page WAL,
+tuple overhead and temporary mark/verification storage are included in the
+conservative admission. A batch exceeding that admission is rejected.
+
+Planning requires `--plan --database`, protected `--retention` and
+`--resource-policy`, exact `--activation-manifest-sha256`,
+`--legacy-cleanup-manifest-sha256`, `--runtime-package-sha256`,
+`--maintenance-binary-sha256`, `--code-sha` and a create-only private `--output`.
+`--local-postgres` uses the local administrator transport. The output binds the
+operator/migration/maintenance source hashes, schema, all generation/pointer
+states, pack identities, retained row hashes and exact dead-set counts/hashes.
+
+Applying requires `--apply MANIFEST_SHA256 --manifest --retention --approval
+--administrator --database --output`. The approval schema is
+`mainrag.storage-v2.native-gc-approval.v1`, with the exact `manifest_sha256`, fresh
+`observed_at_unix`, nonempty owner `authority`, honest
+`review_kind: OWNER_AUTHORIZED_SELF_REVIEW` and five hash-bound gates:
+`native_integrity`, `export_retention`, `runtime_retirement`, `recovery_boundary`
+and `resource_budget`. Every gate opens its underlying protected proof files
+and binds the exact before state, activation, legacy cleanup, runtime and
+maintenance package identities. Runtime identity is independently observed.
+
+The operator takes a global advisory lease and relation locks, refuses other
+active database clients, building runs, open reader epochs and any before-state
+drift. Only the enumerated immutable-content deletion guards are temporarily
+suspended by the administrator transaction; foreign keys, digest validation,
+mapping and audit guards remain. Deferred constraints drain before each guard's
+original enabled state is restored. Retained roots and row hashes must match
+after deletion. The administrator-only immutable GC receipt and sweeping epoch
+commit atomically. A lost response is reconciled from that receipt before any
+new mutation; an earlier live database lease prevents a retry.
+
+Migration 136 retains small immutable body identity records (ID, algorithm,
+digest and logical length), without content bytes. Immutable pack entries point
+to these identities, allowing complete original pack manifests to be verified
+after a collected body row is gone. Ordinary source bodies and occurrences keep
+their existing live foreign-key contracts. The migration itself collects no
+data, changes no active pointer and does not constitute GC authority.
+
+`mainrag-pack-maintenance` exposes `repack`, `retire-empty` and `finish` operations
+through the existing bounded pack implementation. Arguments are
+`--connection-file`, `--root`, `--manifest-sha256`, `--pack`, `--operation` and a
+create-only protected `--output`; repack also requires the persisted
+`--replacement` UUID. The private connection file uses a local Unix socket or
+loopback address and an authorized application administrator. The controlled
+authority helper checks the committed GC receipt, exact original pack identity,
+canonical root and actual executable SHA-256. Direct application access to the
+GC receipt ledger remains denied. Each operation keeps the root maintenance
+lock, real content verification, reader drain fence, atomic placement switch,
+durable unlink receipt and resumable crash contract. Repack retains a 42 GiB
+filesystem reserve and bounded buffers/entries/logical bytes; empty packs need
+no replacement file.
+
+The database receipt explicitly remains `DB_COMMITTED_PACK_RECLAIM_PENDING`.
+Physical pack reclamation requires successful `finish` and actual unlink
+receipts. Database DELETE is not database compaction or filesystem/thinpool
+space recovery. Qdrant/components, database compaction, all protected root
+integrity checks, API/CLI/intelligence/search/ingest acceptance and measured
+physical space deltas remain separate required phases of issue #68.
