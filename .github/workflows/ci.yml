@@ -455,7 +455,9 @@ jobs:
   schema-search:
     name: storage-v2 empty search branches
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # The complete suite plus service setup/teardown exceeded the former budget.
+    # Keep every assertion; allow the added representation and retirement checks.
+    timeout-minutes: 20
     services:
       postgres:
         image: pgvector/pgvector@sha256:1d50c689b0a6511b9ea0a15615281c81a59fd04a08eb35057ec8646fb3a2118a
@@ -515,6 +517,7 @@ jobs:
               'eval.storage_v2.schema.test_native_reader_inputs.NativeReaderInputTests',
               'eval.storage_v2.schema.test_bound_query_and_presence_work.BoundQueryAndPresenceTests',
               'eval.storage_v2.schema.test_first_lexical_candidates.FirstLexicalCandidateTests',
+              'eval.storage_v2.schema.test_posting_derived_identifiers.PostingDerivedIdentifierTests',
               'eval.storage_v2.schema.test_native_legacy_hit_resolution.NativeLegacyHitResolutionTests',
               'eval.storage_v2.schema.test_cleanup_catalog.CleanupCatalogTests',
               'eval.storage_v2.schema.test_cleanup_apply.CleanupApplyTests',

@@ -1401,3 +1401,32 @@ execution authority and compact identity constraints before replacing either
 rank-reader overload. Native fixtures compare full named/active search envelopes,
 independent complete rank results and authorization under ordinary, compact and
 mixed storage. These proofs do not replace production latency acceptance.
+## Posting-derived native identifiers
+
+Migration 138 avoids storing a second complete copy of native word identifiers.
+The constructor selects this representation only when the normalized supplied
+identifier set equals the complete word-posting set containing underscores or
+ASCII digits. Custom, partial and nonword identifier sets remain explicit.
+Full canonical identifiers are available through
+`storage_v2_document_exact_identifiers`; scoped identifier membership uses
+`storage_v2_document_has_exact_identifier`. Both named-generation and active-set
+search retain the original complete result and score contracts.
+
+Existing materialization hashes, content identities, generation roots and
+profiles remain unchanged. Migration installation does not convert existing
+documents. Completed new posting sets and converted older sets are sealed
+against subsequent flat or block INSERTs. Direct flag changes also require a
+seal bound to the unchanged document identity. The seal is derived metadata owned by
+its document, so native GC removes it only with an unreachable document.
+The administrator-only conversion function processes at most 256
+documents per call, reports a durable cursor and proves full equality before
+selecting the derived representation. Keeping existing values allows the read
+path to change before their removal. Removing values reports logical bytes only;
+physical space requires a separately verified database reclamation operation.
+
+The matching bounded restoration function reconstructs the full original arrays
+before the previous reader/constructor definitions can be restored. Restoration
+needs capacity and WAL admission. The immutable document boundary permits only
+these proven representation transitions; edits to text, profiles, components,
+hashes and other semantic fields continue to fail. Posting immutability is an
+installation prerequisite.
