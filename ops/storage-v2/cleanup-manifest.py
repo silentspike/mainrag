@@ -39,6 +39,46 @@ KINDS = (
     ("outbox_class", "outbox_classes", ("action", "status")),
 )
 
+# Native objects are retained by the legacy cleanup contract. Native GC/repack
+# has a separate root and integrity contract and cannot inherit DELETE here.
+RETAINED_RELATIONS = frozenset({
+    "sources", "logical_source", "source_generation", "source_item",
+    "generation_item_version", "artifact_version", "occurrence",
+    "content_body", "content_node", "content_node_edge", "content_pack",
+    "content_pack_entry", "content_reader_epoch", "retrieval_view", "view_component",
+    "legacy_hit_mapping", "users", "source_access", "user_source_access",
+    "roles", "user_roles", "permissions", "role_permissions", "source_permissions",
+    "api_keys", "sessions", "revoked_tokens", "audit_log", "rate_limits",
+})
+RETAINED_FUNCTIONS = frozenset({
+    "storage_v2_resolve_legacy_hit", "storage_v2_preserve_legacy_hit",
+    "storage_v2_legacy_hit_mapping_state", "storage_v2_legacy_hit_mapping_states",
+    "storage_v2_replace_legacy_hit_mapping", "storage_v2_replace_legacy_hit_mappings",
+    "storage_v2_invalidate_legacy_hit_proof", "storage_v2_is_admin",
+    "storage_v2_can_access_source", "user_can_access_source",
+    "get_accessible_sources", "log_audit_event", "check_rate_limit",
+})
+
+
+def retained_relation(name: object) -> bool:
+    return isinstance(name, str) and (name in RETAINED_RELATIONS
+                                    or name.startswith(("storage_v2_", "audit_log_")))
+
+
+def validate_delete(item: dict, relation_names: dict) -> None:
+    if item["disposition"] != "DELETE":
+        return
+    kind = item["kind"]
+    observed = item["observed"]
+    if kind in {"generation", "pack", "export_file"}:
+        raise RuntimeError("retained generation, pack or export cannot be deleted by legacy cleanup")
+    relation = (observed.get("name") if kind == "relation"
+                else relation_names.get(observed.get("relation_oid")))
+    if retained_relation(relation):
+        raise RuntimeError("retained native or authorization object cannot be deleted by legacy cleanup")
+    if kind == "function" and observed.get("name") in RETAINED_FUNCTIONS:
+        raise RuntimeError("retained native or authorization function cannot be deleted by legacy cleanup")
+
 
 def private_read(path: Path, limit: int) -> tuple[dict, str]:
     parent = path.parent.resolve(strict=True)
@@ -182,6 +222,17 @@ def draft(inventory: dict, raw_sha256: str, decisions: dict) -> dict:
     known = {item["key"] for item in objects}
     if not set(decisions) <= known:
         raise RuntimeError("cleanup decisions name unknown objects")
+    relation_names = {row["oid"]: row["name"] for row in catalog["relations"]}
+    # Columns of index relations and sequences owned by native columns are
+    # catalog objects too. Protect them through their owning relation rather
+    # than depending on a naming convention for implicit objects.
+    for row in catalog["indexes"]:
+        relation_names[row["oid"]] = relation_names.get(row["relation_oid"])
+    protected_relation_oids = {oid for oid, name in relation_names.items()
+                               if retained_relation(name)}
+    for row in catalog["relations"]:
+        if row.get("owned_by_relation_oid") in protected_relation_oids:
+            relation_names[row["oid"]] = "storage_v2_retained_owned_object"
     for item in objects:
         decision = decisions.get(item["key"])
         item["disposition"] = decision["disposition"] if decision else "UNREVIEWED"
@@ -190,9 +241,11 @@ def draft(inventory: dict, raw_sha256: str, decisions: dict) -> dict:
         if item["disposition"] == "DELETE" and item["kind"] == "relation" \
                 and "exact_row_count" not in item["observed"]:
             raise RuntimeError("relation delete decision requires an exact row count")
-        if item["disposition"] == "DELETE" and item["kind"] == "relation" \
-                and item["observed"].get("name") == "legacy_hit_mapping":
-            raise RuntimeError("durable legacy-hit mapping cannot be deleted")
+        if item["kind"] == "relation" and retained_relation(
+                relation_names.get(item["observed"]["oid"])) \
+                and item["disposition"] == "DELETE":
+            raise RuntimeError("retained native or authorization object cannot be deleted by legacy cleanup")
+        validate_delete(item, relation_names)
     blockers = ["POST_ACTIVATION_ACCEPTANCE_UNVERIFIED",
                 "OWNER_APPROVAL_FOR_EXACT_MANIFEST_MISSING",
                 "RUNTIME_REMOVAL_UNVERIFIED", "EXPORT_RETENTION_UNVERIFIED",
@@ -205,6 +258,12 @@ def draft(inventory: dict, raw_sha256: str, decisions: dict) -> dict:
         blockers.append("RETAINED_REACHABILITY_NOT_INVENTORIED")
     if inventory.get("exports") is None:
         blockers.append("EXPORT_FILES_NOT_INVENTORIED")
+    if catalog.get("dependency_coverage") != \
+            "PUBLIC_RELATIONS_FUNCTIONS_TYPES_WITH_EXTERNAL_DEPENDENTS" \
+            or catalog.get("routine_reference_coverage") != \
+            "LEXICAL_CANDIDATES_NOT_EXECUTION_PROOF" \
+            or not isinstance(catalog.get("routine_relation_references"), list):
+        blockers.append("CATALOG_DEPENDENCY_COVERAGE_INCOMPLETE")
     if any(item["disposition"] == "UNREVIEWED" for item in objects):
         blockers.append("OBJECT_DISPOSITIONS_INCOMPLETE")
     return {"schema_version": "mainrag.storage-v2.cleanup-manifest-draft.v1",
@@ -221,6 +280,8 @@ def draft(inventory: dict, raw_sha256: str, decisions: dict) -> dict:
                                            else None),
             "dependency_set_sha256": hashlib.sha256(CAPTURE.canonical(
                 catalog.get("dependencies"))).hexdigest(),
+            "routine_reference_set_sha256": hashlib.sha256(CAPTURE.canonical(
+                catalog.get("routine_relation_references"))).hexdigest(),
             "objects": objects, "blockers": blockers}
 
 

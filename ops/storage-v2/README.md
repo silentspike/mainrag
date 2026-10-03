@@ -903,6 +903,14 @@ candidates. The optional Qdrant lists are read twice but cannot share the
 PostgreSQL snapshot. Text matches in tracked runtime files are candidates for
 manual caller review, not proof about an installed binary.
 
+The catalog binds relation authority and RLS flags, policy predicates and roles,
+trigger definitions, routine authority and security configuration, and index
+definitions. Dependencies include public relation, routine, and type targets
+with dependents from other schemas. String-bodied routines also have a separate
+lexical relation-reference inventory: PostgreSQL catalog dependencies alone do
+not establish absence of dynamic or PL/pgSQL callers. These candidates require
+caller review and execution evidence.
+
 Explicit export roots are hashed file by file with symlinks rejected. Their
 scan is bounded and non-atomic; every required root must be named and reviewed.
 `cleanup-manifest.py` turns a protected catalog into a create-only disposition
@@ -912,6 +920,11 @@ optional private decisions JSON uses schema
 `mainrag.storage-v2.cleanup-decisions.v1`, the exact catalog file SHA-256, and
 an `objects` array of `{key, disposition, reason, authority}` entries. A draft
 always has `apply_allowed: false`; decisions are review input, not approval.
+Legacy-cleanup DELETE decisions reject native relations and their columns,
+constraints, policies, triggers and indexes, durable hit resolvers and proofs,
+authorization objects, generations, packs and protected exports. Native GC and
+repack remain separate operations under their complete retained-root contract.
+Retired bootstrap routines can still receive explicit reviewed dispositions.
 
 This capture has status `OBSERVED_ONLY`. It does not produce an approved cleanup
 manifest, verify body/pack integrity, authorize GC, remove runtime callers, or
