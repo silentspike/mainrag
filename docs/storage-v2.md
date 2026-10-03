@@ -1383,3 +1383,21 @@ source I/O, telemetry and the activation receipt without inventing legacy chunk
 or embedding counts. Watch statistics use complete active membership and exclude
 test sources. These runtime contracts do not establish production activation or
 cleanup acceptance; the real complete-set and post-cleanup gates remain required.
+
+### First native lexical candidates
+
+Migration 137 reduces matching native segments to their first matching order per
+occurrence, source and artifact before the rank reader materializes candidates.
+The ordinary branch reduces source-local exact matches before joining requested
+IDs. Compact branches retain fingerprint filtering and full per-segment vector
+evaluation. Mixed storage remains supported; the parent reader reduces both
+representations with its existing score and tie rules. Full lexical enumeration
+is unchanged, and precise native scoring still evaluates the selected hits.
+
+Generated-segment detection uses ordinary order zero or compact block zero.
+Validated block constraints prove the latter contains segment zero without
+fetching segment arrays. Installation checks exact preceding definitions,
+execution authority and compact identity constraints before replacing either
+rank-reader overload. Native fixtures compare full named/active search envelopes,
+independent complete rank results and authorization under ordinary, compact and
+mixed storage. These proofs do not replace production latency acceptance.
