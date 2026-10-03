@@ -214,7 +214,10 @@ class NativeLegacyHitResolutionTests(unittest.TestCase):
         replay=apply([native,history])
         self.assertEqual((replay['historical_hits'],replay['native_targets']),(0,0))
         self.assertEqual(proofs,self.sql('SELECT jsonb_agg(jsonb_build_array(old_hit_id,ctid,mapping_sha256) ORDER BY old_hit_id) FROM storage_v2_legacy_hit_proof'))
-        self.sql('CREATE TABLE files(id BIGINT PRIMARY KEY,source_id BIGINT,path TEXT,hash BYTEA); '
+        # Own this legacy fixture explicitly; do not depend on test_a having
+        # removed the tables when this test is selected in isolation.
+        self.sql('DROP TABLE IF EXISTS chunks CASCADE; DROP TABLE IF EXISTS files CASCADE; '
+        'CREATE TABLE files(id BIGINT PRIMARY KEY,source_id BIGINT,path TEXT,hash BYTEA); '
             'CREATE TABLE chunks(id BIGINT PRIMARY KEY,file_id BIGINT,content_hash BYTEA,start_line INT,end_line INT); '
             'ALTER TABLE files OWNER TO mainrag; ALTER TABLE chunks OWNER TO mainrag;')
         self.sql(f"INSERT INTO files VALUES(700,3,{self.quote(path)},decode('{digest}','hex')); "
@@ -246,6 +249,16 @@ class NativeLegacyHitResolutionTests(unittest.TestCase):
         envelopes={hit:self.resolve(hit,'1',source=3) for hit in ['70001','70002']}
         self.assertEqual(envelopes['70001']['resolution_scope'],'selected_generation')
         self.assertEqual(envelopes['70002']['resolution_scope'],'retained_legacy_hit')
+        # Exercise durable resolution after the entire bootstrap helper set is
+        # retired, rather than proving table-name independence alone.
+        self.sql('''
+DROP FUNCTION storage_v2_copy_legacy_lexical_segments(bigint,bigint);
+DROP FUNCTION storage_v2_lock_legacy_rank_snapshot(bigint,bigint,bytea);
+DROP FUNCTION storage_v2_get_legacy_rank_snapshot(bigint,bigint,bytea);
+DROP FUNCTION storage_v2_candidate_query_evidence(bigint,bigint,text,text,bigint[],bigint[]);
+DROP FUNCTION storage_v2_legacy_hit_inventory(bigint,bigint,bigint);
+DROP FUNCTION storage_v2_materialize_legacy_chunk_ranks(bigint,bigint);
+''')
         self.sql('DROP TABLE chunks CASCADE; DROP TABLE files CASCADE;')
         self.assertEqual(envelopes,{hit:self.resolve(hit,'1',source=3) for hit in envelopes})
         # Replacing the live mapping does not authorize collection of the
