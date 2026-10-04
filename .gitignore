@@ -5,6 +5,8 @@ credentials.json
 *.key
 *.pem
 .cargo-remote.toml
+# Only the credential-free v2 workspace configuration is versioned.
+!/.cargo-remote.toml
 # Exceptions — redacted templates are part of the repo:
 !mainrag.env.example
 !.cargo-remote.toml.example

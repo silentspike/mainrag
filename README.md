@@ -231,11 +231,17 @@ Full diagram and data-flow: [`docs/architecture.md`](docs/architecture.md).
 
 ## Quickstart
 
-> Requires: Docker + nvidia-container-toolkit, PostgreSQL 18, Rust 1.75+.
+Rust builds, tests, Clippy and formatting use Cargo Remote v2 from the workspace
+root. The versioned configuration selects `desktop-linux` because MainRAG links
+Fontconfig, and pins Rust 1.98.1. Connection credentials stay in global client
+configuration. `-c` retrieves project artifacts only; use `cargo remote --status`
+to inspect capacity before retrying an exit 75 (there is no build queue).
+
+> Requires: Docker + nvidia-container-toolkit, PostgreSQL 18, Rust 1.98.1 (pinned), Cargo Remote v2.
 
 ```bash
-# 1. Build workspace
-cargo build --release --workspace
+# 1. Build workspace on the remote service
+cargo remote --resources=large -c -- build --release --workspace
 
 # 2. Start embedder + reranker + Qdrant
 docker compose up -d
