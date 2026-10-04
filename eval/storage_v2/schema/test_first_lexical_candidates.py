@@ -6,6 +6,7 @@ from eval.storage_v2.schema import test_bound_query_and_presence_work as previou
 
 MIGRATION = previous.previous.ROOT / 'migrations/137_storage_v2_first_lexical_candidates.sql'
 INDEXED = MIGRATION.parent / '139_storage_v2_index_ordinary_first_terms.sql'
+SCOPED = MIGRATION.parent / '140_storage_v2_scoped_first_projection_reader.sql'
 FULL = 'storage_v2_authorized_lexical_candidates(bigint[],bigint[],text)'
 FIRST = 'storage_v2_authorized_lexical_first_candidates(bigint[],bigint[],text)'
 RANKS = ('storage_v2_source_segment_rank_candidates(bigint[],text)',
@@ -134,6 +135,19 @@ class FirstLexicalCandidateTests(unittest.TestCase):
             'DISABLE TRIGGER storage_v2_flat_lexical_identity;' + indexed_body + 'ROLLBACK;',
             'ordinary first-term vector immutability differs')
         self.file(INDEXED)
+        scoped_body = SCOPED.read_text().replace('BEGIN;', '', 1).rsplit('COMMIT;', 1)[0]
+        for change, expected in (
+            ('ALTER ROLE mainrag_v2_lexical_rank_owner LOGIN;', 'isolated reader role differs'),
+            ('GRANT mainrag_v2_lexical_rank_owner TO storage_v2_shadow_worker;', 'isolated reader role differs'),
+            ('GRANT SELECT ON storage_v2_ordinary_first_term TO mainrag;', 'projection authority differs'),
+            ('GRANT UPDATE ON storage_v2_ordinary_first_coverage TO mainrag_v2_lexical_rank_owner;', 'projection authority differs'),
+            ('ALTER TABLE storage_v2_ordinary_first_coverage NO FORCE ROW LEVEL SECURITY;', 'projection authority differs'),
+            (f'GRANT EXECUTE ON FUNCTION {FIRST} TO mainrag;', 'bounded reader authority differs'),
+        ):
+            self.assert_sql_fails('BEGIN;' + change + scoped_body + 'ROLLBACK;', expected)
+        self.file(SCOPED)
+        self.assert_sql_fails('SET SESSION AUTHORIZATION mainrag; SET ROLE mainrag_v2_lexical_rank_owner',
+                              'permission denied to set role')
         self.assertEqual(before, envelopes())
         self.assert_sql_fails(self.actor(self.schema.WRITER_ID,
             'SELECT * FROM storage_v2_materialize_ordinary_first_terms(6,0,128)'),
