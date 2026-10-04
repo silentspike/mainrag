@@ -1506,6 +1506,15 @@ Live latency and complete candidate-set acceptance remain separate gates.
 
 ## Batched reader metadata
 
+Migration 144 bounds compact dictionary work in the shared posting reader.
+It disables that function's Memoize plans, which otherwise hash compressed
+term arrays without reuse, and uses the match position directly for frequency
+lookup. Installation requires the original function, EXECUTE authority, and
+validated non-null one-dimensional arrays with matching lengths and lower
+bounds of one. Every exact match position remains visible, including repeated
+stored terms; fingerprints still only select candidates. Stored postings,
+source scope, complete corpus statistics and scoring stay unchanged.
+
 Migration 143 gives large unfiltered named and active searches a set-based
 metadata join. Small scopes and requests with path, role or time filters keep
 their indexed lookup path. The planning choice uses the authorized generation
