@@ -1616,3 +1616,17 @@ projections, and ordinary first-match candidates. Exact scope, duplicate term
 frequencies, authorization, complete corpus statistics and scoring remain
 unchanged. Installation guards the previous definitions and authority; frozen
 snapshot comparisons retain full envelopes across representative source classes.
+
+
+### Sparse array planning bounds
+
+Migration 149 keeps sparse membership operands behind scalar initplans.
+The complete requested IDs are evaluated at execution instead of expanding
+large constant arrays during selectivity estimation for each reader statement.
+Dense semijoins and their bounded requested-set scans remain unchanged.
+
+This covers four predicates in ordinary and compact postings, copied ranks
+and ordinary first-match candidates. Complete envelopes and independent
+multisets retain null, missing and duplicate ID semantics. Actual fixture plans
+check deferred sparse operands and dense scans; installation fences exact prior
+definitions and execution authority. No global planner settings are changed.
