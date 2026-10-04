@@ -7,6 +7,7 @@ from eval.storage_v2.schema import test_bound_query_and_presence_work as previou
 MIGRATION = previous.previous.ROOT / 'migrations/137_storage_v2_first_lexical_candidates.sql'
 INDEXED = MIGRATION.parent / '139_storage_v2_index_ordinary_first_terms.sql'
 SCOPED = MIGRATION.parent / '140_storage_v2_scoped_first_projection_reader.sql'
+PRUNED = MIGRATION.parent / '141_storage_v2_prune_impossible_conjunction_candidates.sql'
 FULL = 'storage_v2_authorized_lexical_candidates(bigint[],bigint[],text)'
 FIRST = 'storage_v2_authorized_lexical_first_candidates(bigint[],bigint[],text)'
 RANKS = ('storage_v2_source_segment_rank_candidates(bigint[],text)',
@@ -104,6 +105,9 @@ class FirstLexicalCandidateTests(unittest.TestCase):
         term = lambda value: {'type': 'term', 'value': value}
         asts = [term('alpha'),term('common'),term('missing'),term('日本語'),
                 {'type':'and','children':[term('alpha'),term('beta')]},
+                {'type':'and','children':[term('ALPHA'),term('beta'),term('alpha')]},
+                {'type':'and','children':[term('alpha'),term('missing')]},
+                {'type':'and','children':[term('common'),term('beta'),term('gamma')]},
                 {'type':'or','children':[term('alpha'),term('gamma')]},
                 {'type':'and','children':[term('common'),{'type':'not','children':[term('beta')]}]},
                 {'type':'phrase','value':'alpha beta'}, {'type':'exact','value':'key_identifier'}]
@@ -120,6 +124,11 @@ class FirstLexicalCandidateTests(unittest.TestCase):
             return [json.loads(line) for user in (self.schema.ADMIN_ID,self.schema.WRITER_ID)
                     for line in self.sql(self.actor(user,'\n'.join(statements))).splitlines()]
 
+        # Use the complete production reader baseline before comparing the
+        # later reductions; native hit resolution and identifier factoring
+        # also change the canonical reader definition.
+        for number in (118, 134, 138):
+            self.file(next(MIGRATION.parent.glob(f'{number}_*.sql')))
         before = envelopes()
         self.file(MIGRATION)
         self.assertEqual(before, envelopes())
@@ -148,6 +157,18 @@ class FirstLexicalCandidateTests(unittest.TestCase):
         self.file(SCOPED)
         self.assert_sql_fails('SET SESSION AUTHORIZATION mainrag; SET ROLE mainrag_v2_lexical_rank_owner',
                               'permission denied to set role')
+        self.assertEqual(before, envelopes())
+        pruned_body = PRUNED.read_text().replace('BEGIN;', '', 1).rsplit('COMMIT;', 1)[0]
+        exact = 'storage_v2_search_exact(bigint,text,jsonb,jsonb,bigint)'
+        active = 'storage_v2_search_active_unchecked(text,jsonb,jsonb,bigint,bigint,boolean)'
+        definition = self.sql(f"SELECT pg_get_functiondef('{exact}'::REGPROCEDURE)")
+        self.assert_sql_fails('BEGIN;' + definition.replace('WITH RECURSIVE',
+            '/* fixture drift */ WITH RECURSIVE', 1) + ';' + pruned_body + 'ROLLBACK;',
+            'conjunction pruning reader definition differs')
+        self.assert_sql_fails('BEGIN; GRANT EXECUTE ON FUNCTION ' + active
+            + ' TO storage_v2_shadow_worker;' + pruned_body + 'ROLLBACK;',
+            'conjunction pruning reader authority differs')
+        self.file(PRUNED)
         self.assertEqual(before, envelopes())
         self.assert_sql_fails(self.actor(self.schema.WRITER_ID,
             'SELECT * FROM storage_v2_materialize_ordinary_first_terms(6,0,128)'),
