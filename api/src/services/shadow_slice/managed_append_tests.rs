@@ -554,7 +554,7 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         retained.commit().await?;
         let native_root = directory.0.join("native-source");
         std::fs::create_dir(&native_root)?;
-        let native_text = "native Über 東京 lexical content\n".repeat(400);
+        let native_text = "native Über 東京 lexical content\n".repeat(10_000);
         std::fs::write(native_root.join("native.txt"), &native_text)?;
         let native_path = native_root.to_str().context("fixture source path is not UTF-8")?;
         client.execute("INSERT INTO sources(id,name,type,path) VALUES(166,'native-retired','fs',$1)",
@@ -578,6 +578,9 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             &[&native.generation_id],
         ).await?.get(0);
         ensure!(lexical_input=="native", "native producer identity is missing");
+        let fallback_seeds = candidate_query_seeds(&transaction,166,native.generation_id,false).await?;
+        ensure!(fallback_seeds==native_verified.query_seeds,
+            "candidate without bootstrap rows must use the same source-backed native seeds");
         let seed = native_verified.query_seeds.iter().find(|seed| seed.expects_match)
             .context("native successor must retain a positive source-backed query seed")?;
         let search: serde_json::Value = transaction.query_one(
