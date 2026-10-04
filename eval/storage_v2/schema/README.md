@@ -8,7 +8,9 @@ mutation rejection, cross-source rejection, and RLS isolation.
 
 Migrations 150–152 introduce lossless representations for newly materialized
 documents with at least 262,144 UTF-8 bytes. Posting blocks retain byte locators,
-frequencies and candidate fingerprints; lexical blocks retain validated byte
+frequencies, candidate fingerprints and a validated cache of terms up to 128
+bytes. Short queries use that cache; long queries prune by byte length before
+exact reconstruction. Lexical blocks retain validated byte
 and character locators, contexts, types, hashes and fingerprints. Canonical text
 reconstructs exact terms and weighted vectors. Large document vectors use a
 fingerprint index followed by exact full-text rechecks. Retained document values,
