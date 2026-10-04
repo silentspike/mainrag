@@ -241,7 +241,6 @@ class FirstLexicalCandidateTests(unittest.TestCase):
                                   'compact array reader bounds constraints differ')
         self.file(ARRAY_WORK)
         self.assertEqual(before, envelopes())
-        verify_generation_metadata(self, METADATA, envelopes, before)
         # Exercise the complete alternate SQL path with real authorized
         # fixtures. Lower only this planning threshold in the disposable DB;
         # candidate counts, roots and source metadata remain unchanged.
@@ -255,6 +254,9 @@ class FirstLexicalCandidateTests(unittest.TestCase):
         finally:
             for definition in planned.values():
                 self.sql(definition + ';')
+        # Exercise both original metadata plans before publishing the cache;
+        # a valid publication otherwise bypasses both branches entirely.
+        verify_generation_metadata(self, METADATA, envelopes, before)
         self.assert_sql_fails('SET SESSION AUTHORIZATION mainrag; SET ROLE mainrag_v2_presence_owner',
                               'permission denied to set role')
         self.assertEqual(self.sql("SELECT NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls "
