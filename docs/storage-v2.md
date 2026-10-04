@@ -1464,3 +1464,21 @@ retain their projections; unreachable occurrences lose both tables' rows before
 their parent is collected. Projection installation/materialization does not
 change vector witnesses, search-document identities or generation roots, and
 does not replace production latency or complete candidate-set acceptance.
+
+## Early conjunction candidate rejection
+
+Migration 141 moves the existing lexical-presence exclusion ahead of document
+term aggregation for the bounded plain-AND query shape. It probes only visible
+occurrences with query postings and no matching lexical rank. An occurrence
+with authoritative lexical data that does not satisfy the conjunction cannot
+become a document fallback result. An occurrence without lexical data retains
+that fallback, and copied/native lexical matches keep their established ranks.
+
+The complete corpus and document frequencies remain available for scoring;
+only candidates already excluded by the original Boolean gate lose document
+aggregation work. Other query shapes retain their original evaluation.
+Installation binds both readers and the conjunction/presence helpers to exact
+definitions, checks reader authority, and changes no source, generation, body,
+posting, active pointer or table policy. Whole search envelopes and authorization
+are compared before and after installation; production acceptance remains a
+separate gate.
