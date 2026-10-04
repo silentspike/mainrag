@@ -1555,3 +1555,32 @@ The regression fixture compares full named and active search envelopes for
 both metadata plans. A lower planning threshold is used only in its disposable
 database to exercise the alternate plan without changing fixture counts or
 roots. Functional equality does not establish production latency acceptance.
+
+### Adaptive sparse reader scopes
+
+Migration 146 keeps complete generation scope while avoiding repeated expansion
+of large requested ID arrays when an intermediate match set contains at most 32
+rows. Sparse matches use exact array membership; dense matches retain set joins.
+Legacy candidates still prove source, artifact, view and canonical document
+identity. Native candidates remain authorized and exclude copied identities
+after the same first-match reduction.
+
+Posting reads use minimum and maximum requested document IDs only as necessary
+index bounds. Exact membership remains required, so holes, duplicate IDs and
+unrelated documents inside an interval cannot broaden results. One indexed
+compact interval absence check replaces individual probes for every document;
+fingerprints still require exact term decoding and preserve every stored
+duplicate term frequency.
+
+The metadata completeness helper retains all identity, revision and exact row
+count checks. Only this helper disables parallel workers to avoid startup costs
+on its short index-only counts. No authorization, source watermark, corpus
+statistics, ranking formula, publication rule or acceptance threshold changes.
+Installation rejects definition and EXECUTE authority drift for all five
+affected functions and changes no data or role policies.
+
+The regression compares complete named and active envelopes with the prior
+reader, independently enumerates native first matches and ranks, and checks
+both sparse and dense posting plans with missing, duplicate and null scope IDs.
+Functional equivalence and SQL timings remain separate from normal API latency
+acceptance for the installed package.
