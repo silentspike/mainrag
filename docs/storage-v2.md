@@ -1440,8 +1440,17 @@ single-lexeme query reads this index for covered occurrences and the original
 vectors for uncovered occurrences. Phrases, Boolean queries, negation and other
 query forms keep the complete vector path. Compact-vector handling is unchanged.
 The read helper resolves source authorization before inspecting metadata; both
-projection tables also enforce source RLS. Private maintenance tables are not
+projection tables have forced row security. Private maintenance tables are not
 directly readable or writable by the application role.
+
+Migration 140 applies the established isolated lexical reader policy to both
+first-position projection tables. The definer role cannot log in and has no
+members. Application users read this metadata through existing functions that
+authorize the complete requested source set before querying. Application table
+grants, forced row security, source policies for other roles, and all function
+definitions remain unchanged. Installation rejects changed role membership,
+reader authority, table grants, or row-security configuration. This avoids
+repeating the same authorization lookup for every projected lexeme.
 
 The administrator-only materializer processes at most 128 occurrences per call
 and returns scanned/materialized counts, inserted terms and a committed cursor.
