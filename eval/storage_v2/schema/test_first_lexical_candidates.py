@@ -11,6 +11,7 @@ SCOPED = MIGRATION.parent / '140_storage_v2_scoped_first_projection_reader.sql'
 PRUNED = MIGRATION.parent / '141_storage_v2_prune_impossible_conjunction_candidates.sql'
 PRESENCE = MIGRATION.parent / '142_storage_v2_isolated_presence_reader.sql'
 BATCHED = MIGRATION.parent / '143_storage_v2_batch_reader_metadata_scope.sql'
+ARRAY_WORK = MIGRATION.parent / '144_storage_v2_bound_compact_array_work.sql'
 FULL = 'storage_v2_authorized_lexical_candidates(bigint[],bigint[],text)'
 FIRST = 'storage_v2_authorized_lexical_first_candidates(bigint[],bigint[],text)'
 RANKS = ('storage_v2_source_segment_rank_candidates(bigint[],text)',
@@ -217,6 +218,27 @@ class FirstLexicalCandidateTests(unittest.TestCase):
                 'batched metadata reader authority differs')
         self.file(BATCHED)
         self.assertEqual(before, envelopes())
+        array_body = ARRAY_WORK.read_text().replace('BEGIN;', '', 1).rsplit('COMMIT;', 1)[0]
+        posting_signature = 'storage_v2_scoped_query_posting(bigint[],text[])'
+        posting_before = self.sql(f"SELECT pg_get_functiondef('{posting_signature}'::REGPROCEDURE)")
+        self.assert_sql_fails('BEGIN;' + posting_before.replace('BEGIN',
+            '/* fixture drift */ BEGIN', 1) + ';' + array_body + 'ROLLBACK;',
+            'compact array reader definition differs')
+        self.assert_sql_fails('BEGIN; GRANT EXECUTE ON FUNCTION ' + posting_signature
+            + ' TO PUBLIC;' + array_body + 'ROLLBACK;', 'compact array reader authority differs')
+        for change in (
+            'ALTER TABLE storage_v2_compact_posting_block ALTER COLUMN terms DROP NOT NULL;',
+            'ALTER TABLE storage_v2_compact_posting_block DROP CONSTRAINT storage_v2_compact_posting_block_check;',
+            'ALTER TABLE storage_v2_compact_posting_block DROP CONSTRAINT storage_v2_compact_posting_block_terms_check;',
+            'ALTER TABLE storage_v2_compact_posting_block DROP CONSTRAINT storage_v2_compact_posting_block_terms_check; '
+            'ALTER TABLE storage_v2_compact_posting_block ADD CONSTRAINT storage_v2_compact_posting_block_terms_check '
+            "CHECK(array_ndims(terms)=1 AND array_lower(terms,1)=1 AND cardinality(terms) BETWEEN 1 AND 256 "
+            "AND array_position(terms,NULL) IS NULL AND NOT ''=ANY(terms)) NOT VALID;",
+        ):
+            self.assert_sql_fails('BEGIN;' + change + array_body + 'ROLLBACK;',
+                                  'compact array reader bounds constraints differ')
+        self.file(ARRAY_WORK)
+        self.assertEqual(before, envelopes())
         # Exercise the complete alternate SQL path with real authorized
         # fixtures. Lower only this planning threshold in the disposable DB;
         # candidate counts, roots and source metadata remain unchanged.
@@ -330,4 +352,37 @@ class FirstLexicalCandidateTests(unittest.TestCase):
         full, first = map(int, fanout.split(':'))
         self.assertGreater(full, first*10)
         self.assertLessEqual(first, int(self.sql('SELECT count(*)*2 FROM occurrence WHERE source_id IN (6,9)')))
+        # Repeated stored dictionary terms are legal under the table contract.
+        # Keep array_positions semantics, including each separate frequency.
+        document = self.sql('SELECT min(id) FROM storage_v2_search_document')
+        self.sql('INSERT INTO storage_v2_compact_posting_block '
+                 '(document_id,block_order,terms,term_frequencies) VALUES '
+                 f"({document},1000000000,ARRAY['alpha','alpha','日本語'],ARRAY[2,7,11]::BIGINT[])")
+        posting = self.sql(f"SELECT pg_get_functiondef('{posting_signature}'::REGPROCEDURE)")
+        self.assertEqual(posting.count('<=1024'), 1)
+        document_scope = 'ARRAY(SELECT id FROM storage_v2_search_document)'
+        posting_checks = []
+        for requested in (document_scope, document_scope+'||'+document_scope+'||ARRAY[NULL]::BIGINT[]',
+                          'ARRAY[]::BIGINT[]', 'NULL::BIGINT[]'):
+            for terms in ("ARRAY['alpha','日本語']::TEXT[]", "ARRAY['alpha','alpha',NULL]::TEXT[]",
+                          "ARRAY['missing']::TEXT[]", 'ARRAY[]::TEXT[]', 'NULL::TEXT[]'):
+                posting_checks.append(f"""WITH expected AS MATERIALIZED (
+                    SELECT requested.id AS document_id,posting.term,posting.term_frequency
+                      FROM (SELECT DISTINCT id FROM unnest({requested}) input(id)) requested
+                      CROSS JOIN (SELECT DISTINCT term FROM unnest({terms}) input(term)
+                                   WHERE term IS NOT NULL) wanted
+                      CROSS JOIN LATERAL storage_v2_document_posting(requested.id,wanted.term) posting
+                ), actual AS MATERIALIZED (
+                    SELECT * FROM storage_v2_scoped_query_posting({requested},{terms})
+                ) SELECT NOT EXISTS(SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                     AND NOT EXISTS(SELECT * FROM actual EXCEPT ALL SELECT * FROM expected);""")
+        try:
+            # Exercise the large planning branch with real disposable rows;
+            # document metadata and source item counts are never fabricated.
+            self.sql(posting.replace('<=1024', '<=0') + ';')
+            for user in (self.schema.ADMIN_ID, self.schema.WRITER_ID, self.schema.OTHER_ID):
+                self.assertEqual(self.sql(self.actor(user, '\n'.join(posting_checks))).splitlines(),
+                                 ['t']*len(posting_checks))
+        finally:
+            self.sql(posting + ';')
         print(f'{len(before)} full envelopes; {comparisons} independent first-match and {comparisons*2} rank comparisons; fanout {full}->{first}', flush=True)
