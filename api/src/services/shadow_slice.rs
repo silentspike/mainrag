@@ -3087,8 +3087,11 @@ where
                     JOIN storage_v2_search_document document ON document.id=binding.document_id \
                    WHERE generation.id=$1 AND generation.source_id=$2 \
                      AND occurrence_row.source_path=$3 \
-                     AND (document.fts_simple @@ plainto_tsquery('simple',$4) \
-                          OR (document.fts_simple IS NULL \
+                     AND (storage_v2_logical_document_fts(document.fts_simple, \
+                              document.fts_simple_derived, document.search_text) \
+                              @@ plainto_tsquery('simple',$4) \
+                          OR (storage_v2_logical_document_fts(document.fts_simple, \
+                                  document.fts_simple_derived, document.search_text) IS NULL \
                               AND storage_v2_phrase_matches(NULL, document.search_text, $4))) \
                 )",
                 &[&generation_id, &source_id, &path, &query],

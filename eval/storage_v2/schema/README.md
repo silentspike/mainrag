@@ -6,6 +6,20 @@ application, source-local generation allocation, immutable artifacts,
 half-open membership intervals, atomic activation and requalification, direct
 mutation rejection, cross-source rejection, and RLS isolation.
 
+Migrations 150–152 introduce lossless representations for newly materialized
+documents with at least 262,144 UTF-8 bytes. Posting blocks retain byte locators,
+frequencies and candidate fingerprints; lexical blocks retain validated byte
+and character locators, contexts, types, hashes and fingerprints. Canonical text
+reconstructs exact terms and weighted vectors. Large document vectors use a
+fingerprint index followed by exact full-text rechecks. Retained document values,
+generations, materialization hashes and existing caches remain intact.
+
+Run `python3 -m unittest eval.storage_v2.schema.test_derived_retrieval_codec` for
+complete constructor comparisons, large Unicode and token fixtures, exact
+posting readers, hash-collision rechecks, source authorization, immutable caches,
+segment replay and actual named-generation results. These SQL fixtures do not
+establish whole-source capacity, production latency or cutover acceptance.
+
 Migration 095 completes qualification of retained generations. A comparison
 identity may have several immutable artifact versions; identical retries return
 the original row, while changed comparison results append a separate UUID.
