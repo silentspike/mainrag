@@ -1584,3 +1584,19 @@ reader, independently enumerates native first matches and ranks, and checks
 both sparse and dense posting plans with missing, duplicate and null scope IDs.
 Functional equivalence and SQL timings remain separate from normal API latency
 acceptance for the installed package.
+
+
+### Bounded compact posting decoding
+
+Migration 147 decodes each authorized compact posting block once into local
+arrays. It avoids repeating TOAST decompression for each requested term and
+retains only the current block in decoder memory. Fingerprint and document-scope
+filters still precede dictionary reads. Exact array positions preserve repeated
+terms, unsorted dictionaries and each stored frequency; no sort or uniqueness
+assumption is added. Sparse scopes retain the document reader. Full corpus
+counts, authorization, scoring, metadata readiness and publication are unchanged.
+
+The installation guard binds the prior reader definition, invoker authority and
+validated array bounds. Regression coverage compares complete search envelopes
+and posting multisets against independent document enumeration for both dense
+and sparse plans, including large TOAST dictionaries and duplicate terms.
