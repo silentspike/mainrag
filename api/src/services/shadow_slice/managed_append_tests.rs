@@ -96,6 +96,7 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
     config.dbname(&database);
     let directory = Directory(std::env::temp_dir().join(format!("mainrag-{database}")));
     std::fs::create_dir_all(&directory.0)?;
+    let mut owned_reader_roles = Vec::new();
     let result: Result<()> = async {
         let root = directory.0.join("source");
         let packs = directory.0.join("packs");
@@ -165,7 +166,18 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         let migrations = std::fs::read_dir(project.join("migrations"))?
             .map(|entry| entry.map(|value| value.path()))
             .collect::<std::io::Result<Vec<_>>>()?;
-        for number in 66..=134 {
+        for number in 66..=152 {
+            let reader_role = match number {
+                142 => Some("mainrag_v2_presence_owner"),
+                145 => Some("mainrag_v2_metadata_reader"),
+                _ => None,
+            };
+            if let Some(role) = reader_role {
+                let exists: bool = client.query_one(
+                    "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=$1)", &[&role],
+                ).await?.get(0);
+                ensure!(!exists, "isolated fixture reader role already exists: {role}");
+            }
             let prefix = format!("{number:03}_");
             let matching = migrations
                 .iter()
@@ -189,9 +201,12 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
                 .output()?;
             ensure!(
                 installed.status.success(),
-                "current fixture migration failed: {}",
+                "current fixture migration {number} failed: {}",
                 String::from_utf8_lossy(&installed.stderr)
             );
+            if let Some(role) = reader_role {
+                owned_reader_roles.push(role);
+            }
         }
         client.execute(
             "INSERT INTO sources(id,name,type,path,is_test) VALUES (63,'managed-fixture','managed_append',$1,TRUE)",
@@ -592,5 +607,12 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         .batch_execute(&format!("DROP DATABASE {database} WITH (FORCE)"))
         .await;
     cleanup?;
+    // These cluster roles were created by this fixture's committed migrations.
+    // Drop the disposable database first so its grants and owned objects vanish.
+    for role in owned_reader_roles {
+        cleanup_admin
+            .batch_execute(&format!("DROP ROLE {role}"))
+            .await?;
+    }
     result
 }
