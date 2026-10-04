@@ -3001,6 +3001,22 @@ async fn candidate_query_seeds<C>(
 where
     C: GenericClient + Sync,
 {
+    let legacy_inputs = if native_lexical {
+        Vec::new()
+    } else {
+        client
+            .query(
+                "SELECT file.path, chunk.content_text \
+               FROM chunks chunk JOIN files file ON file.id=chunk.file_id \
+              WHERE file.source_id=$1 AND chunk.content_text IS NOT NULL \
+              ORDER BY chunk.id LIMIT 64",
+                &[&source_id],
+            )
+            .await?
+    };
+    // Release candidates can generate native segments when no bootstrap rows
+    // exist, even while their historical witness uses the copied-input mode.
+    let native_lexical = native_lexical || legacy_inputs.is_empty();
     let inputs = if native_lexical {
         client.query(
             "SELECT occurrence_row.source_path AS path, left(document.search_text,32768) AS content_text \
@@ -3018,15 +3034,7 @@ where
             &[&generation_id,&source_id],
         ).await?
     } else {
-        client
-            .query(
-                "SELECT file.path, chunk.content_text \
-               FROM chunks chunk JOIN files file ON file.id=chunk.file_id \
-              WHERE file.source_id=$1 AND chunk.content_text IS NOT NULL \
-              ORDER BY chunk.id LIMIT 64",
-                &[&source_id],
-            )
-            .await?
+        legacy_inputs
     };
     let mut candidates = BTreeSet::new();
     for row in inputs {
