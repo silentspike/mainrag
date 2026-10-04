@@ -1503,3 +1503,55 @@ checks compare complete named and active search envelopes and direct presence
 results across authorization scopes, absent IDs, empty inputs and null inputs.
 No source data, generation, active pointer or stored representation changes.
 Live latency and complete candidate-set acceptance remain separate gates.
+
+## Batched reader metadata
+
+Migration 145 reuses complete generation bindings and per-view token totals.
+The derived rows contain metadata only and do not add occurrence, document or
+pack retention roots. An isolated read-only role checks source authorization,
+generation identity, completeness and source revision before reuse. Each helper
+explicitly enables row security, including when its caller disables it.
+
+Occurrence, artifact, membership, binding and document mutations invalidate affected
+sources through statement transition tables. Shared views invalidate every
+affected source; truncation invalidates all publications. Metadata publication
+locks the generation before the source revision and commits the complete header
+and rows together. A concurrent mutation either precedes publication or changes
+its revision at commit. Missing, partial or stale metadata uses the complete
+original reader; filtered requests retain their original metadata path.
+
+Normal generation verification and requalification materialize metadata in the
+same transaction. For an existing compatible generation, an authorized source
+writer can call `storage_v2_materialize_reader_metadata(generation_id)` without
+rebuilding its bodies or changing its producer identity. Repeated calls return
+the existing counts with `reused=true`. Named and active search preserve full
+corpus statistics and scoring, and require separate live latency acceptance.
+The publication also records the complete missing-document check. Valid cached
+requests retain its original rejection without repeating the artifact and
+membership scan; filtered or stale requests perform the original check.
+
+Migration 144 bounds compact dictionary work in the shared posting reader.
+It disables that function's Memoize plans, which otherwise hash compressed
+term arrays without reuse, and uses the match position directly for frequency
+lookup. Installation requires the original function, EXECUTE authority, and
+validated non-null one-dimensional arrays with matching lengths and lower
+bounds of one. Every exact match position remains visible, including repeated
+stored terms; fingerprints still only select candidates. Stored postings,
+source scope, complete corpus statistics and scoring stay unchanged.
+
+Migration 143 gives large unfiltered named and active searches a set-based
+metadata join. Small scopes and requests with path, role or time filters keep
+their indexed lookup path. The planning choice uses the authorized generation
+item counts; both paths retain the same occurrence membership, bindings, token
+counts, corpus frequencies and complete scoring inputs.
+
+The legacy segment fallback resolves one occurrence, its artifact, canonical
+view binding and document through bounded correlated lookups. Authorization,
+generated-projection rejection, source/artifact identity, text hash and exact
+vector predicates remain unchanged. Installation rejects reader definition and
+EXECUTE authority drift and changes no representations or role policies.
+
+The regression fixture compares full named and active search envelopes for
+both metadata plans. A lower planning threshold is used only in its disposable
+database to exercise the alternate plan without changing fixture counts or
+roots. Functional equality does not establish production latency acceptance.

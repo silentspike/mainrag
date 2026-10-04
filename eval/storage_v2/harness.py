@@ -250,10 +250,18 @@ class PsqlSession:
         if self.process is None:
             return
         if self.process.stdin is not None:
-            self.process.stdin.write("\\quit\n")
-            self.process.stdin.flush()
-            self.process.stdin.close()
+            try:
+                self.process.stdin.write("\\quit\n")
+                self.process.stdin.flush()
+            except BrokenPipeError:
+                pass
+            try:
+                self.process.stdin.close()
+            except BrokenPipeError:
+                pass
         self.process.wait(timeout=5)
+        if self.process.stdout is not None:
+            self.process.stdout.close()
         self.process = None
 
     def sql(self, statement: str) -> tuple[str, float]:
@@ -280,7 +288,7 @@ class PsqlSession:
         while True:
             line = self.process.stdout.readline()
             if line == "":
-                raise RuntimeError("psql session ended before completing a query")
+                raise RuntimeError("psql session ended before completing a query:\n" + "\n".join(lines))
             value = line.rstrip("\n")
             if value == end_marker:
                 elapsed_ms = (time.monotonic_ns() - started_ns) / 1_000_000
