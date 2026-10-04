@@ -16,6 +16,7 @@ ARRAY_WORK = MIGRATION.parent / '144_storage_v2_bound_compact_array_work.sql'
 METADATA = MIGRATION.parent / '145_storage_v2_reuse_generation_reader_metadata.sql'
 ADAPTIVE = MIGRATION.parent / '146_storage_v2_adaptive_sparse_reader_scopes.sql'
 DECODED = MIGRATION.parent / '147_storage_v2_decode_compact_blocks_once.sql'
+DENSE = MIGRATION.parent / '148_storage_v2_decorrelate_dense_reader_scopes.sql'
 FULL = 'storage_v2_authorized_lexical_candidates(bigint[],bigint[],text)'
 FIRST = 'storage_v2_authorized_lexical_first_candidates(bigint[],bigint[],text)'
 RANKS = ('storage_v2_source_segment_rank_candidates(bigint[],text)',
@@ -460,4 +461,68 @@ class FirstLexicalCandidateTests(unittest.TestCase):
                                      ['t']*len(decoded_checks))
             finally:
                 self.sql(decoded_posting+';')
+        dense_body = DENSE.read_text().replace('BEGIN;', '', 1).rsplit('COMMIT;', 1)[0]
+        changed_signatures = (posting_signature,RANKS[1],FIRST)
+        for signature in changed_signatures:
+            current = self.sql(f"SELECT pg_get_functiondef('{signature}'::REGPROCEDURE)")
+            self.assert_sql_fails('BEGIN;'+current.replace(
+                'AS $function$', 'AS $function$\n/* fixture drift */', 1)+';'+dense_body+'ROLLBACK;',
+                'dense scope reader definition or authority differs')
+            self.assert_sql_fails('BEGIN;'+f'GRANT EXECUTE ON FUNCTION {signature} TO PUBLIC;'
+                +dense_body+'ROLLBACK;', 'dense scope reader definition or authority differs')
+        self.assert_sql_fails('BEGIN;'+dense_body.replace(
+            '$old0$SELECT candidate.*', '$old0$SELECT impossible_candidate.*', 1)+'ROLLBACK;',
+            'dense scope reader replacement boundary differs')
+        dense_before = envelopes()
+        self.file(DENSE)
+        self.assertEqual(dense_before,envelopes())
+        for user in (self.schema.ADMIN_ID,self.schema.WRITER_ID,self.schema.OTHER_ID):
+            values=self.sql(f"SET ROLE mainrag_v2_frontier_owner; SET app.user_id='{user}'; "+
+                            '\n'.join(candidate_checks)).splitlines()
+            self.assertEqual(values,['t']*len(candidate_checks))
+            values=self.sql(self.actor(user,'\n'.join(rank_checks))).splitlines()
+            self.assertEqual(values,['t']*len(rank_checks))
+        # Both branch choices use the same independent multiset oracle. The
+        # scopes include missing/null/duplicate IDs and real TOAST dictionaries.
+        dense_posting=self.sql(f"SELECT pg_get_functiondef('{posting_signature}'::REGPROCEDURE)")
+        for threshold in ('OFFSET 0','OFFSET 1000000000'):
+            try:
+                self.sql(dense_posting.replace('OFFSET 32',threshold)+';')
+                for user in (self.schema.ADMIN_ID,self.schema.WRITER_ID,self.schema.OTHER_ID):
+                    self.assertEqual(self.sql(self.actor(user,'\n'.join(decoded_checks))).splitlines(),
+                                     ['t']*len(decoded_checks))
+            finally:
+                self.sql(dense_posting+';')
+        # A dense scope must not scan the complete requested CTE once per
+        # matching occurrence. Missing IDs make the fixture scope genuinely
+        # large without manufacturing documents or source metadata.
+        from eval.storage_v2.schema.test_cached_legacy_rank_snapshots import plans,nodes
+        large_scope=scope+'||ARRAY(SELECT -n::BIGINT FROM generate_series(1,2048) n)'
+        plan_calls=[
+            (posting_signature,self.actor(self.schema.ADMIN_ID,
+                f"SELECT * FROM storage_v2_scoped_query_posting({large_document_scope},ARRAY['alpha']::TEXT[])")),
+            (FIRST,f"SET ROLE mainrag_v2_frontier_owner; SET app.user_id='{self.schema.ADMIN_ID}'; "+
+                f"SELECT * FROM storage_v2_authorized_lexical_first_candidates({large_scope},ARRAY[6,9]::BIGINT[],'alpha beta')"),
+            (RANKS[1],self.actor(self.schema.ADMIN_ID,
+                f"SELECT * FROM storage_v2_source_segment_rank_candidates({large_scope},'alpha beta',ARRAY[6,9]::BIGINT[])")),
+        ]
+        checked_plans=0
+        for signature,call in plan_calls:
+            current=self.sql(f"SELECT pg_get_functiondef('{signature}'::REGPROCEDURE)")
+            try:
+                self.sql(current.replace('OFFSET 32','OFFSET 0')+';')
+                profiled=self.profile(call)
+                relevant=[plan for plan in plans(profiled.stderr)
+                          if 'WHERE NOT EXISTS(SELECT 1 FROM' in plan['Query Text']
+                          and 'OFFSET 0)' in plan['Query Text'] and 'UNION ALL' in plan['Query Text']]
+                self.assertTrue(relevant,signature)
+                for plan in relevant:
+                    scans=[node for node in nodes(plan['Plan'])
+                           if node.get('Node Type')=='CTE Scan' and node.get('CTE Name')=='requested']
+                    self.assertTrue(scans,signature)
+                    self.assertTrue(all(node.get('Actual Loops',0)<=1 for node in scans),scans)
+                    checked_plans+=1
+            finally:
+                self.sql(current+';')
+        self.assertGreaterEqual(checked_plans,3)
         print(f'{len(before)} full envelopes; {comparisons} independent first-match and {comparisons*2} rank comparisons; fanout {full}->{first}', flush=True)
