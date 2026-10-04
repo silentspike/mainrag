@@ -40,11 +40,14 @@ GRANT EXECUTE ON FUNCTION storage_v2_decode_term_locations(TEXT,INTEGER[],INTEGE
 CREATE TABLE storage_v2_byte_posting_block (
     document_id BIGINT NOT NULL REFERENCES storage_v2_search_document(id) ON DELETE RESTRICT,
     block_order BIGINT NOT NULL CHECK(block_order>=0),
+    cached_terms TEXT[] NOT NULL,
     text_byte_starts INTEGER[] NOT NULL,
     text_byte_lengths INTEGER[] NOT NULL,
     term_frequencies BIGINT[] NOT NULL,
     fingerprints INTEGER[] NOT NULL,
     PRIMARY KEY(document_id,block_order),
+    CHECK(array_ndims(cached_terms)=1 AND array_lower(cached_terms,1)=1
+        AND cardinality(cached_terms)=cardinality(text_byte_starts)),
     CHECK(array_ndims(text_byte_starts)=1 AND array_lower(text_byte_starts,1)=1
         AND cardinality(text_byte_starts) BETWEEN 1 AND 256
         AND array_position(text_byte_starts,NULL) IS NULL AND 0<ALL(text_byte_starts)),
@@ -58,6 +61,7 @@ CREATE TABLE storage_v2_byte_posting_block (
         AND cardinality(fingerprints) BETWEEN 1 AND cardinality(text_byte_starts)
         AND array_position(fingerprints,NULL) IS NULL)
 );
+ALTER TABLE storage_v2_byte_posting_block ALTER COLUMN cached_terms SET COMPRESSION lz4;
 ALTER TABLE storage_v2_byte_posting_block OWNER TO mainrag;
 ALTER TABLE storage_v2_byte_posting_block ENABLE ROW LEVEL SECURITY;
 CREATE POLICY storage_v2_byte_posting_admin ON storage_v2_byte_posting_block
@@ -97,6 +101,11 @@ BEGIN
    SELECT array_agg(convert_from(substring(bytes FROM p.start FOR p.length),'UTF8')
                         COLLATE "default" ORDER BY p.ordinal) INTO terms
      FROM unnest(block.text_byte_starts,block.text_byte_lengths) WITH ORDINALITY p(start,length,ordinal);
+   IF block.cached_terms IS DISTINCT FROM
+        ARRAY(SELECT CASE WHEN octet_length(term)<=128 THEN term ELSE NULL END
+                FROM unnest(terms) WITH ORDINALITY t(term,n) ORDER BY n) THEN
+    RAISE EXCEPTION 'bounded posting term cache differs from canonical text';
+   END IF;
    IF ''=ANY(terms) OR storage_v2_posting_fingerprints(terms) IS DISTINCT FROM block.fingerprints THEN
     RAISE EXCEPTION 'byte posting fingerprint differs from complete exact terms';
    END IF;
@@ -124,21 +133,104 @@ ALTER VIEW storage_v2_posting_block_all OWNER TO mainrag;
 REVOKE ALL ON storage_v2_posting_block_all FROM PUBLIC;
 GRANT SELECT ON storage_v2_posting_block_all TO mainrag;
 
-DO $readers$
-DECLARE signature TEXT; definition TEXT;
+-- Common short queries never decode the canonical document. Long terms retain
+-- exact byte rechecks after fingerprint, document and byte-length pruning.
+CREATE FUNCTION storage_v2_byte_posting_matches(
+ p_document_ids BIGINT[],p_terms TEXT[],p_limit BIGINT DEFAULT NULL
+) RETURNS TABLE(document_id BIGINT,term TEXT,term_frequency BIGINT)
+LANGUAGE plpgsql STABLE
+SET search_path=pg_catalog,public,pg_temp SET plan_cache_mode=force_custom_plan SET jit=off AS $$
+DECLARE v_terms TEXT[]; v_fingerprints INTEGER[]; v_min BIGINT; v_max BIGINT;
+ v_block RECORD; v_term TEXT; v_position INTEGER; v_count BIGINT:=0;
+ v_bytes BYTEA; v_bytes_document BIGINT;
 BEGIN
- FOREACH signature IN ARRAY ARRAY[
-  'storage_v2_scoped_term_posting(bigint[],text)',
-  'storage_v2_posting_probe(text,bigint)',
-  'storage_v2_document_posting(bigint,text)',
-  'storage_v2_scoped_query_posting(bigint[],text[])',
-  'storage_v2_document_word_identifiers(bigint)'
- ] LOOP
-  definition:=pg_get_functiondef(signature::REGPROCEDURE);
-  IF strpos(definition,'storage_v2_compact_posting_block')=0 THEN
-   RAISE EXCEPTION 'byte posting reader replacement boundary differs';
+ IF (p_limit IS NOT NULL AND p_limit NOT BETWEEN 1 AND 4097)
+    OR (p_document_ids IS NOT NULL AND cardinality(p_document_ids)=0) THEN RETURN; END IF;
+ SELECT array_agg(DISTINCT value ORDER BY value) INTO v_terms
+   FROM unnest(p_terms) input(value) WHERE value IS NOT NULL;
+ IF v_terms IS NULL THEN RETURN; END IF;
+ v_fingerprints:=storage_v2_posting_fingerprints(v_terms);
+ SELECT min(id),max(id) INTO v_min,v_max FROM unnest(p_document_ids) input(id);
+ IF p_document_ids IS NOT NULL AND v_min IS NULL THEN RETURN; END IF;
+ FOR v_block IN
+  WITH requested AS MATERIALIZED (
+   SELECT DISTINCT id FROM unnest(p_document_ids) input(id)
+  ), matching AS MATERIALIZED (
+   SELECT b.document_id,b.block_order FROM storage_v2_byte_posting_block b
+    WHERE b.fingerprints && v_fingerprints
+      AND (p_document_ids IS NULL OR b.document_id BETWEEN v_min AND v_max)
+  ), scoped AS MATERIALIZED (
+   SELECT candidate.* FROM matching candidate
+    WHERE p_document_ids IS NULL
+       OR (NOT EXISTS(SELECT 1 FROM matching OFFSET 32)
+           AND candidate.document_id=ANY((SELECT p_document_ids OFFSET 0)::BIGINT[]))
+       OR (EXISTS(SELECT 1 FROM matching OFFSET 32)
+           AND EXISTS(SELECT 1 FROM requested WHERE requested.id=candidate.document_id))
+  )
+  SELECT b.* FROM scoped candidate CROSS JOIN LATERAL (
+    SELECT b.document_id,b.cached_terms,b.text_byte_starts,b.text_byte_lengths,b.term_frequencies
+      FROM storage_v2_byte_posting_block b
+     WHERE b.document_id=candidate.document_id AND b.block_order=candidate.block_order OFFSET 0
+  ) b ORDER BY candidate.document_id,candidate.block_order
+ LOOP
+  FOREACH v_term IN ARRAY v_terms LOOP
+   FOREACH v_position IN ARRAY array_positions(v_block.cached_terms,v_term) LOOP
+    document_id:=v_block.document_id;term:=v_term;
+    term_frequency:=v_block.term_frequencies[v_position];RETURN NEXT;
+    v_count:=v_count+1;IF v_count=p_limit THEN RETURN;END IF;
+   END LOOP;
+   IF octet_length(v_term)<=128 THEN CONTINUE; END IF;
+   FOREACH v_position IN ARRAY array_positions(v_block.text_byte_lengths,octet_length(v_term)) LOOP
+    IF v_bytes_document IS DISTINCT FROM v_block.document_id THEN
+     SELECT convert_to(lower(d.search_text),'UTF8') INTO STRICT v_bytes
+       FROM storage_v2_search_document d WHERE d.id=v_block.document_id;
+     v_bytes_document:=v_block.document_id;
+    END IF;
+    IF convert_from(substring(v_bytes FROM v_block.text_byte_starts[v_position]
+                                FOR v_block.text_byte_lengths[v_position]),'UTF8')
+          COLLATE "default"=v_term THEN
+     document_id:=v_block.document_id;term:=v_term;
+     term_frequency:=v_block.term_frequencies[v_position];RETURN NEXT;
+     v_count:=v_count+1;IF v_count=p_limit THEN RETURN;END IF;
+    END IF;
+   END LOOP;
+  END LOOP;
+ END LOOP;
+END $$;
+ALTER FUNCTION storage_v2_byte_posting_matches(BIGINT[],TEXT[],BIGINT) OWNER TO mainrag;
+REVOKE ALL ON FUNCTION storage_v2_byte_posting_matches(BIGINT[],TEXT[],BIGINT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION storage_v2_byte_posting_matches(BIGINT[],TEXT[],BIGINT) TO mainrag;
+
+DO $readers$
+DECLARE patch RECORD; definition TEXT;
+BEGIN
+ FOR patch IN SELECT * FROM (VALUES
+  ('storage_v2_document_posting(bigint,text)',
+   $old$AND item.term=p_term$old$,
+   $new$AND item.term=p_term
+    UNION ALL SELECT posting.term,posting.term_frequency
+     FROM public.storage_v2_byte_posting_matches(ARRAY[p_document_id],ARRAY[p_term],NULL) posting$new$),
+  ('storage_v2_posting_probe(text,bigint)',
+   $old$) complete WHERE p_limit BETWEEN 1 AND 4097 LIMIT p_limit$old$,
+   $new$ UNION ALL SELECT posting.document_id,posting.term,posting.term_frequency
+         FROM public.storage_v2_byte_posting_matches(NULL,ARRAY[p_term],p_limit) posting
+    ) complete WHERE p_limit BETWEEN 1 AND 4097 LIMIT p_limit$new$),
+  ('storage_v2_scoped_term_posting(bigint[],text)',
+   $old$WHERE item.term=p_term;$old$,
+   $new$WHERE item.term=p_term
+        UNION ALL SELECT posting.document_id,posting.term,posting.term_frequency
+         FROM public.storage_v2_byte_posting_matches(p_document_ids,ARRAY[p_term],NULL) posting;$new$),
+  ('storage_v2_scoped_query_posting(bigint[],text[])',
+   $old$WHERE posting.term=ANY(v_terms);$old$,
+   $new$WHERE posting.term=ANY(v_terms);
+    RETURN QUERY SELECT posting.document_id,posting.term,posting.term_frequency
+     FROM public.storage_v2_byte_posting_matches(p_document_ids,v_terms,NULL) posting;$new$)
+ ) expected(signature,old_text,new_text) LOOP
+  definition:=pg_get_functiondef(patch.signature::REGPROCEDURE);
+  IF (length(definition)-length(replace(definition,patch.old_text,'')))/length(patch.old_text)<>1 THEN
+   RAISE EXCEPTION 'cached byte posting reader replacement boundary differs: %',patch.signature;
   END IF;
-  EXECUTE replace(definition,'storage_v2_compact_posting_block','storage_v2_posting_block_all');
+  EXECUTE replace(definition,patch.old_text,patch.new_text);
  END LOOP;
 END $readers$;
 
@@ -322,11 +414,12 @@ BEGIN
     END IF;
 
     -- Small documents retain the established compact representation. Large
-    -- new documents store only exact byte locators into their canonical text.
+    -- new documents retain bounded short terms and exact byte locators for all terms.
     IF octet_length(p_search_text)>=262144 THEN
         INSERT INTO storage_v2_byte_posting_block(
-            document_id,block_order,text_byte_starts,text_byte_lengths,term_frequencies,fingerprints)
+            document_id,block_order,cached_terms,text_byte_starts,text_byte_lengths,term_frequencies,fingerprints)
         SELECT v_document.id,(posting.ordinal-1)/256,
+               array_agg(CASE WHEN octet_length(posting.term)<=128 THEN posting.term ELSE NULL END ORDER BY posting.ordinal),
                array_agg(posting.byte_start ORDER BY posting.ordinal),
                array_agg(posting.byte_length ORDER BY posting.ordinal),
                array_agg(posting.frequency ORDER BY posting.ordinal),
