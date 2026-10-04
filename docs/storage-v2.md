@@ -1503,3 +1503,22 @@ checks compare complete named and active search envelopes and direct presence
 results across authorization scopes, absent IDs, empty inputs and null inputs.
 No source data, generation, active pointer or stored representation changes.
 Live latency and complete candidate-set acceptance remain separate gates.
+
+## Batched reader metadata
+
+Migration 143 gives large unfiltered named and active searches a set-based
+metadata join. Small scopes and requests with path, role or time filters keep
+their indexed lookup path. The planning choice uses the authorized generation
+item counts; both paths retain the same occurrence membership, bindings, token
+counts, corpus frequencies and complete scoring inputs.
+
+The legacy segment fallback resolves one occurrence, its artifact, canonical
+view binding and document through bounded correlated lookups. Authorization,
+generated-projection rejection, source/artifact identity, text hash and exact
+vector predicates remain unchanged. Installation rejects reader definition and
+EXECUTE authority drift and changes no representations or role policies.
+
+The regression fixture compares full named and active search envelopes for
+both metadata plans. A lower planning threshold is used only in its disposable
+database to exercise the alternate plan without changing fixture counts or
+roots. Functional equality does not establish production latency acceptance.

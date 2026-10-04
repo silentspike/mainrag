@@ -10,6 +10,7 @@ INDEXED = MIGRATION.parent / '139_storage_v2_index_ordinary_first_terms.sql'
 SCOPED = MIGRATION.parent / '140_storage_v2_scoped_first_projection_reader.sql'
 PRUNED = MIGRATION.parent / '141_storage_v2_prune_impossible_conjunction_candidates.sql'
 PRESENCE = MIGRATION.parent / '142_storage_v2_isolated_presence_reader.sql'
+BATCHED = MIGRATION.parent / '143_storage_v2_batch_reader_metadata_scope.sql'
 FULL = 'storage_v2_authorized_lexical_candidates(bigint[],bigint[],text)'
 FIRST = 'storage_v2_authorized_lexical_first_candidates(bigint[],bigint[],text)'
 RANKS = ('storage_v2_source_segment_rank_candidates(bigint[],text)',
@@ -204,6 +205,31 @@ class FirstLexicalCandidateTests(unittest.TestCase):
                          self.sql(f"SELECT pg_get_functiondef('{presence_signature}'::REGPROCEDURE)"))
         self.assertEqual(presence_before, presence_results())
         self.assertEqual(before, envelopes())
+        batched_body = BATCHED.read_text().replace('BEGIN;', '', 1).rsplit('COMMIT;', 1)[0]
+        legacy_match = 'storage_v2_source_legacy_segment_matches(bigint,text)'
+        for signature in (exact, active, legacy_match):
+            old = self.sql(f"SELECT pg_get_functiondef('{signature}'::REGPROCEDURE)")
+            self.assert_sql_fails('BEGIN;' + old.replace('BEGIN',
+                '/* fixture drift */ BEGIN', 1) + ';' + batched_body + 'ROLLBACK;',
+                'batched metadata reader definition differs')
+            self.assert_sql_fails('BEGIN; GRANT EXECUTE ON FUNCTION ' + signature
+                + ' TO storage_v2_shadow_worker;' + batched_body + 'ROLLBACK;',
+                'batched metadata reader authority differs')
+        self.file(BATCHED)
+        self.assertEqual(before, envelopes())
+        # Exercise the complete alternate SQL path with real authorized
+        # fixtures. Lower only this planning threshold in the disposable DB;
+        # candidate counts, roots and source metadata remain unchanged.
+        planned = {signature: self.sql(f"SELECT pg_get_functiondef('{signature}'::REGPROCEDURE)")
+                   for signature in (exact, active)}
+        try:
+            for definition in planned.values():
+                self.assertEqual(definition.count('>=4096'), 1)
+                self.sql(definition.replace('>=4096', '>=0') + ';')
+            self.assertEqual(before, envelopes())
+        finally:
+            for definition in planned.values():
+                self.sql(definition + ';')
         self.assert_sql_fails('SET SESSION AUTHORIZATION mainrag; SET ROLE mainrag_v2_presence_owner',
                               'permission denied to set role')
         self.assertEqual(self.sql("SELECT NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls "
