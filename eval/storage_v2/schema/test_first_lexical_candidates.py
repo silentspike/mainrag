@@ -4,6 +4,7 @@ import unittest
 
 from eval.storage_v2.schema import test_bound_query_and_presence_work as previous
 from eval.storage_v2.schema.presence_reader_fixture import register_presence_role_cleanup
+from eval.storage_v2.schema.generation_metadata_fixture import verify_generation_metadata
 
 MIGRATION = previous.previous.ROOT / 'migrations/137_storage_v2_first_lexical_candidates.sql'
 INDEXED = MIGRATION.parent / '139_storage_v2_index_ordinary_first_terms.sql'
@@ -12,6 +13,7 @@ PRUNED = MIGRATION.parent / '141_storage_v2_prune_impossible_conjunction_candida
 PRESENCE = MIGRATION.parent / '142_storage_v2_isolated_presence_reader.sql'
 BATCHED = MIGRATION.parent / '143_storage_v2_batch_reader_metadata_scope.sql'
 ARRAY_WORK = MIGRATION.parent / '144_storage_v2_bound_compact_array_work.sql'
+METADATA = MIGRATION.parent / '145_storage_v2_reuse_generation_reader_metadata.sql'
 FULL = 'storage_v2_authorized_lexical_candidates(bigint[],bigint[],text)'
 FIRST = 'storage_v2_authorized_lexical_first_candidates(bigint[],bigint[],text)'
 RANKS = ('storage_v2_source_segment_rank_candidates(bigint[],text)',
@@ -239,6 +241,7 @@ class FirstLexicalCandidateTests(unittest.TestCase):
                                   'compact array reader bounds constraints differ')
         self.file(ARRAY_WORK)
         self.assertEqual(before, envelopes())
+        verify_generation_metadata(self, METADATA, envelopes, before)
         # Exercise the complete alternate SQL path with real authorized
         # fixtures. Lower only this planning threshold in the disposable DB;
         # candidate counts, roots and source metadata remain unchanged.

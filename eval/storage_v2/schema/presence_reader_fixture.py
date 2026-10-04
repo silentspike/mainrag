@@ -16,3 +16,18 @@ def register_presence_role_cleanup(stack, socket):
         print("Owned presence-reader fixture role removed", flush=True)
 
     stack.callback(cleanup)
+
+
+def register_metadata_role_cleanup(stack, socket):
+    # Migration 145 rejects an existing role; only its successful installer
+    # registers cleanup, after database teardown removes all dependencies.
+    def cleanup():
+        subprocess.run(
+            ["psql", "-X", "--no-psqlrc", "-qAt", "--set=ON_ERROR_STOP=1",
+             "--host", str(socket), "--dbname", "postgres", "--command",
+             "DROP ROLE mainrag_v2_metadata_reader"],
+            check=True, capture_output=True, text=True,
+        )
+        print("Owned metadata-reader fixture role removed", flush=True)
+
+    stack.callback(cleanup)
