@@ -14,6 +14,7 @@ PRESENCE = MIGRATION.parent / '142_storage_v2_isolated_presence_reader.sql'
 BATCHED = MIGRATION.parent / '143_storage_v2_batch_reader_metadata_scope.sql'
 ARRAY_WORK = MIGRATION.parent / '144_storage_v2_bound_compact_array_work.sql'
 METADATA = MIGRATION.parent / '145_storage_v2_reuse_generation_reader_metadata.sql'
+ADAPTIVE = MIGRATION.parent / '146_storage_v2_adaptive_sparse_reader_scopes.sql'
 FULL = 'storage_v2_authorized_lexical_candidates(bigint[],bigint[],text)'
 FIRST = 'storage_v2_authorized_lexical_first_candidates(bigint[],bigint[],text)'
 RANKS = ('storage_v2_source_segment_rank_candidates(bigint[],text)',
@@ -319,6 +320,16 @@ class FirstLexicalCandidateTests(unittest.TestCase):
         self.assertEqual(self.sql("SELECT segment_order FROM storage_v2_ordinary_first_term "
                                  f"WHERE occurrence_id={changed['id']} AND lexeme='alpha'"), '1000')
         self.assertEqual(original[FULL], self.sql(f"SELECT pg_get_functiondef('{FULL}'::REGPROCEDURE)"))
+        adaptive_body = ADAPTIVE.read_text().replace('BEGIN;', '', 1).rsplit('COMMIT;', 1)[0]
+        for signature in RANKS+(FIRST, posting_signature, 'storage_v2_reader_metadata_ready(bigint[])'):
+            current = self.sql(f"SELECT pg_get_functiondef('{signature}'::REGPROCEDURE)")
+            self.assert_sql_fails('BEGIN;'+current.replace(
+                'AS $function$', 'AS $function$\n/* fixture drift */', 1)+';'+adaptive_body+'ROLLBACK;',
+                'adaptive reader definition or authority differs')
+            self.assert_sql_fails('BEGIN;'+f'GRANT EXECUTE ON FUNCTION {signature} TO PUBLIC;'
+                +adaptive_body+'ROLLBACK;', 'adaptive reader definition or authority differs')
+        self.file(ADAPTIVE)
+        self.assertEqual(before, envelopes())
         self.assert_sql_fails(self.actor(self.schema.ADMIN_ID,
             "SELECT * FROM storage_v2_authorized_lexical_first_candidates(ARRAY[1::BIGINT],ARRAY[6::BIGINT],'alpha')"),
             'permission denied for function storage_v2_authorized_lexical_first_candidates')
@@ -390,4 +401,19 @@ class FirstLexicalCandidateTests(unittest.TestCase):
                                  ['t']*len(posting_checks))
         finally:
             self.sql(posting + ';')
+        # Missing IDs enlarge a real requested scope without fabricating any
+        # source documents. Independent enumeration checks all match identities
+        # and frequencies, including duplicates and nonmatching scope members.
+        large_document_scope = document_scope+'||ARRAY(SELECT -n::BIGINT FROM generate_series(1,2048) n)'
+        large_checks = [check.replace(document_scope, large_document_scope) for check in posting_checks]
+        for threshold in ('OFFSET 0', 'OFFSET 1000000000'):
+            try:
+                # Exercise both dense joins and sparse membership with exactly
+                # the same real ordinary/compact rows and independent oracle.
+                self.sql(posting.replace('OFFSET 32', threshold)+';')
+                for user in (self.schema.ADMIN_ID, self.schema.WRITER_ID, self.schema.OTHER_ID):
+                    self.assertEqual(self.sql(self.actor(user, '\n'.join(large_checks))).splitlines(),
+                                     ['t']*len(large_checks))
+            finally:
+                self.sql(posting+';')
         print(f'{len(before)} full envelopes; {comparisons} independent first-match and {comparisons*2} rank comparisons; fanout {full}->{first}', flush=True)
