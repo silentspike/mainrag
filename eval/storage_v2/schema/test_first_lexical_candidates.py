@@ -17,6 +17,7 @@ METADATA = MIGRATION.parent / '145_storage_v2_reuse_generation_reader_metadata.s
 ADAPTIVE = MIGRATION.parent / '146_storage_v2_adaptive_sparse_reader_scopes.sql'
 DECODED = MIGRATION.parent / '147_storage_v2_decode_compact_blocks_once.sql'
 DENSE = MIGRATION.parent / '148_storage_v2_decorrelate_dense_reader_scopes.sql'
+BOUNDED_SCOPE = MIGRATION.parent / '149_storage_v2_bound_sparse_array_planning.sql'
 FULL = 'storage_v2_authorized_lexical_candidates(bigint[],bigint[],text)'
 FIRST = 'storage_v2_authorized_lexical_first_candidates(bigint[],bigint[],text)'
 RANKS = ('storage_v2_source_segment_rank_candidates(bigint[],text)',
@@ -482,6 +483,20 @@ class FirstLexicalCandidateTests(unittest.TestCase):
             self.assertEqual(values,['t']*len(candidate_checks))
             values=self.sql(self.actor(user,'\n'.join(rank_checks))).splitlines()
             self.assertEqual(values,['t']*len(rank_checks))
+        bounded_body = BOUNDED_SCOPE.read_text().replace('BEGIN;', '', 1).rsplit('COMMIT;', 1)[0]
+        for signature in changed_signatures:
+            current = self.sql(f"SELECT pg_get_functiondef('{signature}'::REGPROCEDURE)")
+            self.assert_sql_fails('BEGIN;'+current.replace(
+                'AS $function$', 'AS $function$\n/* fixture drift */', 1)+';'+bounded_body+'ROLLBACK;',
+                'bounded array scope reader definition or authority differs')
+            self.assert_sql_fails('BEGIN;'+f'GRANT EXECUTE ON FUNCTION {signature} TO PUBLIC;'
+                +bounded_body+'ROLLBACK;', 'bounded array scope reader definition or authority differs')
+        self.assert_sql_fails('BEGIN;'+bounded_body.replace(
+            '$old0$candidate.document_id', '$old0$impossible_candidate.document_id', 1)+'ROLLBACK;',
+            'bounded array scope reader replacement boundary differs')
+        bounded_before = envelopes()
+        self.file(BOUNDED_SCOPE)
+        self.assertEqual(bounded_before,envelopes())
         # Both branch choices use the same independent multiset oracle. The
         # scopes include missing/null/duplicate IDs and real TOAST dictionaries.
         dense_posting=self.sql(f"SELECT pg_get_functiondef('{posting_signature}'::REGPROCEDURE)")
@@ -520,6 +535,9 @@ class FirstLexicalCandidateTests(unittest.TestCase):
                     scans=[node for node in nodes(plan['Plan'])
                            if node.get('Node Type')=='CTE Scan' and node.get('CTE Name')=='requested']
                     self.assertTrue(scans,signature)
+                    filters=[node.get('Filter','') for node in nodes(plan['Plan'])]
+                    self.assertTrue(any('ANY ($' in value or 'ANY ((InitPlan' in value
+                                        for value in filters),filters)
                     self.assertTrue(all(node.get('Actual Loops',0)<=1 for node in scans),scans)
                     checked_plans+=1
             finally:
