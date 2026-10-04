@@ -213,7 +213,7 @@ INSERT INTO storage_v2_byte_posting_block
             self.assertEqual(value, "t", query)
 
     def test_derived_segments_vectors_queries_replays_and_authorization(self):
-        content = self.cases[5]
+        content = self.cases[5][:22000] + "\nlatesecondblock\n" + self.cases[5][22000:]
         parts = "ARRAY[" + ",".join(self.quote(content[start:start + 16000])
             for start in range(0, len(content), 16000)) + "]::TEXT[]"
         node, view = map(int, self.sql(self.admin(f"""
@@ -275,7 +275,8 @@ SELECT count(*) FROM unnest({array(texts, 'TEXT')},{array(prefixes, 'TEXT')},
   ||setweight(to_tsvector('simple',expected.kind),'C'))
 """)), "0")
         for query in ("alpha", "alpha absent", "alpha OR absent", '"alpha βeta"',
-                      "alpha -absent", "-alpha", "key_42", "public"):
+                      "alpha -absent", "-alpha", "key_42", "public", "text",
+                      "latesecondblock", *self.collision):
             expected = self.sql(f"SELECT count(*) FROM unnest({array(texts, 'TEXT')}) text "
                 "WHERE (setweight(to_tsvector('simple',text),'A') "
                 "||setweight(to_tsvector('simple','public context α'),'B') "
@@ -286,6 +287,43 @@ SELECT count(*) FROM unnest({array(texts, 'TEXT')},{array(prefixes, 'TEXT')},
             for user, count in ((self.schema.ADMIN_ID, expected), (self.schema.OTHER_ID, "0")):
                 self.assertEqual(self.sql("SET ROLE mainrag_v2_frontier_owner; "
                     f"SET app.user_id='{user}'; SELECT count(*) FROM {function}"), count)
+            first = self.sql(self.admin("SELECT min(segment_order) FROM "
+                f"storage_v2_lexical_segment_all WHERE occurrence_id={occurrence} "
+                f"AND fts_vector@@websearch_to_tsquery('simple',{self.quote(query)})"))
+            if query == "latesecondblock":
+                self.assertEqual(first, "110")
+            for scope in (f"ARRAY[{occurrence},{occurrence},NULL]::BIGINT[]",
+                          f"ARRAY(SELECT {occurrence}::BIGINT FROM generate_series(1,2048))"):
+                candidate = (f"storage_v2_authorized_lexical_first_candidates({scope},"
+                             f"ARRAY[{source},{source},NULL]::BIGINT[],{self.quote(query)})")
+                prefix = "SET ROLE mainrag_v2_lexical_rank_owner; SET app.user_id="
+                self.assertEqual(self.sql(prefix + self.quote(self.schema.ADMIN_ID)
+                    + f"; SELECT segment_order FROM {candidate}"), first)
+                self.assertEqual(self.sql(prefix + self.quote(self.schema.OTHER_ID)
+                    + f"; SELECT count(*) FROM {candidate}"), "0")
+        # Reencode one owned fixture block transactionally to exercise a
+        # retained cached block beside a derived block without changing bytes.
+        self.assertEqual(self.sql(f"""BEGIN;
+SET LOCAL app.user_id='{self.schema.ADMIN_ID}';
+CREATE TEMP TABLE codec_mixed_block AS SELECT block.*,
+ storage_v2_derived_lexical_vectors(occurrence_id,text_byte_starts,text_byte_lengths,
+  context_prefixes,chunk_types) AS fts_vectors
+ FROM storage_v2_derived_lexical_block block
+ WHERE occurrence_id={occurrence} AND block_order=1;
+ALTER TABLE storage_v2_derived_lexical_block DISABLE TRIGGER storage_v2_derived_lexical_immutable;
+DELETE FROM storage_v2_derived_lexical_block WHERE occurrence_id={occurrence} AND block_order=1;
+ALTER TABLE storage_v2_derived_lexical_block ENABLE TRIGGER storage_v2_derived_lexical_immutable;
+INSERT INTO storage_v2_compact_lexical_block(occurrence_id,source_id,artifact_version_id,block_order,
+ segment_orders,text_starts,text_lengths,text_hashes,context_prefixes,chunk_types,fts_vectors)
+ SELECT occurrence_id,source_id,artifact_version_id,block_order,segment_orders,text_starts,text_lengths,
+ text_hashes,context_prefixes,chunk_types,fts_vectors FROM codec_mixed_block;
+SET LOCAL ROLE mainrag_v2_lexical_rank_owner;
+SET LOCAL app.user_id='{self.schema.ADMIN_ID}';
+SELECT (SELECT count(*)=1 AND min(segment_order)=0
+ FROM storage_v2_authorized_lexical_first_candidates(ARRAY[{occurrence}]::BIGINT[],ARRAY[{source}]::BIGINT[],'alpha'))
+ AND (SELECT count(*)=1 AND min(segment_order)=110
+ FROM storage_v2_authorized_lexical_first_candidates(ARRAY[{occurrence}]::BIGINT[],ARRAY[{source}]::BIGINT[],'latesecondblock'));
+ROLLBACK;"""), "t")
         self.assert_sql_fails(self.admin(call.replace(array(prefixes, "TEXT"),
             array(["changed"] * len(texts), "TEXT"))), "identity collision")
         self.assert_sql_fails(self.actor(self.schema.OTHER_ID, call), "authorized source-backed")

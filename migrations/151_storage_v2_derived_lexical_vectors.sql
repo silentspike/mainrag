@@ -96,6 +96,79 @@ REVOKE ALL ON FUNCTION storage_v2_derived_lexical_vectors(BIGINT,INTEGER[],INTEG
 GRANT EXECUTE ON FUNCTION storage_v2_derived_lexical_vectors(BIGINT,INTEGER[],INTEGER[],TEXT[],TEXT[])
     TO mainrag,mainrag_v2_lexical_rank_owner,mainrag_v2_presence_owner;
 
+-- First-candidate ranking needs the earliest matching segment, not every
+-- reconstructed vector. Decode the canonical bytes once per occurrence and
+-- stop after that first exact weighted match.
+CREATE FUNCTION storage_v2_derived_lexical_first_candidates(
+    p_occurrence_ids BIGINT[],p_source_ids BIGINT[],p_query TEXT
+) RETURNS TABLE(occurrence_id BIGINT,source_id BIGINT,artifact_version_id BIGINT,
+                segment_order BIGINT,lexical_score REAL)
+LANGUAGE plpgsql STABLE STRICT SECURITY DEFINER
+SET search_path=pg_catalog,public SET row_security=on
+SET plan_cache_mode=force_custom_plan AS $$
+DECLARE sources BIGINT[]; requested RECORD; block RECORD; item RECORD;
+        bytes BYTEA; vector TSVECTOR; query TSQUERY:=websearch_to_tsquery('simple',p_query);
+        v_fingerprints INTEGER[];
+BEGIN
+ IF cardinality(p_occurrence_ids)=0 OR cardinality(p_source_ids)=0 THEN RETURN; END IF;
+ SELECT array_agg(source.id) INTO sources FROM public.sources source
+  WHERE source.id=ANY(p_source_ids) AND storage_v2_can_access_source(source.id,'read');
+ IF sources IS NULL THEN RETURN; END IF;
+ IF p_query ~ '^[[:alnum:]_]+([[:space:]]+[[:alnum:]_]+)*$'
+    AND lower(p_query) !~ '(^|[[:space:]])or([[:space:]]|$)' THEN
+  v_fingerprints:=storage_v2_posting_fingerprints(tsvector_to_array(to_tsvector('simple',p_query)));
+ END IF;
+ FOR requested IN SELECT occurrence.id,occurrence.source_id,occurrence.artifact_version_id,
+                         occurrence.view_id,artifact.content_root_node_id
+  FROM public.occurrence occurrence JOIN public.artifact_version artifact
+    ON artifact.id=occurrence.artifact_version_id
+  WHERE occurrence.id=ANY((SELECT p_occurrence_ids OFFSET 0)::BIGINT[])
+    AND occurrence.source_id=ANY(sources)
+ LOOP
+  bytes:=NULL;
+  <<blocks>>
+  FOR block IN SELECT stored.* FROM public.storage_v2_derived_lexical_block stored
+   WHERE stored.occurrence_id=requested.id AND stored.source_id=requested.source_id
+     AND stored.artifact_version_id=requested.artifact_version_id
+     AND (v_fingerprints IS NULL OR stored.fingerprints @> v_fingerprints)
+   ORDER BY stored.block_order
+  LOOP
+   IF bytes IS NULL THEN
+    SELECT convert_to(document.search_text,'UTF8') INTO bytes
+     FROM public.storage_v2_search_view_document binding
+     JOIN public.storage_v2_search_document document ON document.id=binding.document_id
+      AND document.component_kind='node' AND document.node_id=requested.content_root_node_id
+     WHERE binding.view_id=requested.view_id AND binding.ordinal=0;
+    IF NOT FOUND THEN
+     RAISE EXCEPTION 'authorized canonical lexical document required' USING ERRCODE='42501';
+    END IF;
+   END IF;
+   FOR item IN SELECT * FROM unnest(block.segment_orders,block.text_byte_starts,
+      block.text_byte_lengths,block.context_prefixes,block.chunk_types)
+      segment(segment_order,start,length,prefix,kind) ORDER BY segment.segment_order
+   LOOP
+    vector:=setweight(to_tsvector('simple',convert_from(
+        substring(bytes FROM item.start FOR item.length),'UTF8') COLLATE "default"),'A')
+      ||setweight(to_tsvector('simple',item.prefix),'B')
+      ||setweight(to_tsvector('simple',item.kind),'C');
+    IF vector@@query THEN
+     occurrence_id:=requested.id;source_id:=requested.source_id;
+     artifact_version_id:=requested.artifact_version_id;
+     segment_order:=item.segment_order;lexical_score:=0.0;
+     RETURN NEXT;
+     EXIT blocks;
+    END IF;
+   END LOOP;
+  END LOOP blocks;
+ END LOOP;
+END $$;
+ALTER FUNCTION storage_v2_derived_lexical_first_candidates(BIGINT[],BIGINT[],TEXT)
+    OWNER TO mainrag_v2_frontier_owner;
+REVOKE ALL ON FUNCTION storage_v2_derived_lexical_first_candidates(BIGINT[],BIGINT[],TEXT)
+    FROM PUBLIC,mainrag;
+GRANT EXECUTE ON FUNCTION storage_v2_derived_lexical_first_candidates(BIGINT[],BIGINT[],TEXT)
+    TO mainrag_v2_lexical_rank_owner;
+
 CREATE VIEW storage_v2_lexical_block_all WITH(security_invoker=true) AS
  SELECT occurrence_id,source_id,artifact_version_id,block_order,segment_orders,
         text_starts,text_lengths,text_hashes,context_prefixes,chunk_types,fts_vectors,fingerprints
@@ -133,8 +206,7 @@ BEGIN
   'storage_v2_guard_flat_lexical_insert()',
   'storage_v2_authorized_lexical_candidates(bigint[],bigint[],text)',
   'storage_v2_source_segment_rank_candidates(bigint[],text)',
-  'storage_v2_source_segment_rank_candidates(bigint[],text,bigint[])',
-  'storage_v2_authorized_lexical_first_candidates(bigint[],bigint[],text)'
+  'storage_v2_source_segment_rank_candidates(bigint[],text,bigint[])'
  ] LOOP
   definition:=pg_get_functiondef(signature::REGPROCEDURE);
   IF strpos(definition,'storage_v2_compact_lexical_block')=0 THEN
@@ -143,6 +215,41 @@ BEGIN
   EXECUTE replace(definition,'storage_v2_compact_lexical_block','storage_v2_lexical_block_all');
  END LOOP;
 END $readers$;
+
+DO $first_reader$
+DECLARE definition TEXT;
+        signature TEXT:='CREATE OR REPLACE FUNCTION public.storage_v2_authorized_lexical_first_candidates(';
+BEGIN
+ definition:=pg_get_functiondef('storage_v2_authorized_lexical_first_candidates(bigint[],bigint[],text)'::REGPROCEDURE);
+ IF strpos(definition,signature)=0 OR strpos(definition,'storage_v2_compact_lexical_block')=0 THEN
+  RAISE EXCEPTION 'derived lexical first-candidate boundary differs';
+ END IF;
+ EXECUTE replace(definition,signature,
+  'CREATE OR REPLACE FUNCTION public.storage_v2_authorized_cached_lexical_first_candidates(');
+END $first_reader$;
+ALTER FUNCTION storage_v2_authorized_cached_lexical_first_candidates(BIGINT[],BIGINT[],TEXT)
+    OWNER TO mainrag_v2_lexical_rank_owner;
+REVOKE ALL ON FUNCTION storage_v2_authorized_cached_lexical_first_candidates(BIGINT[],BIGINT[],TEXT)
+    FROM PUBLIC,mainrag;
+
+-- An occurrence can retain older cached blocks alongside new derived blocks.
+-- Reduce their first matches together, preserving one exact minimum identity.
+CREATE OR REPLACE FUNCTION storage_v2_authorized_lexical_first_candidates(
+    p_occurrence_ids BIGINT[],p_source_ids BIGINT[],p_query TEXT
+) RETURNS TABLE(occurrence_id BIGINT,source_id BIGINT,artifact_version_id BIGINT,
+                segment_order BIGINT,lexical_score REAL)
+LANGUAGE sql STABLE STRICT SECURITY DEFINER
+SET search_path=pg_catalog,public SET row_security=on
+SET plan_cache_mode=force_custom_plan AS $$
+ SELECT candidate.occurrence_id,candidate.source_id,candidate.artifact_version_id,
+        min(candidate.segment_order),0.0::REAL
+ FROM (
+  SELECT * FROM storage_v2_authorized_cached_lexical_first_candidates(p_occurrence_ids,p_source_ids,p_query)
+  UNION ALL
+  SELECT * FROM storage_v2_derived_lexical_first_candidates(p_occurrence_ids,p_source_ids,p_query)
+ ) candidate
+ GROUP BY candidate.occurrence_id,candidate.source_id,candidate.artifact_version_id
+$$;
 
 CREATE OR REPLACE FUNCTION public.storage_v2_put_lexical_segments_located(p_occurrence_id bigint, p_artifact_version_id bigint, p_segment_orders bigint[], p_texts text[], p_context_prefixes text[], p_chunk_types text[], p_character_starts bigint[], p_byte_starts bigint[])
  RETURNS bigint

@@ -379,6 +379,12 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             "resume progress omitted the observed final commit");
         println!("{}",json!({"fixture":"durable-item-resume","committed_before_interruption":128,
             "final_items":257,"same_generation":true,"duplicate_occurrences":0}));
+        let seed_reader = client.transaction().await?;
+        seed_reader.batch_execute(&format!("SET LOCAL app.user_id='{PRINCIPAL}'")).await?;
+        let empty_bootstrap_seeds = candidate_query_seeds(&seed_reader,165,resumed.generation_id,false).await?;
+        ensure!(empty_bootstrap_seeds.iter().any(|seed| seed.expects_match),
+            "candidate with existing but empty source bootstrap rows must retain native positive seeds");
+        seed_reader.rollback().await?;
 
         let initial = Box::pin(run(&mut client, &root, &packs)).await?;
         ensure!(initial.item_count == 1 && !initial.reused_generation,

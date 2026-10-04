@@ -1630,3 +1630,28 @@ and ordinary first-match candidates. Complete envelopes and independent
 multisets retain null, missing and duplicate ID semantics. Actual fixture plans
 check deferred sparse operands and dense scans; installation fences exact prior
 definitions and execution authority. No global planner settings are changed.
+
+### Compact derived retrieval for new large documents
+
+Migrations 150–152 retain existing documents, posting blocks and weighted
+lexical vectors. New documents of at least 262,144 UTF-8 bytes can use validated
+byte locators for posting terms and lexical slices. Posting blocks keep exact
+short terms of at most 128 UTF-8 bytes in a bounded aligned cache; longer terms
+are decoded from canonical bytes only after fingerprint and length pruning.
+Fingerprints never establish an exact match.
+
+Weighted lexical vectors are reconstructed with their original A/B/C weights.
+First-candidate reads use authorized occurrence and artifact scope, load
+canonical bytes once per occurrence, and stop at the earliest exact matching
+segment. They do not reconstruct every candidate block to compute that minimum.
+Precise ranking and full integrity verification retain complete vector semantics.
+Plain conjunctions can prune blocks by fingerprints; OR, phrases and negation
+keep exact vector evaluation. Full-document vector derivation retains the
+previous oversized-vector fallback and existing cached values.
+
+Candidate verification selects generation-backed native query seeds when a
+source has no bootstrap chunk inputs, including after legacy tables have been
+retired. The original producer identity remains attached to retained generations.
+Codec equivalence, measured allocation, actual named reads and production
+qualification are separate gates; fixture success does not activate or clean
+up any source.
