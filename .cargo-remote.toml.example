@@ -1,14 +1,18 @@
-# Optional: offload cargo builds to a remote machine via cargo-remote.
-#
-# Copy to `.cargo-remote.toml` at the repo root (or cli/ / api/ subdirs),
-# fill in your build host, and run `cargo remote -c -- build`. The real
-# file is gitignored.
+# Cargo Remote v2 reference. Do not copy this example over a generated config.
+# Initialize an existing checkout from the workspace root after checking its
+# deployment target: cargo remote --init --profile desktop-linux
+# Initialization generates a unique project_id and pins the toolchain/image.
+# Connection credentials belong in the global client configuration, never here.
 
-[[remote]]
-host = "<USER>@<BUILD_SERVER_HOST>"
-temp_dir = "/tmp/builds"
+[cargo_remote]
+schema = 1
+project_id = "<generated project UUID>"
+profile = "desktop-linux"
+toolchain = "1.98.1"
+targets = []
+resources = "normal"
 
-# Multiple remotes are supported; cargo-remote picks the first reachable:
-# [[remote]]
-# host = "<fallback>@<secondary-host>"
-# temp_dir = "/tmp/builds"
+# MainRAG links Fontconfig. The minimal linux-gnu-bookworm image lacks it.
+# Release builds: cargo remote --resources=large -c -- build --release
+# Tests: cargo remote -- test --workspace --no-fail-fast
+# Formatting: cargo-remote-fmt --check
