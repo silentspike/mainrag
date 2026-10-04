@@ -1600,3 +1600,19 @@ The installation guard binds the prior reader definition, invoker authority and
 validated array bounds. Regression coverage compares complete search envelopes
 and posting multisets against independent document enumeration for both dense
 and sparse plans, including large TOAST dictionaries and duplicate terms.
+
+
+### Dense reader scope semijoins
+
+Migration 148 separates sparse membership probes from dense requested-set
+semijoins using mutually exclusive query branches. A CASE-wrapped EXISTS can
+remain correlated even when the requested set is materialized, repeatedly
+scanning the complete set for each matching occurrence. Dense branches expose
+the membership relation to the planner; sparse branches retain bounded array
+probes and avoid expanding large requested sets for absent or rare matches.
+
+The same correction covers ordinary and compact postings, copied legacy rank
+projections, and ordinary first-match candidates. Exact scope, duplicate term
+frequencies, authorization, complete corpus statistics and scoring remain
+unchanged. Installation guards the previous definitions and authority; frozen
+snapshot comparisons retain full envelopes across representative source classes.
