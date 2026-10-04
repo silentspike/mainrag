@@ -5,4 +5,4 @@ profile = "desktop-linux"
 toolchain = "1.98.1"
 targets = []
 resources = "normal"
-image = "a65cd558959b3838a0af46e761e0f5e1349cca964a19939b3b344be9017faee1"
+image = "ebe3d5057f6befcee96ceaea8ea96076eba7c37e88b65f555f06d60433f99ab9"
