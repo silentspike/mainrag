@@ -7,6 +7,7 @@ from eval.storage_v2.schema import test_compact_exact_postings as base
 from eval.storage_v2.schema.presence_reader_fixture import (
     register_metadata_role_cleanup, register_presence_role_cleanup,
 )
+from eval.storage_v2.schema.test_native_gc import G as native_gc
 
 
 class DerivedRetrievalCodecTests(unittest.TestCase):
@@ -138,6 +139,16 @@ ROLLBACK;""")
                                   f"WHERE document_id={document}"), "0")
         self.assertNotEqual(self.sql(f"SELECT count(*) FROM storage_v2_byte_posting_block "
                                      f"WHERE document_id={document}"), "0")
+        self.assertEqual(self.sql("BEGIN;" + native_gc.graph_sql([]) + f"""
+SELECT NOT EXISTS(SELECT 1 FROM gc_mark WHERE kind='storage_v2_search_document' AND id={document})
+ AND EXISTS(SELECT 1 FROM gc_dependents WHERE name='storage_v2_byte_posting_block' AND total>kept);
+ROLLBACK;"""), "t")
+        self.assertEqual(self.sql(f"""BEGIN;
+CREATE TABLE codec_gc_unknown_reference(document_id BIGINT REFERENCES storage_v2_search_document(id));
+INSERT INTO codec_gc_unknown_reference VALUES({document});
+""" + native_gc.graph_sql([]) + f"""
+SELECT EXISTS(SELECT 1 FROM gc_mark WHERE kind='storage_v2_search_document' AND id={document});
+ROLLBACK;"""), "t")
         self.assert_sql_fails(self.admin(call.replace(self.quote(text), "'different text'")),
                               "profile collision")
         for term, expected in (("alpha", "12000"), ("a/b", "12000"), ("key_42", "12000"),
@@ -334,3 +345,8 @@ ROLLBACK;"""), "t")
             f"(SELECT generation_id FROM storage_v2_ingest_run WHERE id={run}),repeat('f',64))"))
         envelope = self.exact_search({"type": "term", "value": "alpha"}, source_id=source)
         self.assertEqual(len(envelope["results"]), 1)
+        self.assertEqual(self.sql("BEGIN;" + native_gc.graph_sql([]) + f"""
+SELECT EXISTS(SELECT 1 FROM gc_mark WHERE kind='occurrence' AND id={occurrence})
+ AND EXISTS(SELECT 1 FROM gc_mark WHERE kind='storage_v2_search_document' AND id={document})
+ AND EXISTS(SELECT 1 FROM gc_dependents WHERE name='storage_v2_derived_lexical_block' AND total=kept AND total>=2);
+ROLLBACK;"""), "t")
