@@ -3,6 +3,7 @@ import json
 import unittest
 
 from eval.storage_v2.schema import test_bound_query_and_presence_work as previous
+from eval.storage_v2.schema.presence_reader_fixture import register_presence_role_cleanup
 
 MIGRATION = previous.previous.ROOT / 'migrations/137_storage_v2_first_lexical_candidates.sql'
 INDEXED = MIGRATION.parent / '139_storage_v2_index_ordinary_first_terms.sql'
@@ -198,6 +199,7 @@ class FirstLexicalCandidateTests(unittest.TestCase):
         presence_before = presence_results()
         self.sql('ALTER TABLE users ADD COLUMN fixture_private_value TEXT')
         self.file(PRESENCE)
+        register_presence_role_cleanup(self.stack, self.socket)
         self.assertEqual(presence_definition,
                          self.sql(f"SELECT pg_get_functiondef('{presence_signature}'::REGPROCEDURE)"))
         self.assertEqual(presence_before, presence_results())
