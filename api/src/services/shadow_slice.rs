@@ -3001,6 +3001,15 @@ async fn candidate_query_seeds<C>(
 where
     C: GenericClient + Sync,
 {
+    let native_lexical = native_lexical
+        || !client
+            .query_one(
+                "SELECT to_regclass('public.chunks') IS NOT NULL \
+                    AND to_regclass('public.files') IS NOT NULL",
+                &[],
+            )
+            .await?
+            .get::<_, bool>(0);
     let legacy_inputs = if native_lexical {
         Vec::new()
     } else {
