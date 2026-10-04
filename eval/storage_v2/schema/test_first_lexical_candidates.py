@@ -8,6 +8,7 @@ MIGRATION = previous.previous.ROOT / 'migrations/137_storage_v2_first_lexical_ca
 INDEXED = MIGRATION.parent / '139_storage_v2_index_ordinary_first_terms.sql'
 SCOPED = MIGRATION.parent / '140_storage_v2_scoped_first_projection_reader.sql'
 PRUNED = MIGRATION.parent / '141_storage_v2_prune_impossible_conjunction_candidates.sql'
+PRESENCE = MIGRATION.parent / '142_storage_v2_isolated_presence_reader.sql'
 FULL = 'storage_v2_authorized_lexical_candidates(bigint[],bigint[],text)'
 FIRST = 'storage_v2_authorized_lexical_first_candidates(bigint[],bigint[],text)'
 RANKS = ('storage_v2_source_segment_rank_candidates(bigint[],text)',
@@ -170,6 +171,52 @@ class FirstLexicalCandidateTests(unittest.TestCase):
             'conjunction pruning reader authority differs')
         self.file(PRUNED)
         self.assertEqual(before, envelopes())
+        presence_signature = 'storage_v2_source_segment_presence(bigint[])'
+        presence_definition = self.sql(f"SELECT pg_get_functiondef('{presence_signature}'::REGPROCEDURE)")
+        presence_body = PRESENCE.read_text().replace('BEGIN;', '', 1).rsplit('COMMIT;', 1)[0]
+        self.assert_sql_fails('BEGIN;' + presence_definition.replace('RETURN QUERY',
+            '/* fixture drift */ RETURN QUERY', 1) + ';' + presence_body + 'ROLLBACK;',
+            'isolated presence reader definition or authority differs')
+        self.assert_sql_fails('BEGIN; GRANT EXECUTE ON FUNCTION ' + presence_signature
+            + ' TO storage_v2_shadow_worker;' + presence_body + 'ROLLBACK;',
+            'isolated presence reader definition or authority differs')
+        self.assert_sql_fails('BEGIN; ALTER TABLE occurrence DISABLE ROW LEVEL SECURITY;'
+            + presence_body + 'ROLLBACK;', 'isolated presence reader relation boundary differs')
+        self.assert_sql_fails('BEGIN; CREATE ROLE mainrag_v2_presence_owner LOGIN BYPASSRLS;'
+            + presence_body + 'ROLLBACK;', 'isolated presence reader role already exists')
+
+        def presence_results():
+            scopes = ('NULL::BIGINT[]', 'ARRAY[]::BIGINT[]',
+                      'ARRAY[NULL,-1,9223372036854775807]::BIGINT[]',
+                      'ARRAY(SELECT id FROM occurrence ORDER BY id)',
+                      'ARRAY(SELECT id FROM occurrence WHERE source_id=9 ORDER BY id)')
+            return [self.sql(self.actor(user, 'SELECT COALESCE(jsonb_agg(occurrence_id '
+                'ORDER BY occurrence_id),\'[]\'::JSONB) FROM '
+                f'storage_v2_source_segment_presence({scope})'))
+                for user in (self.schema.ADMIN_ID, self.schema.WRITER_ID) for scope in scopes]
+
+        presence_before = presence_results()
+        self.sql('ALTER TABLE users ADD COLUMN fixture_private_value TEXT')
+        self.file(PRESENCE)
+        self.assertEqual(presence_definition,
+                         self.sql(f"SELECT pg_get_functiondef('{presence_signature}'::REGPROCEDURE)"))
+        self.assertEqual(presence_before, presence_results())
+        self.assertEqual(before, envelopes())
+        self.assert_sql_fails('SET SESSION AUTHORIZATION mainrag; SET ROLE mainrag_v2_presence_owner',
+                              'permission denied to set role')
+        self.assertEqual(self.sql("SELECT NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls "
+            "AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolinherit FROM pg_roles "
+            "WHERE rolname='mainrag_v2_presence_owner'"), 't')
+        self.assertEqual(self.sql("SELECT count(*) FROM pg_auth_members WHERE roleid="
+            "'mainrag_v2_presence_owner'::REGROLE OR member='mainrag_v2_presence_owner'::REGROLE"), '0')
+        self.assertEqual(self.sql("SELECT count(*) FROM pg_proc WHERE proowner="
+            "'mainrag_v2_presence_owner'::REGROLE"), '1')
+        self.assert_sql_fails('SET ROLE mainrag_v2_presence_owner; DELETE FROM occurrence WHERE FALSE',
+                              'permission denied')
+        self.assert_sql_fails('SET ROLE mainrag_v2_presence_owner; SELECT fixture_private_value FROM users',
+                              'permission denied')
+        self.assertEqual(self.sql("SET ROLE mainrag; SET app.user_id=''; SELECT count(*) FROM "
+            "storage_v2_source_segment_presence(ARRAY[1,2,3]::BIGINT[])"), '0')
         self.assert_sql_fails(self.actor(self.schema.WRITER_ID,
             'SELECT * FROM storage_v2_materialize_ordinary_first_terms(6,0,128)'),
             'administrator authority')

@@ -28,6 +28,7 @@ class NativeGcTests(fixture.CleanupApplyTests):
         self.command(self.database, file=next((fixture.base.ROOT/'migrations').glob('139_*.sql')))
         self.command(self.database, file=next((fixture.base.ROOT/'migrations').glob('140_*.sql')))
         self.command(self.database, file=next((fixture.base.ROOT/'migrations').glob('141_*.sql')))
+        self.command(self.database, file=next((fixture.base.ROOT/'migrations').glob('142_*.sql')))
         self.sql(self.admin('SELECT * FROM storage_v2_derive_document_identifiers(0,256,TRUE)'))
         self.sql(self.admin("""SELECT storage_v2_put_lexical_segment(
             o.id,o.artifact_version_id,65537,d.search_text,'','text')
