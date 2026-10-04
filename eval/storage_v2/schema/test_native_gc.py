@@ -5,6 +5,7 @@ import json
 import os
 from unittest.mock import patch
 from eval.storage_v2.schema import test_cleanup_apply as fixture
+from eval.storage_v2.schema.presence_reader_fixture import register_presence_role_cleanup
 
 SPEC = importlib.util.spec_from_file_location('native_gc', fixture.base.ROOT/'ops/storage-v2/native-gc.py')
 G = importlib.util.module_from_spec(SPEC)
@@ -28,6 +29,8 @@ class NativeGcTests(fixture.CleanupApplyTests):
         self.command(self.database, file=next((fixture.base.ROOT/'migrations').glob('139_*.sql')))
         self.command(self.database, file=next((fixture.base.ROOT/'migrations').glob('140_*.sql')))
         self.command(self.database, file=next((fixture.base.ROOT/'migrations').glob('141_*.sql')))
+        self.command(self.database, file=next((fixture.base.ROOT/'migrations').glob('142_*.sql')))
+        register_presence_role_cleanup(self.stack, self.socket)
         self.sql(self.admin('SELECT * FROM storage_v2_derive_document_identifiers(0,256,TRUE)'))
         self.sql(self.admin("""SELECT storage_v2_put_lexical_segment(
             o.id,o.artifact_version_id,65537,d.search_text,'','text')

@@ -1482,3 +1482,24 @@ definitions, checks reader authority, and changes no source, generation, body,
 posting, active pointer or table policy. Whole search envelopes and authorization
 are compared before and after installation; production acceptance remains a
 separate gate.
+
+## Isolated lexical presence reads
+
+Migration 142 keeps the existing presence function body and its source
+authorization unchanged. It gives that function an isolated reader owner and
+SELECT policies on its immutable occurrence and lexical metadata. Authorized
+source IDs are still resolved before any requested occurrence is inspected.
+This avoids repeating the same source authorization for each occurrence and
+each physical lexical representation.
+
+The role cannot log in, inherit privileges, bypass row security, create roles
+or databases, or write the metadata tables. No application role can assume it.
+Its only owned function remains callable by the existing application and
+frontier roles. The source policy retains its original checks; the role can
+read only the user ID and administrator flag required by that policy.
+
+Installation rejects function, EXECUTE, role and row-security drift. Focused
+checks compare complete named and active search envelopes and direct presence
+results across authorization scopes, absent IDs, empty inputs and null inputs.
+No source data, generation, active pointer or stored representation changes.
+Live latency and complete candidate-set acceptance remain separate gates.
