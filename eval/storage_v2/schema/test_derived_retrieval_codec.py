@@ -82,7 +82,8 @@ class DerivedRetrievalCodecTests(unittest.TestCase):
                          "a__b 0123 -12.3 +42% api::call() a/b",
                          cls.collision[0] + "\n" + ("alpha βeta key_42 a/b api::call()\n" * 12000),
                          " ".join(f"term_{i}" for i in range(40000)),
-                         "x" * 270000]
+                         "x" * 270000, "w" * 127 + " " + "y" * 128 + " " + "z" * 129
+                         + "\n" + "alpha\n" * 45000]
             cls.nodes = [instance.make_projection(f"codec component {i}")[0]
                          for i in range(len(cls.cases))]
             cls.before = instance.snapshots(False)
@@ -151,6 +152,34 @@ ROLLBACK;""")
             ):
                 scope = f" WHERE document_id={document}" if function.startswith("storage_v2_posting_probe") else ""
                 self.assertEqual(self.sql(self.admin(f"SELECT term_frequency FROM {function}{scope}")), expected)
+        long_document = int(self.sql(self.admin("SELECT id FROM storage_v2_put_search_document("
+            f"'derived-codec-long-readers','node',{self.nodes[7]},{self.quote(self.cases[7])},ARRAY[]::TEXT[])")))
+        for function in (
+            f"storage_v2_document_posting({long_document},{self.quote(self.cases[7])})",
+            f"storage_v2_posting_probe({self.quote(self.cases[7])},1)",
+            f"storage_v2_scoped_query_posting(ARRAY(SELECT {long_document}::BIGINT "
+            f"FROM generate_series(1,2048)),ARRAY[{self.quote(self.cases[7])},NULL])",
+        ):
+            self.assertEqual(self.sql(self.admin(f"SELECT term_frequency FROM {function}")), "1")
+        cutoff_document = int(self.sql(self.admin("SELECT id FROM storage_v2_put_search_document("
+            f"'derived-codec-cutoff-readers','node',{self.nodes[8]},{self.quote(self.cases[8])},ARRAY[]::TEXT[])")))
+        for character, length in (("w", 127), ("y", 128), ("z", 129)):
+            value = self.quote(character * length)
+            self.assertEqual(self.sql(self.admin(
+                f"SELECT term_frequency FROM storage_v2_document_posting({cutoff_document},{value})")), "1")
+        self.assert_sql_fails("BEGIN;" + self.admin(f"""
+WITH fresh AS (
+ INSERT INTO storage_v2_search_document(profile_id,component_kind,node_id,search_text,
+  token_count,exact_identifiers,materialization_sha256,exact_identifiers_derived)
+ SELECT 'cache-negative-fixture',component_kind,node_id,search_text,token_count,
+  exact_identifiers,materialization_sha256,exact_identifiers_derived
+ FROM storage_v2_search_document WHERE id={document} RETURNING id
+)
+INSERT INTO storage_v2_byte_posting_block
+ SELECT fresh.id,b.block_order,array_fill('corrupt-cache'::TEXT,ARRAY[cardinality(b.cached_terms)]),
+  b.text_byte_starts,b.text_byte_lengths,b.term_frequencies,b.fingerprints
+ FROM fresh CROSS JOIN storage_v2_byte_posting_block b WHERE b.document_id={document};
+"""), "term cache differs")
         self.assertEqual(self.sql(self.admin(
             f"SELECT storage_v2_document_has_exact_identifier({document},'key_42')")), "t")
         self.assertEqual(self.sql(self.admin(
@@ -165,7 +194,7 @@ ROLLBACK;""")
                  "FALSE" if column == "fts_simple_derived" else "ARRAY[1]")
                 + f" WHERE id={document}", "immutable")
         self.assert_sql_fails(f"INSERT INTO storage_v2_byte_posting_block "
-            f"SELECT document_id,block_order+100,text_byte_starts,text_byte_lengths,term_frequencies,fingerprints "
+            f"SELECT document_id,block_order+100,cached_terms,text_byte_starts,text_byte_lengths,term_frequencies,fingerprints "
             f"FROM storage_v2_byte_posting_block WHERE document_id={document}", "sealed")
 
     def test_document_query_pruning_preserves_complex_and_negative_queries(self):
