@@ -15,6 +15,7 @@ BATCHED = MIGRATION.parent / '143_storage_v2_batch_reader_metadata_scope.sql'
 ARRAY_WORK = MIGRATION.parent / '144_storage_v2_bound_compact_array_work.sql'
 METADATA = MIGRATION.parent / '145_storage_v2_reuse_generation_reader_metadata.sql'
 ADAPTIVE = MIGRATION.parent / '146_storage_v2_adaptive_sparse_reader_scopes.sql'
+DECODED = MIGRATION.parent / '147_storage_v2_decode_compact_blocks_once.sql'
 FULL = 'storage_v2_authorized_lexical_candidates(bigint[],bigint[],text)'
 FIRST = 'storage_v2_authorized_lexical_first_candidates(bigint[],bigint[],text)'
 RANKS = ('storage_v2_source_segment_rank_candidates(bigint[],text)',
@@ -416,4 +417,47 @@ class FirstLexicalCandidateTests(unittest.TestCase):
                                      ['t']*len(large_checks))
             finally:
                 self.sql(posting+';')
+        # Large dictionaries force real TOAST storage; duplicate and unsorted
+        # terms must retain every position and frequency through decoding.
+        self.sql(f"""INSERT INTO storage_v2_compact_posting_block
+            (document_id,block_order,terms,term_frequencies)
+            SELECT {document},1000000001,
+                ARRAY['alpha','日本語','alpha'] || ARRAY(
+                    SELECT 'large-'||n||'-'||repeat(md5(n::TEXT),128)
+                      FROM generate_series(1,253) n ORDER BY n DESC),
+                ARRAY[13,17,19]::BIGINT[] || ARRAY(
+                    SELECT n::BIGINT FROM generate_series(1,253) n ORDER BY n DESC)""")
+        self.assertEqual(self.sql(f"""SELECT octet_length(terms::TEXT)>100000
+            AND pg_column_size(terms)<octet_length(terms::TEXT)
+            FROM storage_v2_compact_posting_block
+            WHERE document_id={document} AND block_order=1000000001"""), 't')
+        decoded_body = DECODED.read_text().replace('BEGIN;', '', 1).rsplit('COMMIT;', 1)[0]
+        current = self.sql(f"SELECT pg_get_functiondef('{posting_signature}'::REGPROCEDURE)")
+        self.assert_sql_fails('BEGIN;'+current.replace(
+            'AS $function$', 'AS $function$\n/* fixture drift */', 1)+';'+decoded_body+'ROLLBACK;',
+            'bounded compact decoder definition differs')
+        self.assert_sql_fails('BEGIN;'+f'GRANT EXECUTE ON FUNCTION {posting_signature} TO PUBLIC;'
+            +decoded_body+'ROLLBACK;', 'bounded compact decoder authority differs')
+        for drift in (
+            'ALTER TABLE storage_v2_compact_posting_block ALTER COLUMN terms DROP NOT NULL;',
+            'ALTER TABLE storage_v2_compact_posting_block DROP CONSTRAINT storage_v2_compact_posting_block_check;',
+            'ALTER TABLE storage_v2_compact_posting_block DROP CONSTRAINT storage_v2_compact_posting_block_terms_check;',
+        ):
+            self.assert_sql_fails('BEGIN;'+drift+decoded_body+'ROLLBACK;',
+                                  'bounded compact decoder bounds constraints differ')
+        decoded_before = envelopes()
+        self.file(DECODED)
+        self.assertEqual(decoded_before, envelopes())
+        decoded_posting = self.sql(f"SELECT pg_get_functiondef('{posting_signature}'::REGPROCEDURE)")
+        long_term = "ARRAY['large-253-'||repeat(md5('253'),128),'alpha','日本語']::TEXT[]"
+        decoded_checks = large_checks + [check.replace("ARRAY['alpha','日本語']::TEXT[]",long_term)
+            for check in large_checks[:5]]
+        for threshold in ('OFFSET 0', 'OFFSET 1000000000'):
+            try:
+                self.sql(decoded_posting.replace('OFFSET 32',threshold)+';')
+                for user in (self.schema.ADMIN_ID,self.schema.WRITER_ID,self.schema.OTHER_ID):
+                    self.assertEqual(self.sql(self.actor(user,'\n'.join(decoded_checks))).splitlines(),
+                                     ['t']*len(decoded_checks))
+            finally:
+                self.sql(decoded_posting+';')
         print(f'{len(before)} full envelopes; {comparisons} independent first-match and {comparisons*2} rank comparisons; fanout {full}->{first}', flush=True)
