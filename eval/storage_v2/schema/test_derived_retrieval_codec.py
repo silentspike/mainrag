@@ -345,6 +345,29 @@ WITH leaves AS MATERIALIZED (
         self.assertEqual(self.sql(f"SELECT bool_and(segment_masks IS NOT NULL "
             f"AND cardinality(segment_masks)=cardinality(segment_orders)) "
             f"FROM storage_v2_derived_lexical_block WHERE occurrence_id={occurrence}"), "t")
+        self.assertEqual(self.sql(f"SELECT bool_and(first_terms IS NOT NULL "
+            f"AND cardinality(first_terms)<=16 "
+            f"AND cardinality(first_terms)=cardinality(first_term_ordinals)) "
+            f"FROM storage_v2_derived_lexical_block WHERE occurrence_id={occurrence}"), "t")
+        self.assertEqual(self.sql(f"SELECT max(octet_length(term))<=8 FROM "
+            f"storage_v2_derived_lexical_block block CROSS JOIN LATERAL unnest(block.first_terms) term "
+            f"WHERE occurrence_id={occurrence}"), "t")
+        self.assert_sql_fails(f"""BEGIN;
+ALTER TABLE storage_v2_derived_lexical_block DISABLE TRIGGER storage_v2_derived_lexical_immutable;
+UPDATE storage_v2_derived_lexical_block SET first_terms=array_fill('badcache'::TEXT,ARRAY[cardinality(first_terms)])
+ WHERE occurrence_id={occurrence};
+ALTER TABLE storage_v2_derived_lexical_block ENABLE TRIGGER storage_v2_derived_lexical_immutable;
+{self.admin(f"SELECT storage_v2_verify_derived_lexical_masks({occurrence})")};
+ROLLBACK;""", "first term cache differs")
+        # An otherwise valid cache with a wrong first ordinal cannot replay.
+        self.assert_sql_fails(f"""BEGIN;
+ALTER TABLE storage_v2_derived_lexical_block DISABLE TRIGGER storage_v2_derived_lexical_immutable;
+UPDATE storage_v2_derived_lexical_block SET first_term_ordinals[1]=
+ CASE WHEN first_term_ordinals[1]=1 THEN 2 ELSE 1 END
+ WHERE occurrence_id={occurrence} AND cardinality(segment_orders)>1;
+ALTER TABLE storage_v2_derived_lexical_block ENABLE TRIGGER storage_v2_derived_lexical_immutable;
+{self.admin(call)};
+ROLLBACK;""", "lexical segment identity collision")
         # Bit collisions can only retain exact work, including signed hashes.
         self.assertEqual(self.sql(self.admin("SELECT "
             "storage_v2_lexical_segment_mask(ARRAY[0])="
@@ -404,7 +427,7 @@ SELECT count(*) FROM unnest({array(texts, 'TEXT')},{array(prefixes, 'TEXT')},
         # Old derived rows with no segment cache keep the same first-match path.
         self.assertEqual(self.sql(f"""BEGIN;
 ALTER TABLE storage_v2_derived_lexical_block DISABLE TRIGGER storage_v2_derived_lexical_immutable;
-UPDATE storage_v2_derived_lexical_block SET segment_masks=NULL WHERE occurrence_id={occurrence};
+UPDATE storage_v2_derived_lexical_block SET segment_masks=NULL,first_terms=NULL,first_term_ordinals=NULL WHERE occurrence_id={occurrence};
 ALTER TABLE storage_v2_derived_lexical_block ENABLE TRIGGER storage_v2_derived_lexical_immutable;
 SET LOCAL ROLE mainrag_v2_lexical_rank_owner;SET LOCAL app.user_id='{self.schema.ADMIN_ID}';
 SELECT (SELECT min(segment_order)=110 FROM storage_v2_authorized_lexical_first_candidates(
@@ -470,6 +493,13 @@ UPDATE storage_v2_derived_lexical_block SET segment_masks=array_fill(B'0'::BIT(1
 ALTER TABLE storage_v2_derived_lexical_block ENABLE TRIGGER storage_v2_derived_lexical_immutable;
 {self.admin(f"SELECT storage_v2_verify_generation((SELECT generation_id FROM storage_v2_ingest_run WHERE id={run}),repeat('f',64))")};
 ROLLBACK;""", "segment mask differs")
+        self.assert_sql_fails(f"""BEGIN;
+ALTER TABLE storage_v2_derived_lexical_block DISABLE TRIGGER storage_v2_derived_lexical_immutable;
+UPDATE storage_v2_derived_lexical_block SET first_terms=array_fill('badcache'::TEXT,ARRAY[cardinality(first_terms)])
+ WHERE occurrence_id={occurrence};
+ALTER TABLE storage_v2_derived_lexical_block ENABLE TRIGGER storage_v2_derived_lexical_immutable;
+{self.admin(f"SELECT storage_v2_verify_generation((SELECT generation_id FROM storage_v2_ingest_run WHERE id={run}),repeat('f',64))")};
+ROLLBACK;""", "first term cache differs")
         self.assertEqual(self.sql(f"SELECT status FROM source_generation WHERE id="
             f"(SELECT generation_id FROM storage_v2_ingest_run WHERE id={run})"), "sealed")
         self.assert_sql_fails(self.actor(self.schema.OTHER_ID,
