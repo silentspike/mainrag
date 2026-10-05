@@ -1645,7 +1645,10 @@ Fingerprints never establish an exact match.
 Weighted lexical vectors are reconstructed with their original A/B/C weights.
 First-candidate reads use authorized occurrence and artifact scope, load
 an expanding canonical prefix per occurrence, and stop at the earliest exact
-matching segment. Prefixes preserve UTF-8 byte offsets, grow for later segments,
+matching segment. Matching occurrence identities and initial canonical prefixes
+are read in a batch; sources without derived matches open no canonical documents.
+The scalar block lookup reuses a generic plan while array scope retains a custom
+plan. Prefixes preserve UTF-8 byte offsets, grow for later segments,
 and avoid converting a complete large body for an early match. The bounded
 helper disables JIT locally. A private block reader uses the existing trusted
 rank owner's SELECT policy behind an explicit source and full occurrence
@@ -1656,7 +1659,11 @@ reconstruct every candidate block to
 compute that minimum.
 Precise ranking and full integrity verification retain complete vector semantics.
 Plain conjunctions can prune blocks by fingerprints; OR, phrases and negation
-keep exact vector evaluation. Full-document vector derivation retains the
+keep exact vector evaluation. Context and type vectors are reused while their
+values stay equal. A positive position-free conjunction already matched by
+those vectors can skip body tokenization; all other predicates retain the
+original complete A/B/C concatenation order. Byte bounds are checked first.
+Full-document vector derivation retains the
 previous oversized-vector fallback and existing cached values.
 
 Candidate verification selects generation-backed native query seeds when a

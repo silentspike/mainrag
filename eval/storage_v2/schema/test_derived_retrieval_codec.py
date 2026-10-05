@@ -348,6 +348,7 @@ SELECT count(*) FROM unnest({array(texts, 'TEXT')},{array(prefixes, 'TEXT')},
 """)), "0")
         for query in ("alpha", "alpha absent", "alpha OR absent", '"alpha βeta"',
                       "alpha -absent", "-alpha", "key_42", "public", "text",
+                      "public -alpha", '"public alpha"', "public OR absent", "public absent",
                       "latesecondblock", "lateutf8prefix", "lateutf8prefix OR absent",
                       *self.collision):
             expected = self.sql(f"SELECT count(*) FROM unnest({array(texts, 'TEXT')}) text "
@@ -385,6 +386,17 @@ SELECT count(*) FROM unnest({array(texts, 'TEXT')},{array(prefixes, 'TEXT')},
         self.assertEqual(self.sql("SET ROLE mainrag_v2_frontier_owner;SET app.user_id="
             + self.quote(self.schema.ADMIN_ID) + ";SELECT count(*) FROM "
             + private_blocks.replace(f",{artifact},", f",{artifact + 1000000},")), "0")
+        private_occurrences = (
+            f"storage_v2_derived_lexical_candidate_occurrences("
+            f"ARRAY[{occurrence},{occurrence},NULL,{occurrence + 1000000}]::BIGINT[],"
+            f"ARRAY[{source},{source},NULL]::BIGINT[],NULL::INTEGER[])")
+        self.assert_sql_fails(self.admin(f"SELECT count(*) FROM {private_occurrences}"), "permission denied")
+        for actor, expected in ((self.schema.ADMIN_ID, "1"), (self.schema.OTHER_ID, "0")):
+            self.assertEqual(self.sql("SET ROLE mainrag_v2_frontier_owner;SET app.user_id="
+                + self.quote(actor) + f";SELECT count(*) FROM {private_occurrences}"), expected)
+        self.assertEqual(self.sql("SET ROLE mainrag_v2_frontier_owner;SET app.user_id="
+            + self.quote(self.schema.ADMIN_ID) + f";SELECT occurrence_id||':'||source_id||':'||artifact_version_id "
+            f"FROM {private_occurrences}"), f"{occurrence}:{source}:{artifact}")
         # Reencode one owned fixture block transactionally to exercise a
         # retained cached block beside a derived block without changing bytes.
         self.assertEqual(self.sql(f"""BEGIN;

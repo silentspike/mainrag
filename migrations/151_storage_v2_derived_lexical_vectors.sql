@@ -105,7 +105,7 @@ CREATE FUNCTION storage_v2_derived_lexical_candidate_blocks(
 ) RETURNS SETOF storage_v2_derived_lexical_block
 LANGUAGE sql STABLE SECURITY DEFINER
 SET search_path=pg_catalog,public SET row_security=on
-SET plan_cache_mode=force_custom_plan SET jit=off AS $$
+SET plan_cache_mode=force_generic_plan SET jit=off AS $$
  SELECT stored.* FROM public.storage_v2_derived_lexical_block stored
  WHERE (SELECT storage_v2_can_access_source(p_source_id,'read'))
    AND stored.occurrence_id=p_occurrence_id AND stored.source_id=p_source_id
@@ -118,6 +118,32 @@ ALTER FUNCTION storage_v2_derived_lexical_candidate_blocks(BIGINT,BIGINT,BIGINT,
 REVOKE ALL ON FUNCTION storage_v2_derived_lexical_candidate_blocks(BIGINT,BIGINT,BIGINT,INTEGER[])
     FROM PUBLIC,mainrag;
 GRANT EXECUTE ON FUNCTION storage_v2_derived_lexical_candidate_blocks(BIGINT,BIGINT,BIGINT,INTEGER[])
+    TO mainrag_v2_frontier_owner;
+
+-- Resolve the authorized occurrence set before opening canonical documents.
+-- Sparse/dense occurrence operands remain deferred; repeated and null IDs do
+-- not multiply identities. Sources without derived matches never enter a loop.
+CREATE FUNCTION storage_v2_derived_lexical_candidate_occurrences(
+    p_occurrence_ids BIGINT[],p_source_ids BIGINT[],p_fingerprints INTEGER[]
+) RETURNS TABLE(occurrence_id BIGINT,source_id BIGINT,artifact_version_id BIGINT)
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path=pg_catalog,public SET row_security=on
+SET plan_cache_mode=force_custom_plan SET jit=off AS $$
+ WITH authorized_sources AS MATERIALIZED (
+  SELECT DISTINCT id FROM unnest(p_source_ids) input(id)
+   WHERE storage_v2_can_access_source(id,'read')
+ )
+ SELECT DISTINCT stored.occurrence_id,stored.source_id,stored.artifact_version_id
+ FROM public.storage_v2_derived_lexical_block stored
+ JOIN authorized_sources source ON source.id=stored.source_id
+ WHERE stored.occurrence_id=ANY((SELECT p_occurrence_ids OFFSET 0)::BIGINT[])
+   AND (p_fingerprints IS NULL OR stored.fingerprints @> p_fingerprints)
+$$;
+ALTER FUNCTION storage_v2_derived_lexical_candidate_occurrences(BIGINT[],BIGINT[],INTEGER[])
+    OWNER TO mainrag_v2_lexical_rank_owner;
+REVOKE ALL ON FUNCTION storage_v2_derived_lexical_candidate_occurrences(BIGINT[],BIGINT[],INTEGER[])
+    FROM PUBLIC,mainrag;
+GRANT EXECUTE ON FUNCTION storage_v2_derived_lexical_candidate_occurrences(BIGINT[],BIGINT[],INTEGER[])
     TO mainrag_v2_frontier_owner;
 
 -- First-candidate ranking needs the earliest matching segment, not every
@@ -135,6 +161,8 @@ DECLARE sources BIGINT[]; requested RECORD; block RECORD; item RECORD;
         v_fingerprints INTEGER[];
         canonical_document_id BIGINT; canonical_document_bytes BIGINT;
         prefix_characters BIGINT; required_bytes BIGINT;
+        cached_prefix TEXT; cached_kind TEXT; metadata_cached BOOLEAN:=FALSE;
+        prefix_vector TSVECTOR; kind_vector TSVECTOR; matched BOOLEAN;
 BEGIN
  IF cardinality(p_occurrence_ids)=0 OR cardinality(p_source_ids)=0 THEN RETURN; END IF;
  SELECT array_agg(source.id) INTO sources FROM public.sources source
@@ -144,47 +172,54 @@ BEGIN
     AND lower(p_query) !~ '(^|[[:space:]])or([[:space:]]|$)' THEN
   v_fingerprints:=storage_v2_posting_fingerprints(tsvector_to_array(to_tsvector('simple',p_query)));
  END IF;
- -- Retained cached-only sources must not pay one lookup per occurrence for a
- -- representation they do not contain. The same predicate also prunes absent
- -- plain-query candidates without opening any canonical document.
- IF NOT EXISTS(SELECT 1 FROM public.storage_v2_derived_lexical_block stored
-   WHERE stored.source_id=ANY(sources)
-     AND stored.occurrence_id=ANY((SELECT p_occurrence_ids OFFSET 0)::BIGINT[])
-     AND (v_fingerprints IS NULL OR stored.fingerprints @> v_fingerprints)) THEN
-  RETURN;
- END IF;
+ -- Resolve all exact root bindings and initial prefixes in one query. The
+ -- private candidate set has already pruned inaccessible and absent blocks.
  FOR requested IN SELECT occurrence.id,occurrence.source_id,occurrence.artifact_version_id,
-                         occurrence.view_id,artifact.content_root_node_id
-  FROM public.occurrence occurrence JOIN public.artifact_version artifact
+                         document.id AS document_id,
+                         octet_length(document.search_text) AS document_bytes,
+                         convert_to(substring(document.search_text FROM 1
+                           FOR least(8192,octet_length(document.search_text))::INTEGER),'UTF8') AS initial_bytes
+  FROM public.storage_v2_derived_lexical_candidate_occurrences(
+      p_occurrence_ids,sources,v_fingerprints) candidate
+  JOIN public.occurrence occurrence ON occurrence.id=candidate.occurrence_id
+    AND occurrence.source_id=candidate.source_id
+    AND occurrence.artifact_version_id=candidate.artifact_version_id
+  JOIN public.artifact_version artifact
     ON artifact.id=occurrence.artifact_version_id
-  WHERE occurrence.id=ANY((SELECT p_occurrence_ids OFFSET 0)::BIGINT[])
-    AND occurrence.source_id=ANY(sources)
+  LEFT JOIN public.storage_v2_search_view_document binding
+    ON binding.view_id=occurrence.view_id AND binding.ordinal=0
+  LEFT JOIN public.storage_v2_search_document document ON document.id=binding.document_id
+    AND document.component_kind='node' AND document.node_id=artifact.content_root_node_id
  LOOP
-  bytes:=NULL;canonical_document_id:=NULL;prefix_characters:=0;
+  IF requested.document_id IS NULL THEN
+   RAISE EXCEPTION 'authorized canonical lexical document required' USING ERRCODE='42501';
+  END IF;
+  bytes:=requested.initial_bytes;canonical_document_id:=requested.document_id;
+  canonical_document_bytes:=requested.document_bytes;prefix_characters:=8192;
   <<blocks>>
   FOR block IN SELECT stored.* FROM public.storage_v2_derived_lexical_candidate_blocks(
       requested.id,requested.source_id,requested.artifact_version_id,v_fingerprints) stored
    ORDER BY stored.block_order
   LOOP
-   IF canonical_document_id IS NULL THEN
-    -- Resolve and authorize the occurrence's exact root binding once. Prefix
-    -- extensions then use that document's primary key, retaining document RLS.
-    SELECT document.id,octet_length(document.search_text)
-      INTO canonical_document_id,canonical_document_bytes
-     FROM public.storage_v2_search_view_document binding
-     JOIN public.storage_v2_search_document document ON document.id=binding.document_id
-      AND document.component_kind='node' AND document.node_id=requested.content_root_node_id
-     WHERE binding.view_id=requested.view_id AND binding.ordinal=0;
-    IF NOT FOUND THEN
-     RAISE EXCEPTION 'authorized canonical lexical document required' USING ERRCODE='42501';
-    END IF;
-   END IF;
    FOR item IN SELECT * FROM unnest(block.segment_orders,block.text_byte_starts,
       block.text_byte_lengths,block.context_prefixes,block.chunk_types)
       segment(segment_order,start,length,prefix,kind) ORDER BY segment.segment_order
    LOOP
     required_bytes:=item.start+item.length-1;
-    IF bytes IS NULL OR octet_length(bytes)<required_bytes THEN
+    IF required_bytes>canonical_document_bytes THEN
+     RAISE EXCEPTION 'canonical lexical byte range exceeds document';
+    END IF;
+    IF NOT metadata_cached OR (cached_prefix,cached_kind) IS DISTINCT FROM (item.prefix,item.kind) THEN
+     prefix_vector:=setweight(to_tsvector('simple',item.prefix),'B');
+     kind_vector:=setweight(to_tsvector('simple',item.kind),'C');
+     cached_prefix:=item.prefix;cached_kind:=item.kind;metadata_cached:=TRUE;
+    END IF;
+    -- Adding body lexemes cannot invalidate a positive, position-free
+    -- conjunction already matched by context/type. Complex predicates still
+    -- evaluate the complete vector, with the original concatenation order.
+    matched:=v_fingerprints IS NOT NULL AND ((prefix_vector||kind_vector)@@query);
+    IF matched IS DISTINCT FROM TRUE THEN
+     IF bytes IS NULL OR octet_length(bytes)<required_bytes THEN
      -- A UTF-8 byte end is also a safe upper bound on the character prefix.
      -- PostgreSQL substring can fetch/decompress a bounded TOAST slice. Grow
      -- geometrically for later matches while retaining the original byte offsets.
@@ -199,12 +234,13 @@ BEGIN
      IF octet_length(bytes)<required_bytes THEN
       RAISE EXCEPTION 'canonical lexical byte range exceeds document';
      END IF;
-    END IF;
-    vector:=setweight(to_tsvector('simple',convert_from(
+     END IF;
+     vector:=setweight(to_tsvector('simple',convert_from(
         substring(bytes FROM item.start FOR item.length),'UTF8') COLLATE "default"),'A')
-      ||setweight(to_tsvector('simple',item.prefix),'B')
-      ||setweight(to_tsvector('simple',item.kind),'C');
-    IF vector@@query THEN
+       ||prefix_vector||kind_vector;
+     matched:=vector@@query;
+    END IF;
+    IF matched THEN
      occurrence_id:=requested.id;source_id:=requested.source_id;
      artifact_version_id:=requested.artifact_version_id;
      segment_order:=item.segment_order;lexical_score:=0.0;
