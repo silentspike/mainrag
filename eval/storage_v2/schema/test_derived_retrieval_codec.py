@@ -194,6 +194,13 @@ ROLLBACK;"""), "t")
             self.assertEqual(self.sql(f"SELECT coalesce(bool_or({value}=ANY(cached_terms)),FALSE) "
                                       f"FROM storage_v2_byte_posting_block WHERE document_id={cutoff_document}"),
                              "t" if len(term.encode()) <= 16 else "f")
+        for size in (1024, 1025):
+            function = (f"storage_v2_scoped_query_posting(ARRAY(SELECT CASE WHEN n%3=0 "
+                f"THEN NULL ELSE {cutoff_document}::BIGINT END FROM generate_series(1,{size}) n),"
+                "ARRAY['alpha','alpha',NULL])")
+            self.assertEqual(self.sql(self.admin(f"SELECT term_frequency FROM {function}")), "45000")
+        self.assertEqual(self.sql(self.admin("SELECT count(*) FROM storage_v2_scoped_query_posting("
+            "ARRAY[NULL,NULL]::BIGINT[],ARRAY['alpha'])")), "0")
         self.assert_sql_fails("BEGIN;" + self.admin(f"""
 WITH fresh AS (
  INSERT INTO storage_v2_search_document(profile_id,component_kind,node_id,search_text,
@@ -335,6 +342,23 @@ WITH leaves AS MATERIALIZED (
                                  f"WHERE occurrence_id={occurrence}"), "3")
         self.assertEqual(self.sql(f"SELECT count(*) FROM storage_v2_compact_lexical_block "
                                  f"WHERE occurrence_id={occurrence}"), "0")
+        self.assertEqual(self.sql(f"SELECT bool_and(segment_masks IS NOT NULL "
+            f"AND cardinality(segment_masks)=cardinality(segment_orders)) "
+            f"FROM storage_v2_derived_lexical_block WHERE occurrence_id={occurrence}"), "t")
+        # Bit collisions can only retain exact work, including signed hashes.
+        self.assertEqual(self.sql(self.admin("SELECT "
+            "storage_v2_lexical_segment_mask(ARRAY[0])="
+            "storage_v2_lexical_segment_mask(ARRAY[16384]) AND "
+            "bit_count(storage_v2_lexical_segment_mask(ARRAY[-2147483648,2147483647]))>0")), "t")
+        self.assert_sql_fails(f"""BEGIN;
+ALTER TABLE storage_v2_derived_lexical_block DISABLE TRIGGER storage_v2_derived_lexical_immutable;
+UPDATE storage_v2_derived_lexical_block SET segment_masks=array_fill(B'0'::BIT(128),
+ ARRAY[cardinality(segment_orders)]) WHERE occurrence_id={occurrence};
+ALTER TABLE storage_v2_derived_lexical_block ENABLE TRIGGER storage_v2_derived_lexical_immutable;
+{self.admin(f"SELECT storage_v2_verify_derived_lexical_masks({occurrence})")};
+ROLLBACK;
+""", "segment mask differs")
+
         self.assertEqual(self.sql(self.admin(f"""
 SELECT count(*) FROM unnest({array(texts, 'TEXT')},{array(prefixes, 'TEXT')},
  {array(kinds, 'TEXT')}) WITH ORDINALITY expected(text,prefix,kind,n)
@@ -377,6 +401,17 @@ SELECT count(*) FROM unnest({array(texts, 'TEXT')},{array(prefixes, 'TEXT')},
                     + f"; SELECT segment_order FROM {candidate}"), first)
                 self.assertEqual(self.sql(prefix + self.quote(self.schema.OTHER_ID)
                     + f"; SELECT count(*) FROM {candidate}"), "0")
+        # Old derived rows with no segment cache keep the same first-match path.
+        self.assertEqual(self.sql(f"""BEGIN;
+ALTER TABLE storage_v2_derived_lexical_block DISABLE TRIGGER storage_v2_derived_lexical_immutable;
+UPDATE storage_v2_derived_lexical_block SET segment_masks=NULL WHERE occurrence_id={occurrence};
+ALTER TABLE storage_v2_derived_lexical_block ENABLE TRIGGER storage_v2_derived_lexical_immutable;
+SET LOCAL ROLE mainrag_v2_lexical_rank_owner;SET LOCAL app.user_id='{self.schema.ADMIN_ID}';
+SELECT (SELECT min(segment_order)=110 FROM storage_v2_authorized_lexical_first_candidates(
+ ARRAY[{occurrence}]::BIGINT[],ARRAY[{source}]::BIGINT[],'latesecondblock'))
+ AND (SELECT min(segment_order)=128 FROM storage_v2_authorized_lexical_first_candidates(
+ ARRAY[{occurrence}]::BIGINT[],ARRAY[{source}]::BIGINT[],'lateutf8prefix'));
+ROLLBACK;"""), "t")
         private_blocks = (f"storage_v2_derived_lexical_candidate_blocks({occurrence},{source},"
                           f"{artifact},NULL::INTEGER[])")
         self.assert_sql_fails(self.admin(f"SELECT count(*) FROM {private_blocks}"), "permission denied")
@@ -428,6 +463,17 @@ ROLLBACK;"""), "t")
         self.assert_sql_fails(f"UPDATE storage_v2_derived_lexical_block SET fingerprints=ARRAY[1] "
                               f"WHERE occurrence_id={occurrence}", "immutable")
         self.commit(run, 1)
+        self.assert_sql_fails(f"""BEGIN;
+ALTER TABLE storage_v2_derived_lexical_block DISABLE TRIGGER storage_v2_derived_lexical_immutable;
+UPDATE storage_v2_derived_lexical_block SET segment_masks=array_fill(B'0'::BIT(128),
+ ARRAY[cardinality(segment_orders)]) WHERE occurrence_id={occurrence};
+ALTER TABLE storage_v2_derived_lexical_block ENABLE TRIGGER storage_v2_derived_lexical_immutable;
+{self.admin(f"SELECT storage_v2_verify_generation((SELECT generation_id FROM storage_v2_ingest_run WHERE id={run}),repeat('f',64))")};
+ROLLBACK;""", "segment mask differs")
+        self.assertEqual(self.sql(f"SELECT status FROM source_generation WHERE id="
+            f"(SELECT generation_id FROM storage_v2_ingest_run WHERE id={run})"), "sealed")
+        self.assert_sql_fails(self.actor(self.schema.OTHER_ID,
+            f"SELECT storage_v2_verify_derived_lexical_masks({occurrence})"), "write authority")
         self.sql(self.admin("SELECT storage_v2_verify_generation("
             f"(SELECT generation_id FROM storage_v2_ingest_run WHERE id={run}),repeat('f',64))"))
         envelope = self.exact_search({"type": "term", "value": "alpha"}, source_id=source)

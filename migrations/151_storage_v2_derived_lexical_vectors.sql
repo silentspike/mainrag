@@ -7,6 +7,8 @@ DO $guard$
 DECLARE expected RECORD;
 BEGIN
  FOR expected IN SELECT * FROM (VALUES
+  ('storage_v2_verify_generation(bigint,text)','fbb163aeb0f33863ba2a652bf11ad44cc38cc849d6958265ff47f1e82a82f9ff','mainrag'),
+  ('storage_v2_requalify_generation(bigint,text)','0480858def9e8a96f6f17418ef6bfed512cfa09ea93203d89853dfbb62c8004a','mainrag'),
   ('storage_v2_source_segment_presence(bigint[])','7947e57eecb8ac8afbf147a38331a506ef014aaa1c2794f1a76c73c66312a843','mainrag_v2_presence_owner'),
   ('storage_v2_source_legacy_segment_matches(bigint,text)','7d7268a94880d36e15d932351d6fe5e09cbd66745b7003aac7b7fd5accb38e74','mainrag_v2_frontier_owner'),
   ('storage_v2_put_lexical_segments_located(bigint,bigint,bigint[],text[],text[],text[],bigint[],bigint[])','8b850ab6ae0227bbde08d6b0a8c324d273dbc8de7b29099de18d1d87c73c5832','mainrag_v2_frontier_owner'),
@@ -30,6 +32,7 @@ ALTER TABLE storage_v2_derived_lexical_block DROP COLUMN fts_vectors;
 ALTER TABLE storage_v2_derived_lexical_block
     ADD COLUMN text_byte_starts INTEGER[] NOT NULL,
     ADD COLUMN text_byte_lengths INTEGER[] NOT NULL,
+    ADD COLUMN segment_masks BIT(128)[],
     ADD PRIMARY KEY(occurrence_id,block_order),
     ADD FOREIGN KEY(occurrence_id,source_id,artifact_version_id)
         REFERENCES occurrence(id,source_id,artifact_version_id) ON DELETE RESTRICT,
@@ -38,7 +41,10 @@ ALTER TABLE storage_v2_derived_lexical_block
         AND array_position(text_byte_starts,NULL) IS NULL AND 0<ALL(text_byte_starts)),
     ADD CHECK(array_ndims(text_byte_lengths)=1 AND array_lower(text_byte_lengths,1)=1
         AND cardinality(text_byte_lengths)=cardinality(segment_orders)
-        AND array_position(text_byte_lengths,NULL) IS NULL AND 0<ALL(text_byte_lengths));
+        AND array_position(text_byte_lengths,NULL) IS NULL AND 0<ALL(text_byte_lengths)),
+    ADD CHECK(segment_masks IS NULL OR (array_ndims(segment_masks)=1
+        AND array_lower(segment_masks,1)=1 AND array_position(segment_masks,NULL) IS NULL
+        AND cardinality(segment_masks)=cardinality(segment_orders)));
 ALTER TABLE storage_v2_derived_lexical_block OWNER TO mainrag_v2_frontier_owner;
 ALTER TABLE storage_v2_derived_lexical_block ENABLE ROW LEVEL SECURITY;
 ALTER TABLE storage_v2_derived_lexical_block FORCE ROW LEVEL SECURITY;
@@ -59,6 +65,24 @@ GRANT SELECT ON storage_v2_derived_lexical_block
 CREATE TRIGGER storage_v2_derived_lexical_immutable
     BEFORE UPDATE OR DELETE ON storage_v2_derived_lexical_block FOR EACH ROW
     EXECUTE FUNCTION storage_v2_reject_retrieval_mutation();
+
+-- Two bits per complete lexical fingerprint form a bounded necessary test.
+-- Collisions only admit extra exact work. No mask ever establishes a match.
+CREATE FUNCTION storage_v2_lexical_segment_mask(p_fingerprints INTEGER[])
+RETURNS BIT(128) LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE
+SET search_path=pg_catalog,public AS $$
+DECLARE mask BIT(128):=B'0'::BIT(128); fingerprint INTEGER;
+BEGIN
+ FOREACH fingerprint IN ARRAY p_fingerprints LOOP
+  mask:=set_bit(set_bit(mask,(fingerprint::BIGINT&127)::INTEGER,1),
+                          ((fingerprint::BIGINT>>7)&127)::INTEGER,1);
+ END LOOP;
+ RETURN mask;
+END $$;
+ALTER FUNCTION storage_v2_lexical_segment_mask(INTEGER[]) OWNER TO mainrag_v2_frontier_owner;
+REVOKE ALL ON FUNCTION storage_v2_lexical_segment_mask(INTEGER[]) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION storage_v2_lexical_segment_mask(INTEGER[])
+    TO mainrag,mainrag_v2_lexical_rank_owner;
 
 CREATE FUNCTION storage_v2_derived_lexical_vectors(
     p_occurrence_id BIGINT,p_starts INTEGER[],p_lengths INTEGER[],
@@ -95,6 +119,45 @@ ALTER FUNCTION storage_v2_derived_lexical_vectors(BIGINT,INTEGER[],INTEGER[],TEX
 REVOKE ALL ON FUNCTION storage_v2_derived_lexical_vectors(BIGINT,INTEGER[],INTEGER[],TEXT[],TEXT[]) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION storage_v2_derived_lexical_vectors(BIGINT,INTEGER[],INTEGER[],TEXT[],TEXT[])
     TO mainrag,mainrag_v2_lexical_rank_owner,mainrag_v2_presence_owner;
+
+-- Validate physical pruning metadata at verification/requalification, before
+-- metadata publication. Search still reconstructs exact full vectors, without
+-- repeating an immutable cache validation for every ranked block.
+CREATE FUNCTION storage_v2_verify_derived_lexical_masks(p_occurrence_id BIGINT)
+RETURNS VOID LANGUAGE plpgsql STABLE STRICT SECURITY DEFINER
+SET search_path=pg_catalog,public SET row_security=on SET jit=off AS $$
+DECLARE source BIGINT; bytes BYTEA; block RECORD; expected BIT(128)[];
+BEGIN
+ SELECT occurrence.source_id INTO source FROM public.occurrence WHERE id=p_occurrence_id;
+ IF NOT FOUND OR storage_v2_can_access_source(source,'write') IS DISTINCT FROM TRUE THEN
+  RAISE EXCEPTION 'lexical mask verification requires source write authority' USING ERRCODE='42501';
+ END IF;
+ IF NOT EXISTS(SELECT 1 FROM public.storage_v2_derived_lexical_block stored
+       WHERE stored.occurrence_id=p_occurrence_id AND stored.segment_masks IS NOT NULL) THEN RETURN; END IF;
+ SELECT convert_to(document.search_text,'UTF8') INTO bytes FROM public.occurrence occurrence
+ JOIN public.artifact_version artifact ON artifact.id=occurrence.artifact_version_id
+ JOIN public.storage_v2_search_view_document binding ON binding.view_id=occurrence.view_id AND binding.ordinal=0
+ JOIN public.storage_v2_search_document document ON document.id=binding.document_id
+  AND document.component_kind='node' AND document.node_id=artifact.content_root_node_id
+ WHERE occurrence.id=p_occurrence_id;
+ IF NOT FOUND THEN
+  RAISE EXCEPTION 'authorized canonical lexical document required' USING ERRCODE='42501';
+ END IF;
+ FOR block IN SELECT * FROM public.storage_v2_derived_lexical_block stored
+   WHERE stored.occurrence_id=p_occurrence_id AND stored.segment_masks IS NOT NULL ORDER BY block_order LOOP
+  SELECT array_agg(storage_v2_lexical_segment_mask(storage_v2_posting_fingerprints(tsvector_to_array(
+       setweight(to_tsvector('simple',convert_from(substring(bytes FROM item.start FOR item.length),'UTF8') COLLATE "default"),'A')
+       ||setweight(to_tsvector('simple',item.prefix),'B')||setweight(to_tsvector('simple',item.kind),'C')))) ORDER BY item.ordinal)
+   INTO expected FROM unnest(block.text_byte_starts,block.text_byte_lengths,block.context_prefixes,block.chunk_types)
+       WITH ORDINALITY item(start,length,prefix,kind,ordinal);
+  IF block.segment_masks IS DISTINCT FROM expected THEN
+   RAISE EXCEPTION 'derived lexical segment mask differs from complete vector';
+  END IF;
+ END LOOP;
+END $$;
+ALTER FUNCTION storage_v2_verify_derived_lexical_masks(BIGINT) OWNER TO mainrag_v2_frontier_owner;
+REVOKE ALL ON FUNCTION storage_v2_verify_derived_lexical_masks(BIGINT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION storage_v2_verify_derived_lexical_masks(BIGINT) TO mainrag;
 
 -- The existing trusted rank owner has a SELECT-only block policy. Keep its
 -- access behind an explicit source and complete occurrence identity check,
@@ -158,7 +221,7 @@ SET search_path=pg_catalog,public SET row_security=on
 SET plan_cache_mode=force_custom_plan SET jit=off AS $$
 DECLARE sources BIGINT[]; requested RECORD; block RECORD; item RECORD;
         bytes BYTEA; vector TSVECTOR; query TSQUERY:=websearch_to_tsquery('simple',p_query);
-        v_fingerprints INTEGER[];
+        v_fingerprints INTEGER[]; query_mask BIT(128);
         canonical_document_id BIGINT; canonical_document_bytes BIGINT;
         prefix_characters BIGINT; required_bytes BIGINT;
         cached_prefix TEXT; cached_kind TEXT; metadata_cached BOOLEAN:=FALSE;
@@ -171,14 +234,13 @@ BEGIN
  IF p_query ~ '^[[:alnum:]_]+([[:space:]]+[[:alnum:]_]+)*$'
     AND lower(p_query) !~ '(^|[[:space:]])or([[:space:]]|$)' THEN
   v_fingerprints:=storage_v2_posting_fingerprints(tsvector_to_array(to_tsvector('simple',p_query)));
+  query_mask:=storage_v2_lexical_segment_mask(v_fingerprints);
  END IF;
- -- Resolve all exact root bindings and initial prefixes in one query. The
- -- private candidate set has already pruned inaccessible and absent blocks.
+ -- Resolve exact root bindings in one query. Canonical prefixes stay lazy:
+ -- masks and metadata-only matches can reject/accept without reading a body.
  FOR requested IN SELECT occurrence.id,occurrence.source_id,occurrence.artifact_version_id,
                          document.id AS document_id,
-                         octet_length(document.search_text) AS document_bytes,
-                         convert_to(substring(document.search_text FROM 1
-                           FOR least(8192,octet_length(document.search_text))::INTEGER),'UTF8') AS initial_bytes
+                         octet_length(document.search_text) AS document_bytes
   FROM public.storage_v2_derived_lexical_candidate_occurrences(
       p_occurrence_ids,sources,v_fingerprints) candidate
   JOIN public.occurrence occurrence ON occurrence.id=candidate.occurrence_id
@@ -194,21 +256,23 @@ BEGIN
   IF requested.document_id IS NULL THEN
    RAISE EXCEPTION 'authorized canonical lexical document required' USING ERRCODE='42501';
   END IF;
-  bytes:=requested.initial_bytes;canonical_document_id:=requested.document_id;
-  canonical_document_bytes:=requested.document_bytes;prefix_characters:=8192;
+  bytes:=NULL;canonical_document_id:=requested.document_id;
+  canonical_document_bytes:=requested.document_bytes;prefix_characters:=0;
   <<blocks>>
   FOR block IN SELECT stored.* FROM public.storage_v2_derived_lexical_candidate_blocks(
       requested.id,requested.source_id,requested.artifact_version_id,v_fingerprints) stored
    ORDER BY stored.block_order
   LOOP
    FOR item IN SELECT * FROM unnest(block.segment_orders,block.text_byte_starts,
-      block.text_byte_lengths,block.context_prefixes,block.chunk_types)
-      segment(segment_order,start,length,prefix,kind) ORDER BY segment.segment_order
+      block.text_byte_lengths,block.context_prefixes,block.chunk_types,block.segment_masks)
+      segment(segment_order,start,length,prefix,kind,mask) ORDER BY segment.segment_order
    LOOP
     required_bytes:=item.start+item.length-1;
     IF required_bytes>canonical_document_bytes THEN
      RAISE EXCEPTION 'canonical lexical byte range exceeds document';
     END IF;
+    CONTINUE WHEN query_mask IS NOT NULL AND item.mask IS NOT NULL
+                  AND (item.mask&query_mask)<>query_mask;
     IF NOT metadata_cached OR (cached_prefix,cached_kind) IS DISTINCT FROM (item.prefix,item.kind) THEN
      prefix_vector:=setweight(to_tsvector('simple',item.prefix),'B');
      kind_vector:=setweight(to_tsvector('simple',item.kind),'C');
@@ -363,6 +427,7 @@ DECLARE
     v_lengths INTEGER[];
     v_hashes BYTEA[];
     v_vectors TSVECTOR[];
+    v_masks BIT(128)[];
     v_existing_derived public.storage_v2_derived_lexical_block;
     v_byte_lengths INTEGER[];
     v_low INTEGER;
@@ -463,17 +528,20 @@ BEGIN
        AND NOT EXISTS(SELECT 1 FROM public.storage_v2_compact_lexical_block WHERE occurrence_id=p_occurrence_id) THEN
         SELECT array_agg(octet_length(value) ORDER BY ordinal) INTO v_byte_lengths
           FROM unnest(p_texts) WITH ORDINALITY item(value,ordinal);
+        SELECT array_agg(public.storage_v2_lexical_segment_mask(
+                   public.storage_v2_posting_fingerprints(tsvector_to_array(value))) ORDER BY ordinal)
+          INTO v_masks FROM unnest(v_vectors) WITH ORDINALITY vector(value,ordinal);
         FOR v_low IN SELECT generate_series(1,v_count,64) LOOP
             v_high:=LEAST(v_low+63,v_count);
             INSERT INTO public.storage_v2_derived_lexical_block(
                 occurrence_id,source_id,artifact_version_id,block_order,segment_orders,
                 text_starts,text_lengths,text_hashes,context_prefixes,chunk_types,
-                fingerprints,text_byte_starts,text_byte_lengths
+                fingerprints,text_byte_starts,text_byte_lengths,segment_masks
             ) VALUES(p_occurrence_id,v_source_id,p_artifact_version_id,p_segment_orders[v_low]/64,
                 p_segment_orders[v_low:v_high],v_starts[v_low:v_high],v_lengths[v_low:v_high],
                 v_hashes[v_low:v_high],p_context_prefixes[v_low:v_high],p_chunk_types[v_low:v_high],
                 public.storage_v2_lexical_block_fingerprints(v_vectors[v_low:v_high]),
-                p_byte_starts[v_low:v_high]::INTEGER[],v_byte_lengths[v_low:v_high])
+                p_byte_starts[v_low:v_high]::INTEGER[],v_byte_lengths[v_low:v_high],v_masks[v_low:v_high])
             ON CONFLICT(occurrence_id,block_order) DO NOTHING;
             SELECT * INTO STRICT v_existing_derived FROM public.storage_v2_derived_lexical_block
              WHERE occurrence_id=p_occurrence_id AND block_order=p_segment_orders[v_low]/64;
@@ -487,7 +555,9 @@ BEGIN
                 v_starts[v_low:v_high],v_lengths[v_low:v_high],v_hashes[v_low:v_high],
                 p_context_prefixes[v_low:v_high],p_chunk_types[v_low:v_high],
                 public.storage_v2_lexical_block_fingerprints(v_vectors[v_low:v_high]),
-                p_byte_starts[v_low:v_high]::INTEGER[],v_byte_lengths[v_low:v_high]) THEN
+                p_byte_starts[v_low:v_high]::INTEGER[],v_byte_lengths[v_low:v_high])
+               OR (v_existing_derived.segment_masks IS NOT NULL
+                   AND v_existing_derived.segment_masks IS DISTINCT FROM v_masks[v_low:v_high]) THEN
                 RAISE EXCEPTION 'lexical segment identity collision';
             END IF;
         END LOOP;
@@ -568,4 +638,23 @@ END
 $function$
 
 ;
+DO $mask_lifecycle$
+DECLARE signature TEXT; definition TEXT;
+        boundary TEXT:='    PERFORM public.storage_v2_materialize_reader_metadata(p_generation_id);';
+BEGIN
+ FOREACH signature IN ARRAY ARRAY['storage_v2_verify_generation(bigint,text)',
+                                   'storage_v2_requalify_generation(bigint,text)'] LOOP
+  definition:=pg_get_functiondef(signature::REGPROCEDURE);
+  IF (length(definition)-length(replace(definition,boundary,'')))/length(boundary)<>1 THEN
+   RAISE EXCEPTION 'derived lexical mask verification lifecycle boundary differs';
+  END IF;
+  EXECUTE replace(definition,boundary,
+   '    PERFORM public.storage_v2_verify_derived_lexical_masks(o.id) FROM public.occurrence o '
+   ||'WHERE o.source_id=v_generation.source_id AND EXISTS(SELECT 1 FROM public.generation_item_version membership '
+   ||'WHERE membership.source_id=v_generation.source_id AND membership.artifact_version_id=o.artifact_version_id '
+   ||'AND membership.valid_from_seq<=v_generation.generation_seq '
+   ||'AND (membership.valid_to_seq IS NULL OR membership.valid_to_seq>v_generation.generation_seq));'
+   ||E'\n'||boundary);
+ END LOOP;
+END $mask_lifecycle$;
 COMMIT;

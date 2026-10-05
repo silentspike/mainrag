@@ -204,6 +204,21 @@ ALTER FUNCTION storage_v2_byte_posting_matches(BIGINT[],TEXT[],BIGINT) OWNER TO 
 REVOKE ALL ON FUNCTION storage_v2_byte_posting_matches(BIGINT[],TEXT[],BIGINT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION storage_v2_byte_posting_matches(BIGINT[],TEXT[],BIGINT) TO mainrag;
 
+-- The sparse cached path must not invoke the byte reader once per document.
+-- Preserve its exact predecessor as a private invoker with the same authority.
+DO $cached_point$
+DECLARE definition TEXT;
+        signature TEXT:='CREATE OR REPLACE FUNCTION public.storage_v2_document_posting(';
+BEGIN
+ definition:=pg_get_functiondef('storage_v2_document_posting(bigint,text)'::REGPROCEDURE);
+ IF strpos(definition,signature)<>1 THEN RAISE EXCEPTION 'cached posting reader boundary differs'; END IF;
+ EXECUTE replace(definition,signature,
+    'CREATE FUNCTION public.storage_v2_cached_document_posting(');
+END $cached_point$;
+ALTER FUNCTION storage_v2_cached_document_posting(BIGINT,TEXT) OWNER TO mainrag;
+REVOKE ALL ON FUNCTION storage_v2_cached_document_posting(BIGINT,TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION storage_v2_cached_document_posting(BIGINT,TEXT) TO mainrag;
+
 DO $readers$
 DECLARE patch RECORD; definition TEXT;
 BEGIN
@@ -224,10 +239,13 @@ BEGIN
         UNION ALL SELECT posting.document_id,posting.term,posting.term_frequency
          FROM public.storage_v2_byte_posting_matches(p_document_ids,ARRAY[p_term],NULL) posting;$new$),
   ('storage_v2_scoped_query_posting(bigint[],text[])',
-   $old$WHERE posting.term=ANY(v_terms);$old$,
-   $new$WHERE posting.term=ANY(v_terms);
+   $old$IF cardinality(p_document_ids)=0 OR v_terms IS NULL THEN RETURN; END IF;$old$,
+   $new$IF cardinality(p_document_ids)=0 OR v_terms IS NULL THEN RETURN; END IF;
     RETURN QUERY SELECT posting.document_id,posting.term,posting.term_frequency
-     FROM public.storage_v2_byte_posting_matches(p_document_ids,v_terms,NULL) posting;$new$)
+     FROM public.storage_v2_byte_posting_matches(p_document_ids,v_terms,NULL) posting;$new$),
+  ('storage_v2_scoped_query_posting(bigint[],text[])',
+   $old$public.storage_v2_document_posting(requested.id,requested_term.value)$old$,
+   $new$public.storage_v2_cached_document_posting(requested.id,requested_term.value)$new$)
  ) expected(signature,old_text,new_text) LOOP
   definition:=pg_get_functiondef(patch.signature::REGPROCEDURE);
   IF (length(definition)-length(replace(definition,patch.old_text,'')))/length(patch.old_text)<>1 THEN
