@@ -1647,7 +1647,10 @@ First-candidate reads use authorized occurrence and artifact scope, load
 an expanding canonical prefix per occurrence, and stop at the earliest exact
 matching segment. Prefixes preserve UTF-8 byte offsets, grow for later segments,
 and avoid converting a complete large body for an early match. The bounded
-helper disables JIT locally. It does not reconstruct every candidate block to
+helper disables JIT locally. A private block reader uses the existing trusted
+rank owner's SELECT policy behind an explicit source and full occurrence
+identity guard, checking source access once per invocation. Direct application
+access to that helper is denied; insert policies remain enforced. It does not reconstruct every candidate block to
 compute that minimum.
 Precise ranking and full integrity verification retain complete vector semantics.
 Plain conjunctions can prune blocks by fingerprints; OR, phrases and negation

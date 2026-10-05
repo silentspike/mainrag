@@ -376,6 +376,15 @@ SELECT count(*) FROM unnest({array(texts, 'TEXT')},{array(prefixes, 'TEXT')},
                     + f"; SELECT segment_order FROM {candidate}"), first)
                 self.assertEqual(self.sql(prefix + self.quote(self.schema.OTHER_ID)
                     + f"; SELECT count(*) FROM {candidate}"), "0")
+        private_blocks = (f"storage_v2_derived_lexical_candidate_blocks({occurrence},{source},"
+                          f"{artifact},NULL::INTEGER[])")
+        self.assert_sql_fails(self.admin(f"SELECT count(*) FROM {private_blocks}"), "permission denied")
+        for actor, expected in ((self.schema.ADMIN_ID, "3"), (self.schema.OTHER_ID, "0")):
+            self.assertEqual(self.sql("SET ROLE mainrag_v2_frontier_owner;SET app.user_id="
+                + self.quote(actor) + f";SELECT count(*) FROM {private_blocks}"), expected)
+        self.assertEqual(self.sql("SET ROLE mainrag_v2_frontier_owner;SET app.user_id="
+            + self.quote(self.schema.ADMIN_ID) + ";SELECT count(*) FROM "
+            + private_blocks.replace(f",{artifact},", f",{artifact + 1000000},")), "0")
         # Reencode one owned fixture block transactionally to exercise a
         # retained cached block beside a derived block without changing bytes.
         self.assertEqual(self.sql(f"""BEGIN;
