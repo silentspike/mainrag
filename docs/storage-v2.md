@@ -1650,13 +1650,17 @@ Weighted lexical vectors are reconstructed with their original A/B/C weights.
 First-candidate reads use authorized occurrence and artifact scope, load
 an expanding canonical prefix per occurrence, and stop at the earliest exact
 matching segment. Matching occurrence identities, their first compatible blocks, canonical bindings
-and first text windows are read in a batch. Metadata-only positive matches
+and first text windows are read in a batch. Block identities are reduced before
+loading their arrays, so candidate sorts do not carry every compatible block
+payload. Metadata-only positive matches
 fetch no body. If the first block has no exact match, an indexed next-block
 lookup continues in order, with geometric prefix growth when needed. Sources without derived
 matches open no canonical documents. New derived blocks also cache a 128-bit
 mask per segment, constructed from the already validated complete weighted
 vector fingerprints. A plain conjunction whose two-bit fingerprint mask cannot
-fit a segment is skipped; collisions retain exact vector evaluation. Retained
+fit a segment is filtered before the procedural loop; collisions retain exact
+vector evaluation. Invalid byte ends still enter the loop and fail the original
+bounds check. Retained
 blocks with null masks and complex queries use the complete prior path. The mask
 is physical metadata and does not change logical vectors, ranks, hashes or seals.
 Each new block also records at most 16 exact lexemes of at most eight UTF-8

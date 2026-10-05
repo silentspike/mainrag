@@ -241,14 +241,21 @@ SET plan_cache_mode=force_custom_plan SET jit=off AS $$
  WITH authorized_sources AS MATERIALIZED (
   SELECT DISTINCT id FROM unnest(p_source_ids) input(id)
    WHERE storage_v2_can_access_source(id,'read')
+ ), first_blocks AS MATERIALIZED (
+  -- Sort identities only, then fetch one payload per occurrence. Carrying all
+  -- compatible block arrays through DISTINCT ON can spill wide tuples.
+  SELECT DISTINCT ON(stored.occurrence_id,stored.source_id,stored.artifact_version_id)
+    stored.occurrence_id,stored.source_id,stored.artifact_version_id,stored.block_order
+  FROM public.storage_v2_derived_lexical_block stored
+  JOIN authorized_sources source ON source.id=stored.source_id
+  WHERE stored.occurrence_id=ANY((SELECT p_occurrence_ids OFFSET 0)::BIGINT[])
+    AND (p_fingerprints IS NULL OR stored.fingerprints @> p_fingerprints)
+  ORDER BY stored.occurrence_id,stored.source_id,stored.artifact_version_id,stored.block_order
  )
- SELECT DISTINCT ON(stored.occurrence_id,stored.source_id,stored.artifact_version_id)
-   stored.occurrence_id,stored.source_id,stored.artifact_version_id,stored AS first_block
- FROM public.storage_v2_derived_lexical_block stored
- JOIN authorized_sources source ON source.id=stored.source_id
- WHERE stored.occurrence_id=ANY((SELECT p_occurrence_ids OFFSET 0)::BIGINT[])
-   AND (p_fingerprints IS NULL OR stored.fingerprints @> p_fingerprints)
- ORDER BY stored.occurrence_id,stored.source_id,stored.artifact_version_id,stored.block_order
+ SELECT matching.occurrence_id,matching.source_id,matching.artifact_version_id,stored AS first_block
+ FROM first_blocks matching JOIN public.storage_v2_derived_lexical_block stored
+  ON stored.occurrence_id=matching.occurrence_id AND stored.block_order=matching.block_order
+  AND stored.source_id=matching.source_id AND stored.artifact_version_id=matching.artifact_version_id
 $$;
 ALTER FUNCTION storage_v2_derived_lexical_candidate_occurrences(BIGINT[],BIGINT[],INTEGER[])
     OWNER TO mainrag_v2_lexical_rank_owner;
@@ -363,14 +370,17 @@ BEGIN
    END IF;
    FOR item IN SELECT * FROM unnest(block.segment_orders,block.text_byte_starts,
       block.text_byte_lengths,block.context_prefixes,block.chunk_types,block.segment_masks)
-      segment(segment_order,start,length,prefix,kind,mask) ORDER BY segment.segment_order
+      segment(segment_order,start,length,prefix,kind,mask)
+     -- Filter impossible segments in SQL rather than visiting them in PL/pgSQL.
+     -- Invalid byte ends still enter the loop and trigger the original guard.
+     WHERE segment.start::BIGINT+segment.length-1>canonical_document_bytes
+        OR query_mask IS NULL OR segment.mask IS NULL OR (segment.mask&query_mask)=query_mask
+     ORDER BY segment.segment_order
    LOOP
     required_bytes:=item.start+item.length-1;
     IF required_bytes>canonical_document_bytes THEN
      RAISE EXCEPTION 'canonical lexical byte range exceeds document';
     END IF;
-    CONTINUE WHEN query_mask IS NOT NULL AND item.mask IS NOT NULL
-                  AND (item.mask&query_mask)<>query_mask;
     IF NOT metadata_cached OR (cached_prefix,cached_kind) IS DISTINCT FROM (item.prefix,item.kind) THEN
      prefix_vector:=setweight(to_tsvector('simple',item.prefix),'B');
      kind_vector:=setweight(to_tsvector('simple',item.kind),'C');

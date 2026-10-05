@@ -368,6 +368,17 @@ UPDATE storage_v2_derived_lexical_block SET first_term_ordinals[1]=
 ALTER TABLE storage_v2_derived_lexical_block ENABLE TRIGGER storage_v2_derived_lexical_immutable;
 {self.admin(call)};
 ROLLBACK;""", "lexical segment identity collision")
+        # A pruning mask must not hide an invalid canonical range.
+        self.assert_sql_fails(f"""BEGIN;
+ALTER TABLE storage_v2_derived_lexical_block DISABLE TRIGGER storage_v2_derived_lexical_immutable;
+UPDATE storage_v2_derived_lexical_block SET first_terms=NULL,first_term_ordinals=NULL,
+ segment_masks[1]=B'0'::BIT(128),text_byte_starts[1]={len(content.encode()) + 1}
+ WHERE occurrence_id={occurrence} AND block_order=0;
+ALTER TABLE storage_v2_derived_lexical_block ENABLE TRIGGER storage_v2_derived_lexical_immutable;
+SET LOCAL ROLE mainrag_v2_lexical_rank_owner;SET LOCAL app.user_id='{self.schema.ADMIN_ID}';
+SELECT count(*) FROM storage_v2_authorized_lexical_first_candidates(
+ ARRAY[{occurrence}]::BIGINT[],ARRAY[{source}]::BIGINT[],'alpha');
+ROLLBACK;""", "canonical lexical byte range exceeds document")
         # Bit collisions can only retain exact work, including signed hashes.
         self.assertEqual(self.sql(self.admin("SELECT "
             "storage_v2_lexical_segment_mask(ARRAY[0])="
