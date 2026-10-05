@@ -45,6 +45,8 @@ CREATE TABLE storage_v2_byte_posting_block (
     text_byte_lengths INTEGER[] NOT NULL,
     term_frequencies BIGINT[] NOT NULL,
     fingerprints INTEGER[] NOT NULL,
+    cache_max_term_bytes SMALLINT NOT NULL DEFAULT 128
+        CHECK(cache_max_term_bytes BETWEEN 1 AND 128),
     PRIMARY KEY(document_id,block_order),
     CHECK(array_ndims(cached_terms)=1 AND array_lower(cached_terms,1)=1
         AND cardinality(cached_terms)=cardinality(text_byte_starts)),
@@ -102,7 +104,7 @@ BEGIN
                         COLLATE "default" ORDER BY p.ordinal) INTO terms
      FROM unnest(block.text_byte_starts,block.text_byte_lengths) WITH ORDINALITY p(start,length,ordinal);
    IF block.cached_terms IS DISTINCT FROM
-        ARRAY(SELECT CASE WHEN octet_length(term)<=128 THEN term ELSE NULL END
+        ARRAY(SELECT CASE WHEN octet_length(term)<=block.cache_max_term_bytes THEN term ELSE NULL END
                 FROM unnest(terms) WITH ORDINALITY t(term,n) ORDER BY n) THEN
     RAISE EXCEPTION 'bounded posting term cache differs from canonical text';
    END IF;
@@ -168,7 +170,8 @@ BEGIN
            AND EXISTS(SELECT 1 FROM requested WHERE requested.id=candidate.document_id))
   )
   SELECT b.* FROM scoped candidate CROSS JOIN LATERAL (
-    SELECT b.document_id,b.cached_terms,b.text_byte_starts,b.text_byte_lengths,b.term_frequencies
+    SELECT b.document_id,b.cached_terms,b.text_byte_starts,b.text_byte_lengths,b.term_frequencies,
+           b.cache_max_term_bytes
       FROM storage_v2_byte_posting_block b
      WHERE b.document_id=candidate.document_id AND b.block_order=candidate.block_order OFFSET 0
   ) b ORDER BY candidate.document_id,candidate.block_order
@@ -179,7 +182,7 @@ BEGIN
     term_frequency:=v_block.term_frequencies[v_position];RETURN NEXT;
     v_count:=v_count+1;IF v_count=p_limit THEN RETURN;END IF;
    END LOOP;
-   IF octet_length(v_term)<=128 THEN CONTINUE; END IF;
+   IF octet_length(v_term)<=v_block.cache_max_term_bytes THEN CONTINUE; END IF;
    FOREACH v_position IN ARRAY array_positions(v_block.text_byte_lengths,octet_length(v_term)) LOOP
     IF v_bytes_document IS DISTINCT FROM v_block.document_id THEN
      SELECT convert_to(lower(d.search_text),'UTF8') INTO STRICT v_bytes
@@ -417,13 +420,14 @@ BEGIN
     -- new documents retain bounded short terms and exact byte locators for all terms.
     IF octet_length(p_search_text)>=262144 THEN
         INSERT INTO storage_v2_byte_posting_block(
-            document_id,block_order,cached_terms,text_byte_starts,text_byte_lengths,term_frequencies,fingerprints)
+            document_id,block_order,cached_terms,text_byte_starts,text_byte_lengths,term_frequencies,
+            fingerprints,cache_max_term_bytes)
         SELECT v_document.id,(posting.ordinal-1)/256,
-               array_agg(CASE WHEN octet_length(posting.term)<=128 THEN posting.term ELSE NULL END ORDER BY posting.ordinal),
+               array_agg(CASE WHEN octet_length(posting.term)<=16 THEN posting.term ELSE NULL END ORDER BY posting.ordinal),
                array_agg(posting.byte_start ORDER BY posting.ordinal),
                array_agg(posting.byte_length ORDER BY posting.ordinal),
                array_agg(posting.frequency ORDER BY posting.ordinal),
-               storage_v2_posting_fingerprints(array_agg(posting.term ORDER BY posting.ordinal))
+               storage_v2_posting_fingerprints(array_agg(posting.term ORDER BY posting.ordinal)),16::SMALLINT
           FROM unnest(v_terms,v_frequencies,v_byte_starts,v_byte_lengths)
                WITH ORDINALITY posting(term,frequency,byte_start,byte_length,ordinal)
          GROUP BY (posting.ordinal-1)/256;

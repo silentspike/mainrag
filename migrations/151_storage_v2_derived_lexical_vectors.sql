@@ -97,7 +97,7 @@ GRANT EXECUTE ON FUNCTION storage_v2_derived_lexical_vectors(BIGINT,INTEGER[],IN
     TO mainrag,mainrag_v2_lexical_rank_owner,mainrag_v2_presence_owner;
 
 -- First-candidate ranking needs the earliest matching segment, not every
--- reconstructed vector. Decode the canonical bytes once per occurrence and
+-- reconstructed vector. Grow a bounded canonical prefix per occurrence and
 -- stop after that first exact weighted match.
 CREATE FUNCTION storage_v2_derived_lexical_first_candidates(
     p_occurrence_ids BIGINT[],p_source_ids BIGINT[],p_query TEXT
@@ -105,10 +105,11 @@ CREATE FUNCTION storage_v2_derived_lexical_first_candidates(
                 segment_order BIGINT,lexical_score REAL)
 LANGUAGE plpgsql STABLE STRICT SECURITY DEFINER
 SET search_path=pg_catalog,public SET row_security=on
-SET plan_cache_mode=force_custom_plan AS $$
+SET plan_cache_mode=force_custom_plan SET jit=off AS $$
 DECLARE sources BIGINT[]; requested RECORD; block RECORD; item RECORD;
         bytes BYTEA; vector TSVECTOR; query TSQUERY:=websearch_to_tsquery('simple',p_query);
         v_fingerprints INTEGER[];
+        prefix_characters BIGINT; required_bytes BIGINT;
 BEGIN
  IF cardinality(p_occurrence_ids)=0 OR cardinality(p_source_ids)=0 THEN RETURN; END IF;
  SELECT array_agg(source.id) INTO sources FROM public.sources source
@@ -125,7 +126,7 @@ BEGIN
   WHERE occurrence.id=ANY((SELECT p_occurrence_ids OFFSET 0)::BIGINT[])
     AND occurrence.source_id=ANY(sources)
  LOOP
-  bytes:=NULL;
+  bytes:=NULL;prefix_characters:=0;
   <<blocks>>
   FOR block IN SELECT stored.* FROM public.storage_v2_derived_lexical_block stored
    WHERE stored.occurrence_id=requested.id AND stored.source_id=requested.source_id
@@ -133,20 +134,29 @@ BEGIN
      AND (v_fingerprints IS NULL OR stored.fingerprints @> v_fingerprints)
    ORDER BY stored.block_order
   LOOP
-   IF bytes IS NULL THEN
-    SELECT convert_to(document.search_text,'UTF8') INTO bytes
-     FROM public.storage_v2_search_view_document binding
-     JOIN public.storage_v2_search_document document ON document.id=binding.document_id
-      AND document.component_kind='node' AND document.node_id=requested.content_root_node_id
-     WHERE binding.view_id=requested.view_id AND binding.ordinal=0;
-    IF NOT FOUND THEN
-     RAISE EXCEPTION 'authorized canonical lexical document required' USING ERRCODE='42501';
-    END IF;
-   END IF;
    FOR item IN SELECT * FROM unnest(block.segment_orders,block.text_byte_starts,
       block.text_byte_lengths,block.context_prefixes,block.chunk_types)
       segment(segment_order,start,length,prefix,kind) ORDER BY segment.segment_order
    LOOP
+    required_bytes:=item.start+item.length-1;
+    IF bytes IS NULL OR octet_length(bytes)<required_bytes THEN
+     -- A UTF-8 byte end is also a safe upper bound on the character prefix.
+     -- PostgreSQL substring can fetch/decompress a bounded TOAST slice. Grow
+     -- geometrically for later matches while retaining the original byte offsets.
+     prefix_characters:=greatest(8192::BIGINT,required_bytes,prefix_characters*2);
+     SELECT convert_to(substring(document.search_text FROM 1
+          FOR least(prefix_characters,octet_length(document.search_text))::INTEGER),'UTF8') INTO bytes
+      FROM public.storage_v2_search_view_document binding
+      JOIN public.storage_v2_search_document document ON document.id=binding.document_id
+       AND document.component_kind='node' AND document.node_id=requested.content_root_node_id
+      WHERE binding.view_id=requested.view_id AND binding.ordinal=0;
+     IF NOT FOUND THEN
+      RAISE EXCEPTION 'authorized canonical lexical document required' USING ERRCODE='42501';
+     END IF;
+     IF octet_length(bytes)<required_bytes THEN
+      RAISE EXCEPTION 'canonical lexical byte range exceeds document';
+     END IF;
+    END IF;
     vector:=setweight(to_tsvector('simple',convert_from(
         substring(bytes FROM item.start FOR item.length),'UTF8') COLLATE "default"),'A')
       ||setweight(to_tsvector('simple',item.prefix),'B')
