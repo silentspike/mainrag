@@ -83,7 +83,9 @@ class DerivedRetrievalCodecTests(unittest.TestCase):
                          "a__b 0123 -12.3 +42% api::call() a/b",
                          cls.collision[0] + "\n" + ("alpha βeta key_42 a/b api::call()\n" * 12000),
                          " ".join(f"term_{i}" for i in range(40000)),
-                         "x" * 270000, "w" * 127 + " " + "y" * 128 + " " + "z" * 129
+                         "x" * 270000, "f" * 15 + " " + "g" * 16 + " " + "h" * 17
+                         + " u" + "ä" * 7 + " uu" + "ä" * 7 + " u" + "ö" * 8 + " "
+                         + "w" * 127 + " " + "y" * 128 + " " + "z" * 129
                          + "\n" + "alpha\n" * 45000]
             cls.nodes = [instance.make_projection(f"codec component {i}")[0]
                          for i in range(len(cls.cases))]
@@ -174,10 +176,24 @@ ROLLBACK;"""), "t")
             self.assertEqual(self.sql(self.admin(f"SELECT term_frequency FROM {function}")), "1")
         cutoff_document = int(self.sql(self.admin("SELECT id FROM storage_v2_put_search_document("
             f"'derived-codec-cutoff-readers','node',{self.nodes[8]},{self.quote(self.cases[8])},ARRAY[]::TEXT[])")))
-        for character, length in (("w", 127), ("y", 128), ("z", 129)):
-            value = self.quote(character * length)
-            self.assertEqual(self.sql(self.admin(
-                f"SELECT term_frequency FROM storage_v2_document_posting({cutoff_document},{value})")), "1")
+        self.assertEqual(self.sql(f"SELECT bool_and(cache_max_term_bytes=16) "
+                                  f"FROM storage_v2_byte_posting_block WHERE document_id={cutoff_document}"), "t")
+        # Include ASCII in multibyte whitespace tokens so the established
+        # classifier accepts them even with the fixture's C locale.
+        terms = ["f" * 15, "g" * 16, "h" * 17, "u" + "ä" * 7,
+                 "uu" + "ä" * 7, "u" + "ö" * 8, "w" * 127, "y" * 128, "z" * 129]
+        for term in terms:
+            value = self.quote(term)
+            for function in (
+                f"storage_v2_document_posting({cutoff_document},{value})",
+                f"storage_v2_posting_probe({value},4097) WHERE document_id={cutoff_document}",
+                f"storage_v2_scoped_query_posting(ARRAY[{cutoff_document},{cutoff_document},NULL]::BIGINT[],"
+                f"ARRAY[{value},NULL,{value}])",
+            ):
+                self.assertEqual(self.sql(self.admin(f"SELECT term_frequency FROM {function}")), "1", function)
+            self.assertEqual(self.sql(f"SELECT coalesce(bool_or({value}=ANY(cached_terms)),FALSE) "
+                                      f"FROM storage_v2_byte_posting_block WHERE document_id={cutoff_document}"),
+                             "t" if len(term.encode()) <= 16 else "f")
         self.assert_sql_fails("BEGIN;" + self.admin(f"""
 WITH fresh AS (
  INSERT INTO storage_v2_search_document(profile_id,component_kind,node_id,search_text,
@@ -208,6 +224,50 @@ INSERT INTO storage_v2_byte_posting_block
             f"SELECT document_id,block_order+100,cached_terms,text_byte_starts,text_byte_lengths,term_frequencies,fingerprints "
             f"FROM storage_v2_byte_posting_block WHERE document_id={document}", "sealed")
 
+    def test_retained_128_byte_cache_and_new_cache_have_identical_readers(self):
+        # Construct the retained layout with its real predecessor threshold;
+        # the entire compatibility fixture and function replacement roll back.
+        signature = "storage_v2_put_search_document(text,text,bigint,text,text[])"
+        constructor = self.sql(f"SELECT pg_get_functiondef('{signature}'::REGPROCEDURE)")
+        self.assertEqual(constructor.count("octet_length(posting.term)<=16"), 1)
+        self.assertEqual(constructor.count(",16::SMALLINT"), 1)
+        legacy = constructor.replace("octet_length(posting.term)<=16",
+                                     "octet_length(posting.term)<=128").replace(",16::SMALLINT", ",128::SMALLINT")
+        terms = ["f" * 15, "g" * 16, "h" * 17, "u" + "ä" * 7,
+                 "uu" + "ä" * 7, "u" + "ö" * 8, "w" * 127, "y" * 128, "z" * 129]
+        self.assertEqual(self.sql("BEGIN;" + legacy + ";" + self.admin(f"""
+DO $compatibility$ DECLARE document BIGINT; value TEXT; cached BOOLEAN; BEGIN
+ SELECT id INTO document FROM storage_v2_put_search_document(
+  'retained-cache-compatibility','node',{self.nodes[8]},
+  {self.quote(self.cases[8])},ARRAY[]::TEXT[]);
+ IF NOT (SELECT bool_and(cache_max_term_bytes=128)
+           FROM storage_v2_byte_posting_block WHERE document_id=document) THEN
+  RAISE EXCEPTION 'retained cache bound differs';
+ END IF;
+ FOREACH value IN ARRAY ARRAY[{','.join(self.quote(t) for t in terms)}] LOOP
+  IF (SELECT array_agg(term_frequency) FROM storage_v2_document_posting(document,value))
+       IS DISTINCT FROM ARRAY[1::BIGINT]
+    OR (SELECT array_agg(term_frequency) FROM storage_v2_posting_probe(value,4097) p
+          WHERE p.document_id=document) IS DISTINCT FROM ARRAY[1::BIGINT]
+    OR (SELECT array_agg(term_frequency) FROM storage_v2_scoped_query_posting(
+          ARRAY[document,document,NULL],ARRAY[value,NULL,value])) IS DISTINCT FROM ARRAY[1::BIGINT] THEN
+   RAISE EXCEPTION 'retained cache exact reader differs: %, document %, document reader %, probe %, scoped %',
+    value,document,
+    (SELECT array_agg(term_frequency) FROM storage_v2_document_posting(document,value)),
+    (SELECT array_agg(term_frequency) FROM storage_v2_posting_probe(value,4097) p WHERE p.document_id=document),
+    (SELECT array_agg(term_frequency) FROM storage_v2_scoped_query_posting(
+          ARRAY[document,document,NULL],ARRAY[value,NULL,value]));
+  END IF;
+  SELECT coalesce(bool_or(value=ANY(cached_terms)),FALSE) INTO cached
+    FROM storage_v2_byte_posting_block WHERE document_id=document;
+  IF cached IS DISTINCT FROM (octet_length(value)<=128) THEN
+   RAISE EXCEPTION 'retained cache byte boundary differs';
+  END IF;
+ END LOOP;
+END $compatibility$;
+SELECT 'retained-cache-compatible';
+""") + "ROLLBACK;"), "retained-cache-compatible")
+
     def test_document_query_pruning_preserves_complex_and_negative_queries(self):
         text = self.cases[5]
         node = self.nodes[5]
@@ -225,6 +285,7 @@ INSERT INTO storage_v2_byte_posting_block
 
     def test_derived_segments_vectors_queries_replays_and_authorization(self):
         content = self.cases[5][:22000] + "\nlatesecondblock\n" + self.cases[5][22000:]
+        content = content[:180000] + "\nlateutf8prefix\n" + content[180000:]
         parts = "ARRAY[" + ",".join(self.quote(content[start:start + 16000])
             for start in range(0, len(content), 16000)) + "]::TEXT[]"
         node, view = map(int, self.sql(self.admin(f"""
@@ -254,7 +315,7 @@ WITH leaves AS MATERIALIZED (
         occurrence, artifact = map(int, self.sql(
             f"SELECT id||':'||artifact_version_id FROM occurrence WHERE view_id={view}"
             f" AND source_id={source}").split(":"))
-        positions = list(range(0, 128 * 200, 200))
+        positions = list(range(0, 128 * 200, 200)) + [180000]
         texts = [content[start:start + 180] for start in positions]
         prefixes = ["public context α" for _ in texts]
         kinds = ["text" for _ in texts]
@@ -268,10 +329,10 @@ WITH leaves AS MATERIALIZED (
                 f"{array([p + 1 for p in positions], 'BIGINT')},"
                 f"{array([len(content[:p].encode()) + 1 for p in positions], 'BIGINT')}")
         call = f"SELECT storage_v2_put_lexical_segments_located({args})"
-        self.assertEqual(self.sql(self.admin(call)), "128")
-        self.assertEqual(self.sql(self.admin(call)), "128")
+        self.assertEqual(self.sql(self.admin(call)), str(len(texts)))
+        self.assertEqual(self.sql(self.admin(call)), str(len(texts)))
         self.assertEqual(self.sql(f"SELECT count(*) FROM storage_v2_derived_lexical_block "
-                                 f"WHERE occurrence_id={occurrence}"), "2")
+                                 f"WHERE occurrence_id={occurrence}"), "3")
         self.assertEqual(self.sql(f"SELECT count(*) FROM storage_v2_compact_lexical_block "
                                  f"WHERE occurrence_id={occurrence}"), "0")
         self.assertEqual(self.sql(self.admin(f"""
@@ -287,7 +348,8 @@ SELECT count(*) FROM unnest({array(texts, 'TEXT')},{array(prefixes, 'TEXT')},
 """)), "0")
         for query in ("alpha", "alpha absent", "alpha OR absent", '"alpha βeta"',
                       "alpha -absent", "-alpha", "key_42", "public", "text",
-                      "latesecondblock", *self.collision):
+                      "latesecondblock", "lateutf8prefix", "lateutf8prefix OR absent",
+                      *self.collision):
             expected = self.sql(f"SELECT count(*) FROM unnest({array(texts, 'TEXT')}) text "
                 "WHERE (setweight(to_tsvector('simple',text),'A') "
                 "||setweight(to_tsvector('simple','public context α'),'B') "
@@ -303,6 +365,8 @@ SELECT count(*) FROM unnest({array(texts, 'TEXT')},{array(prefixes, 'TEXT')},
                 f"AND fts_vector@@websearch_to_tsquery('simple',{self.quote(query)})"))
             if query == "latesecondblock":
                 self.assertEqual(first, "110")
+            if query.startswith("lateutf8prefix"):
+                self.assertEqual(first, "128")
             for scope in (f"ARRAY[{occurrence},{occurrence},NULL]::BIGINT[]",
                           f"ARRAY(SELECT {occurrence}::BIGINT FROM generate_series(1,2048))"):
                 candidate = (f"storage_v2_authorized_lexical_first_candidates({scope},"
@@ -333,7 +397,9 @@ SET LOCAL app.user_id='{self.schema.ADMIN_ID}';
 SELECT (SELECT count(*)=1 AND min(segment_order)=0
  FROM storage_v2_authorized_lexical_first_candidates(ARRAY[{occurrence}]::BIGINT[],ARRAY[{source}]::BIGINT[],'alpha'))
  AND (SELECT count(*)=1 AND min(segment_order)=110
- FROM storage_v2_authorized_lexical_first_candidates(ARRAY[{occurrence}]::BIGINT[],ARRAY[{source}]::BIGINT[],'latesecondblock'));
+ FROM storage_v2_authorized_lexical_first_candidates(ARRAY[{occurrence}]::BIGINT[],ARRAY[{source}]::BIGINT[],'latesecondblock'))
+ AND (SELECT count(*)=1 AND min(segment_order)=128
+ FROM storage_v2_authorized_lexical_first_candidates(ARRAY[{occurrence}]::BIGINT[],ARRAY[{source}]::BIGINT[],'lateutf8prefix'));
 ROLLBACK;"""), "t")
         self.assert_sql_fails(self.admin(call.replace(array(prefixes, "TEXT"),
             array(["changed"] * len(texts), "TEXT"))), "identity collision")
