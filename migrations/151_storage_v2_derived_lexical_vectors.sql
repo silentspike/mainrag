@@ -144,6 +144,15 @@ BEGIN
     AND lower(p_query) !~ '(^|[[:space:]])or([[:space:]]|$)' THEN
   v_fingerprints:=storage_v2_posting_fingerprints(tsvector_to_array(to_tsvector('simple',p_query)));
  END IF;
+ -- Retained cached-only sources must not pay one lookup per occurrence for a
+ -- representation they do not contain. The same predicate also prunes absent
+ -- plain-query candidates without opening any canonical document.
+ IF NOT EXISTS(SELECT 1 FROM public.storage_v2_derived_lexical_block stored
+   WHERE stored.source_id=ANY(sources)
+     AND stored.occurrence_id=ANY((SELECT p_occurrence_ids OFFSET 0)::BIGINT[])
+     AND (v_fingerprints IS NULL OR stored.fingerprints @> v_fingerprints)) THEN
+  RETURN;
+ END IF;
  FOR requested IN SELECT occurrence.id,occurrence.source_id,occurrence.artifact_version_id,
                          occurrence.view_id,artifact.content_root_node_id
   FROM public.occurrence occurrence JOIN public.artifact_version artifact
