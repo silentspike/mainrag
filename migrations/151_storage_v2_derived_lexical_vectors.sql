@@ -96,6 +96,30 @@ REVOKE ALL ON FUNCTION storage_v2_derived_lexical_vectors(BIGINT,INTEGER[],INTEG
 GRANT EXECUTE ON FUNCTION storage_v2_derived_lexical_vectors(BIGINT,INTEGER[],INTEGER[],TEXT[],TEXT[])
     TO mainrag,mainrag_v2_lexical_rank_owner,mainrag_v2_presence_owner;
 
+-- The existing trusted rank owner has a SELECT-only block policy. Keep its
+-- access behind an explicit source and complete occurrence identity check,
+-- evaluated once per invocation instead of once per candidate block.
+CREATE FUNCTION storage_v2_derived_lexical_candidate_blocks(
+    p_occurrence_id BIGINT,p_source_id BIGINT,p_artifact_version_id BIGINT,
+    p_fingerprints INTEGER[]
+) RETURNS SETOF storage_v2_derived_lexical_block
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path=pg_catalog,public SET row_security=on
+SET plan_cache_mode=force_custom_plan SET jit=off AS $$
+ SELECT stored.* FROM public.storage_v2_derived_lexical_block stored
+ WHERE (SELECT storage_v2_can_access_source(p_source_id,'read'))
+   AND stored.occurrence_id=p_occurrence_id AND stored.source_id=p_source_id
+   AND stored.artifact_version_id=p_artifact_version_id
+   AND (p_fingerprints IS NULL OR stored.fingerprints @> p_fingerprints)
+ ORDER BY stored.block_order
+$$;
+ALTER FUNCTION storage_v2_derived_lexical_candidate_blocks(BIGINT,BIGINT,BIGINT,INTEGER[])
+    OWNER TO mainrag_v2_lexical_rank_owner;
+REVOKE ALL ON FUNCTION storage_v2_derived_lexical_candidate_blocks(BIGINT,BIGINT,BIGINT,INTEGER[])
+    FROM PUBLIC,mainrag;
+GRANT EXECUTE ON FUNCTION storage_v2_derived_lexical_candidate_blocks(BIGINT,BIGINT,BIGINT,INTEGER[])
+    TO mainrag_v2_frontier_owner;
+
 -- First-candidate ranking needs the earliest matching segment, not every
 -- reconstructed vector. Grow a bounded canonical prefix per occurrence and
 -- stop after that first exact weighted match.
@@ -109,6 +133,7 @@ SET plan_cache_mode=force_custom_plan SET jit=off AS $$
 DECLARE sources BIGINT[]; requested RECORD; block RECORD; item RECORD;
         bytes BYTEA; vector TSVECTOR; query TSQUERY:=websearch_to_tsquery('simple',p_query);
         v_fingerprints INTEGER[];
+        canonical_document_id BIGINT; canonical_document_bytes BIGINT;
         prefix_characters BIGINT; required_bytes BIGINT;
 BEGIN
  IF cardinality(p_occurrence_ids)=0 OR cardinality(p_source_ids)=0 THEN RETURN; END IF;
@@ -126,14 +151,25 @@ BEGIN
   WHERE occurrence.id=ANY((SELECT p_occurrence_ids OFFSET 0)::BIGINT[])
     AND occurrence.source_id=ANY(sources)
  LOOP
-  bytes:=NULL;prefix_characters:=0;
+  bytes:=NULL;canonical_document_id:=NULL;prefix_characters:=0;
   <<blocks>>
-  FOR block IN SELECT stored.* FROM public.storage_v2_derived_lexical_block stored
-   WHERE stored.occurrence_id=requested.id AND stored.source_id=requested.source_id
-     AND stored.artifact_version_id=requested.artifact_version_id
-     AND (v_fingerprints IS NULL OR stored.fingerprints @> v_fingerprints)
+  FOR block IN SELECT stored.* FROM public.storage_v2_derived_lexical_candidate_blocks(
+      requested.id,requested.source_id,requested.artifact_version_id,v_fingerprints) stored
    ORDER BY stored.block_order
   LOOP
+   IF canonical_document_id IS NULL THEN
+    -- Resolve and authorize the occurrence's exact root binding once. Prefix
+    -- extensions then use that document's primary key, retaining document RLS.
+    SELECT document.id,octet_length(document.search_text)
+      INTO canonical_document_id,canonical_document_bytes
+     FROM public.storage_v2_search_view_document binding
+     JOIN public.storage_v2_search_document document ON document.id=binding.document_id
+      AND document.component_kind='node' AND document.node_id=requested.content_root_node_id
+     WHERE binding.view_id=requested.view_id AND binding.ordinal=0;
+    IF NOT FOUND THEN
+     RAISE EXCEPTION 'authorized canonical lexical document required' USING ERRCODE='42501';
+    END IF;
+   END IF;
    FOR item IN SELECT * FROM unnest(block.segment_orders,block.text_byte_starts,
       block.text_byte_lengths,block.context_prefixes,block.chunk_types)
       segment(segment_order,start,length,prefix,kind) ORDER BY segment.segment_order
@@ -145,11 +181,9 @@ BEGIN
      -- geometrically for later matches while retaining the original byte offsets.
      prefix_characters:=greatest(8192::BIGINT,required_bytes,prefix_characters*2);
      SELECT convert_to(substring(document.search_text FROM 1
-          FOR least(prefix_characters,octet_length(document.search_text))::INTEGER),'UTF8') INTO bytes
-      FROM public.storage_v2_search_view_document binding
-      JOIN public.storage_v2_search_document document ON document.id=binding.document_id
-       AND document.component_kind='node' AND document.node_id=requested.content_root_node_id
-      WHERE binding.view_id=requested.view_id AND binding.ordinal=0;
+          FOR least(prefix_characters,canonical_document_bytes)::INTEGER),'UTF8') INTO bytes
+      FROM public.storage_v2_search_document document
+      WHERE document.id=canonical_document_id;
      IF NOT FOUND THEN
       RAISE EXCEPTION 'authorized canonical lexical document required' USING ERRCODE='42501';
      END IF;
