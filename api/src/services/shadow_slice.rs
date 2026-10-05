@@ -3001,9 +3001,34 @@ async fn candidate_query_seeds<C>(
 where
     C: GenericClient + Sync,
 {
+    let native_lexical = native_lexical
+        || !client
+            .query_one(
+                "SELECT to_regclass('public.chunks') IS NOT NULL \
+                    AND to_regclass('public.files') IS NOT NULL",
+                &[],
+            )
+            .await?
+            .get::<_, bool>(0);
+    let legacy_inputs = if native_lexical {
+        Vec::new()
+    } else {
+        client
+            .query(
+                "SELECT file.path, chunk.content_text, NULL::BIGINT AS document_id \
+               FROM chunks chunk JOIN files file ON file.id=chunk.file_id \
+              WHERE file.source_id=$1 AND chunk.content_text IS NOT NULL \
+              ORDER BY chunk.id LIMIT 64",
+                &[&source_id],
+            )
+            .await?
+    };
+    // Release candidates can generate native segments when no bootstrap rows
+    // exist, even while their historical witness uses the copied-input mode.
+    let native_lexical = native_lexical || legacy_inputs.is_empty();
     let inputs = if native_lexical {
         client.query(
-            "SELECT occurrence_row.source_path AS path, left(document.search_text,32768) AS content_text \
+            "SELECT occurrence_row.source_path AS path, left(document.search_text,32768) AS content_text, document.id AS document_id \
              FROM source_generation generation \
              JOIN generation_item_version membership ON membership.source_id=generation.source_id \
               AND membership.valid_from_seq<=generation.generation_seq \
@@ -3018,20 +3043,13 @@ where
             &[&generation_id,&source_id],
         ).await?
     } else {
-        client
-            .query(
-                "SELECT file.path, chunk.content_text \
-               FROM chunks chunk JOIN files file ON file.id=chunk.file_id \
-              WHERE file.source_id=$1 AND chunk.content_text IS NOT NULL \
-              ORDER BY chunk.id LIMIT 64",
-                &[&source_id],
-            )
-            .await?
+        legacy_inputs
     };
-    let mut candidates = BTreeSet::new();
+    let mut candidates: BTreeMap<(String, String), BTreeSet<i64>> = BTreeMap::new();
     for row in inputs {
         let path: String = row.get("path");
         let content: String = row.get("content_text");
+        let document_id: Option<i64> = row.get("document_id");
         let mut preferred = search_exact_identifiers(&content);
         preferred.extend(
             content
@@ -3040,7 +3058,10 @@ where
                 .filter(|token| token.len() >= if native_lexical { 3 } else { 12 }),
         );
         for token in preferred.into_iter().filter(|token| token.len() <= 128) {
-            candidates.insert((token, path.clone()));
+            let documents = candidates.entry((token, path.clone())).or_default();
+            if let Some(document_id) = document_id {
+                documents.insert(document_id);
+            }
             if candidates.len() >= 256 {
                 break;
             }
@@ -3049,7 +3070,7 @@ where
     let mut seeds = Vec::new();
     let mut top_paths_by_query: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut selected_queries = BTreeSet::new();
-    for (query, path) in candidates {
+    for ((query, path), documents) in candidates {
         if selected_queries.contains(&query) {
             continue;
         }
@@ -3073,10 +3094,18 @@ where
         if !native_lexical && !top_paths_by_query[&query].contains(&path) {
             continue;
         }
+        // A native token came from these exact sampled canonical documents.
+        // Checking every sibling item with the same file path would repeatedly
+        // reconstruct a whole large file for tokens that FTS does not retain.
+        // Keep the generation/path witness and the exact full-vector predicate.
+        let sampled_documents = native_lexical.then(|| documents.into_iter().collect::<Vec<_>>());
         let found = client
             .query_one(
-                "SELECT EXISTS ( \
-                    SELECT 1 FROM source_generation generation \
+                "WITH checked_documents AS MATERIALIZED ( \
+                    SELECT document.search_text, \
+                        storage_v2_logical_document_fts(document.fts_simple, \
+                            document.fts_simple_derived, document.search_text) AS vector \
+                    FROM source_generation generation \
                     JOIN generation_item_version membership ON membership.source_id=generation.source_id \
                      AND membership.valid_from_seq <= generation.generation_seq \
                      AND (membership.valid_to_seq IS NULL OR membership.valid_to_seq > generation.generation_seq) \
@@ -3087,11 +3116,13 @@ where
                     JOIN storage_v2_search_document document ON document.id=binding.document_id \
                    WHERE generation.id=$1 AND generation.source_id=$2 \
                      AND occurrence_row.source_path=$3 \
-                     AND (document.fts_simple @@ plainto_tsquery('simple',$4) \
-                          OR (document.fts_simple IS NULL \
-                              AND storage_v2_phrase_matches(NULL, document.search_text, $4))) \
+                     AND ($5::BIGINT[] IS NULL OR document.id=ANY($5)) \
+                ) SELECT EXISTS (SELECT 1 FROM checked_documents \
+                    WHERE vector @@ plainto_tsquery('simple',$4) \
+                       OR (vector IS NULL \
+                           AND storage_v2_phrase_matches(NULL,search_text,$4)) \
                 )",
-                &[&generation_id, &source_id, &path, &query],
+                &[&generation_id, &source_id, &path, &query, &sampled_documents],
             )
             .await?
             .get::<_, bool>(0);

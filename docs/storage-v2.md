@@ -1630,3 +1630,73 @@ and ordinary first-match candidates. Complete envelopes and independent
 multisets retain null, missing and duplicate ID semantics. Actual fixture plans
 check deferred sparse operands and dense scans; installation fences exact prior
 definitions and execution authority. No global planner settings are changed.
+
+### Compact derived retrieval for new large documents
+
+Migrations 150–152 retain existing documents, posting blocks and weighted
+lexical vectors. New documents of at least 262,144 UTF-8 bytes can use validated
+byte locators for posting terms and lexical slices. Posting blocks keep exact
+short terms of at most 16 UTF-8 bytes in a bounded aligned cache. Each block
+records its cache limit; retained 128-byte caches remain valid. Terms beyond
+that block's limit are decoded from canonical bytes only after fingerprint
+and length pruning. The complete postings and materialization hashes stay equal.
+Fingerprints never establish an exact match.
+
+Scoped byte posting reads are batched for both small and large scopes. The
+small-scope cached reader keeps its original invoker authority and excludes byte
+postings, so each representation contributes its exact frequencies once.
+
+Weighted lexical vectors are reconstructed with their original A/B/C weights.
+First-candidate reads use authorized occurrence and artifact scope, load
+an expanding canonical prefix per occurrence, and stop at the earliest exact
+matching segment. Matching occurrence identities, their first compatible blocks, canonical bindings
+and first text windows are read in a batch. Block identities are reduced before
+loading their arrays, so candidate sorts do not carry every compatible block
+payload. Metadata-only positive matches
+fetch no body. If the first block has no exact match, an indexed next-block
+lookup continues in order, with geometric prefix growth when needed. Sources without derived
+matches open no canonical documents. New derived blocks also cache a 128-bit
+mask per segment, constructed from the already validated complete weighted
+vector fingerprints. A plain conjunction whose two-bit fingerprint mask cannot
+fit a segment is filtered before the procedural loop; collisions retain exact
+vector evaluation. Invalid byte ends still enter the loop and fail the original
+bounds check. Retained
+blocks with null masks and complex queries use the complete prior path. The mask
+is physical metadata and does not change logical vectors, ranks, hashes or seals.
+Each new block also records at most 16 exact lexemes of at most eight UTF-8
+bytes and their first segment ordinals, prioritizing short lexemes and then
+segment frequency. A plain query normalized to one lexeme can reuse that exact
+first match after the same source/artifact/canonical-root joins, without loading
+the body. Missing cache entries, longer lexemes and complex predicates keep the
+exact vector path. This cache never establishes an absent term or substitutes
+an approximate fingerprint for a match. Verification checks its complete
+content and ordinals; retained null caches remain valid.
+Replay rejects a differing present cache. Verification and requalification
+validate caches from complete canonical vectors before metadata publication;
+retained null caches remain valid. Search does not repeat that immutable cache
+validation for every ranked block.
+The scalar block lookup reuses a generic plan while array scope retains a custom
+plan. Prefixes preserve UTF-8 byte offsets, grow for later segments,
+and avoid converting a complete large body for an early match. The bounded
+helper disables JIT locally. A private block reader uses the existing trusted
+rank owner's SELECT policy behind an explicit source and full occurrence
+identity guard, checking source access once per invocation. Direct application
+access to that helper is denied; insert policies remain enforced. Sources with
+no matching derived blocks return before any per-occurrence loop. It does not
+reconstruct every candidate block to
+compute that minimum.
+Precise ranking and full integrity verification retain complete vector semantics.
+Plain conjunctions can prune blocks by fingerprints; OR, phrases and negation
+keep exact vector evaluation. Context and type vectors are reused while their
+values stay equal. A positive position-free conjunction already matched by
+those vectors can skip body tokenization; all other predicates retain the
+original complete A/B/C concatenation order. Byte bounds are checked first.
+Full-document vector derivation retains the
+previous oversized-vector fallback and existing cached values.
+
+Candidate verification selects generation-backed native query seeds when a
+source has no bootstrap chunk inputs, including after legacy tables have been
+retired. The original producer identity remains attached to retained generations.
+Codec equivalence, measured allocation, actual named reads and production
+qualification are separate gates; fixture success does not activate or clean
+up any source.
