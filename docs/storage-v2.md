@@ -1659,6 +1659,14 @@ vector fingerprints. A plain conjunction whose two-bit fingerprint mask cannot
 fit a segment is skipped; collisions retain exact vector evaluation. Retained
 blocks with null masks and complex queries use the complete prior path. The mask
 is physical metadata and does not change logical vectors, ranks, hashes or seals.
+Each new block also records at most 16 exact lexemes of at most eight UTF-8
+bytes and their first segment ordinals, prioritizing short lexemes and then
+segment frequency. A plain query normalized to one lexeme can reuse that exact
+first match after the same source/artifact/canonical-root joins, without loading
+the body. Missing cache entries, longer lexemes and complex predicates keep the
+exact vector path. This cache never establishes an absent term or substitutes
+an approximate fingerprint for a match. Verification checks its complete
+content and ordinals; retained null caches remain valid.
 Replay rejects a differing present cache. Verification and requalification
 validate caches from complete canonical vectors before metadata publication;
 retained null caches remain valid. Search does not repeat that immutable cache
