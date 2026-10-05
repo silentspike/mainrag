@@ -1642,11 +1642,25 @@ that block's limit are decoded from canonical bytes only after fingerprint
 and length pruning. The complete postings and materialization hashes stay equal.
 Fingerprints never establish an exact match.
 
+Scoped byte posting reads are batched for both small and large scopes. The
+small-scope cached reader keeps its original invoker authority and excludes byte
+postings, so each representation contributes its exact frequencies once.
+
 Weighted lexical vectors are reconstructed with their original A/B/C weights.
 First-candidate reads use authorized occurrence and artifact scope, load
 an expanding canonical prefix per occurrence, and stop at the earliest exact
-matching segment. Matching occurrence identities and initial canonical prefixes
-are read in a batch; sources without derived matches open no canonical documents.
+matching segment. Matching occurrence identities and canonical bindings are read in a batch;
+canonical prefixes are fetched lazily after pruning. Sources without derived
+matches open no canonical documents. New derived blocks also cache a 128-bit
+mask per segment, constructed from the already validated complete weighted
+vector fingerprints. A plain conjunction whose two-bit fingerprint mask cannot
+fit a segment is skipped; collisions retain exact vector evaluation. Retained
+blocks with null masks and complex queries use the complete prior path. The mask
+is physical metadata and does not change logical vectors, ranks, hashes or seals.
+Replay rejects a differing present cache. Verification and requalification
+validate caches from complete canonical vectors before metadata publication;
+retained null caches remain valid. Search does not repeat that immutable cache
+validation for every ranked block.
 The scalar block lookup reuses a generic plan while array scope retains a custom
 plan. Prefixes preserve UTF-8 byte offsets, grow for later segments,
 and avoid converting a complete large body for an early match. The bounded
