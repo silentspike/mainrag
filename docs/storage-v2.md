@@ -1649,8 +1649,10 @@ postings, so each representation contributes its exact frequencies once.
 Weighted lexical vectors are reconstructed with their original A/B/C weights.
 First-candidate reads use authorized occurrence and artifact scope, load
 an expanding canonical prefix per occurrence, and stop at the earliest exact
-matching segment. Matching occurrence identities and canonical bindings are read in a batch;
-canonical prefixes are fetched lazily after pruning. Sources without derived
+matching segment. Matching occurrence identities, their first compatible blocks, canonical bindings
+and first text windows are read in a batch. Metadata-only positive matches
+fetch no body. If the first block has no exact match, an indexed next-block
+lookup continues in order, with geometric prefix growth when needed. Sources without derived
 matches open no canonical documents. New derived blocks also cache a 128-bit
 mask per segment, constructed from the already validated complete weighted
 vector fingerprints. A plain conjunction whose two-bit fingerprint mask cannot

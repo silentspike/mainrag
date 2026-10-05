@@ -188,7 +188,8 @@ GRANT EXECUTE ON FUNCTION storage_v2_derived_lexical_candidate_blocks(BIGINT,BIG
 -- not multiply identities. Sources without derived matches never enter a loop.
 CREATE FUNCTION storage_v2_derived_lexical_candidate_occurrences(
     p_occurrence_ids BIGINT[],p_source_ids BIGINT[],p_fingerprints INTEGER[]
-) RETURNS TABLE(occurrence_id BIGINT,source_id BIGINT,artifact_version_id BIGINT)
+) RETURNS TABLE(occurrence_id BIGINT,source_id BIGINT,artifact_version_id BIGINT,
+                first_block storage_v2_derived_lexical_block)
 LANGUAGE sql STABLE SECURITY DEFINER
 SET search_path=pg_catalog,public SET row_security=on
 SET plan_cache_mode=force_custom_plan SET jit=off AS $$
@@ -196,17 +197,42 @@ SET plan_cache_mode=force_custom_plan SET jit=off AS $$
   SELECT DISTINCT id FROM unnest(p_source_ids) input(id)
    WHERE storage_v2_can_access_source(id,'read')
  )
- SELECT DISTINCT stored.occurrence_id,stored.source_id,stored.artifact_version_id
+ SELECT DISTINCT ON(stored.occurrence_id,stored.source_id,stored.artifact_version_id)
+   stored.occurrence_id,stored.source_id,stored.artifact_version_id,stored AS first_block
  FROM public.storage_v2_derived_lexical_block stored
  JOIN authorized_sources source ON source.id=stored.source_id
  WHERE stored.occurrence_id=ANY((SELECT p_occurrence_ids OFFSET 0)::BIGINT[])
    AND (p_fingerprints IS NULL OR stored.fingerprints @> p_fingerprints)
+ ORDER BY stored.occurrence_id,stored.source_id,stored.artifact_version_id,stored.block_order
 $$;
 ALTER FUNCTION storage_v2_derived_lexical_candidate_occurrences(BIGINT[],BIGINT[],INTEGER[])
     OWNER TO mainrag_v2_lexical_rank_owner;
 REVOKE ALL ON FUNCTION storage_v2_derived_lexical_candidate_occurrences(BIGINT[],BIGINT[],INTEGER[])
     FROM PUBLIC,mainrag;
 GRANT EXECUTE ON FUNCTION storage_v2_derived_lexical_candidate_occurrences(BIGINT[],BIGINT[],INTEGER[])
+    TO mainrag_v2_frontier_owner;
+
+-- Continue only after the batched first block has no exact match. The primary
+-- key bounds each next lookup; no earlier block is decoded again.
+CREATE FUNCTION storage_v2_derived_lexical_next_block(
+    p_occurrence_id BIGINT,p_source_id BIGINT,p_artifact_version_id BIGINT,
+    p_fingerprints INTEGER[],p_after_block BIGINT
+) RETURNS SETOF storage_v2_derived_lexical_block
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path=pg_catalog,public SET row_security=on
+SET plan_cache_mode=force_generic_plan SET jit=off AS $$
+ SELECT stored.* FROM public.storage_v2_derived_lexical_block stored
+ WHERE (SELECT storage_v2_can_access_source(p_source_id,'read'))
+   AND stored.occurrence_id=p_occurrence_id AND stored.source_id=p_source_id
+   AND stored.artifact_version_id=p_artifact_version_id AND stored.block_order>p_after_block
+   AND (p_fingerprints IS NULL OR stored.fingerprints @> p_fingerprints)
+ ORDER BY stored.block_order LIMIT 1
+$$;
+ALTER FUNCTION storage_v2_derived_lexical_next_block(BIGINT,BIGINT,BIGINT,INTEGER[],BIGINT)
+    OWNER TO mainrag_v2_lexical_rank_owner;
+REVOKE ALL ON FUNCTION storage_v2_derived_lexical_next_block(BIGINT,BIGINT,BIGINT,INTEGER[],BIGINT)
+    FROM PUBLIC,mainrag;
+GRANT EXECUTE ON FUNCTION storage_v2_derived_lexical_next_block(BIGINT,BIGINT,BIGINT,INTEGER[],BIGINT)
     TO mainrag_v2_frontier_owner;
 
 -- First-candidate ranking needs the earliest matching segment, not every
@@ -236,11 +262,22 @@ BEGIN
   v_fingerprints:=storage_v2_posting_fingerprints(tsvector_to_array(to_tsvector('simple',p_query)));
   query_mask:=storage_v2_lexical_segment_mask(v_fingerprints);
  END IF;
- -- Resolve exact root bindings in one query. Canonical prefixes stay lazy:
- -- masks and metadata-only matches can reject/accept without reading a body.
+ -- Batch the earliest fingerprint-compatible block and its canonical window.
+ -- Metadata-only positive matches still avoid reading any canonical body;
+ -- later blocks are fetched only when the first has no exact segment match.
  FOR requested IN SELECT occurrence.id,occurrence.source_id,occurrence.artifact_version_id,
                          document.id AS document_id,
-                         octet_length(document.search_text) AS document_bytes
+                         octet_length(document.search_text) AS document_bytes,
+                         candidate.first_block,
+                         CASE WHEN v_fingerprints IS NOT NULL AND (
+                           setweight(to_tsvector('simple',(candidate.first_block).context_prefixes[1]),'B')
+                           ||setweight(to_tsvector('simple',(candidate.first_block).chunk_types[1]),'C'))@@query
+                          THEN NULL ELSE convert_to(substring(document.search_text FROM 1
+                           FOR least(octet_length(document.search_text),(
+                            SELECT max(window_bounds.start::BIGINT+window_bounds.length-1)
+                             FROM unnest((candidate.first_block).text_byte_starts,
+                                         (candidate.first_block).text_byte_lengths) window_bounds(start,length)))::INTEGER),
+                           'UTF8') END AS initial_bytes
   FROM public.storage_v2_derived_lexical_candidate_occurrences(
       p_occurrence_ids,sources,v_fingerprints) candidate
   JOIN public.occurrence occurrence ON occurrence.id=candidate.occurrence_id
@@ -256,12 +293,10 @@ BEGIN
   IF requested.document_id IS NULL THEN
    RAISE EXCEPTION 'authorized canonical lexical document required' USING ERRCODE='42501';
   END IF;
-  bytes:=NULL;canonical_document_id:=requested.document_id;
-  canonical_document_bytes:=requested.document_bytes;prefix_characters:=0;
+  bytes:=requested.initial_bytes;canonical_document_id:=requested.document_id;
+  canonical_document_bytes:=requested.document_bytes;prefix_characters:=coalesce(octet_length(bytes),0);
+  block:=requested.first_block;
   <<blocks>>
-  FOR block IN SELECT stored.* FROM public.storage_v2_derived_lexical_candidate_blocks(
-      requested.id,requested.source_id,requested.artifact_version_id,v_fingerprints) stored
-   ORDER BY stored.block_order
   LOOP
    FOR item IN SELECT * FROM unnest(block.segment_orders,block.text_byte_starts,
       block.text_byte_lengths,block.context_prefixes,block.chunk_types,block.segment_masks)
@@ -312,6 +347,9 @@ BEGIN
      EXIT blocks;
     END IF;
    END LOOP;
+   SELECT stored.* INTO block FROM public.storage_v2_derived_lexical_next_block(
+       requested.id,requested.source_id,requested.artifact_version_id,v_fingerprints,block.block_order) stored;
+   IF NOT FOUND THEN EXIT blocks; END IF;
   END LOOP blocks;
  END LOOP;
 END $$;
