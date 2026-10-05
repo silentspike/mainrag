@@ -96,6 +96,7 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
     config.dbname(&database);
     let directory = Directory(std::env::temp_dir().join(format!("mainrag-{database}")));
     std::fs::create_dir_all(&directory.0)?;
+    let mut owned_reader_roles = Vec::new();
     let result: Result<()> = async {
         let root = directory.0.join("source");
         let packs = directory.0.join("packs");
@@ -165,7 +166,18 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         let migrations = std::fs::read_dir(project.join("migrations"))?
             .map(|entry| entry.map(|value| value.path()))
             .collect::<std::io::Result<Vec<_>>>()?;
-        for number in 66..=134 {
+        for number in 66..=152 {
+            let reader_role = match number {
+                142 => Some("mainrag_v2_presence_owner"),
+                145 => Some("mainrag_v2_metadata_reader"),
+                _ => None,
+            };
+            if let Some(role) = reader_role {
+                let exists: bool = client.query_one(
+                    "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=$1)", &[&role],
+                ).await?.get(0);
+                ensure!(!exists, "isolated fixture reader role already exists: {role}");
+            }
             let prefix = format!("{number:03}_");
             let matching = migrations
                 .iter()
@@ -189,9 +201,12 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
                 .output()?;
             ensure!(
                 installed.status.success(),
-                "current fixture migration failed: {}",
+                "current fixture migration {number} failed: {}",
                 String::from_utf8_lossy(&installed.stderr)
             );
+            if let Some(role) = reader_role {
+                owned_reader_roles.push(role);
+            }
         }
         client.execute(
             "INSERT INTO sources(id,name,type,path,is_test) VALUES (63,'managed-fixture','managed_append',$1,TRUE)",
@@ -364,6 +379,12 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             "resume progress omitted the observed final commit");
         println!("{}",json!({"fixture":"durable-item-resume","committed_before_interruption":128,
             "final_items":257,"same_generation":true,"duplicate_occurrences":0}));
+        let seed_reader = client.transaction().await?;
+        seed_reader.batch_execute(&format!("SET LOCAL app.user_id='{PRINCIPAL}'")).await?;
+        let empty_bootstrap_seeds = candidate_query_seeds(&seed_reader,165,resumed.generation_id,false).await?;
+        ensure!(empty_bootstrap_seeds.iter().any(|seed| seed.expects_match),
+            "candidate with existing but empty source bootstrap rows must retain native positive seeds");
+        seed_reader.rollback().await?;
 
         let initial = Box::pin(run(&mut client, &root, &packs)).await?;
         ensure!(initial.item_count == 1 && !initial.reused_generation,
@@ -539,7 +560,7 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         retained.commit().await?;
         let native_root = directory.0.join("native-source");
         std::fs::create_dir(&native_root)?;
-        let native_text = "native Über 東京 lexical content\n".repeat(400);
+        let native_text = "native Über 東京 lexical content\n".repeat(10_000);
         std::fs::write(native_root.join("native.txt"), &native_text)?;
         let native_path = native_root.to_str().context("fixture source path is not UTF-8")?;
         client.execute("INSERT INTO sources(id,name,type,path) VALUES(166,'native-retired','fs',$1)",
@@ -563,6 +584,9 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             &[&native.generation_id],
         ).await?.get(0);
         ensure!(lexical_input=="native", "native producer identity is missing");
+        let fallback_seeds = candidate_query_seeds(&transaction,166,native.generation_id,false).await?;
+        ensure!(fallback_seeds==native_verified.query_seeds,
+            "candidate without bootstrap rows must use the same source-backed native seeds");
         let seed = native_verified.query_seeds.iter().find(|seed| seed.expects_match)
             .context("native successor must retain a positive source-backed query seed")?;
         let search: serde_json::Value = transaction.query_one(
@@ -592,5 +616,12 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         .batch_execute(&format!("DROP DATABASE {database} WITH (FORCE)"))
         .await;
     cleanup?;
+    // These cluster roles were created by this fixture's committed migrations.
+    // Drop the disposable database first so its grants and owned objects vanish.
+    for role in owned_reader_roles {
+        cleanup_admin
+            .batch_execute(&format!("DROP ROLE {role}"))
+            .await?;
+    }
     result
 }
