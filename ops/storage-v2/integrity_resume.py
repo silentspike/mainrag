@@ -28,6 +28,31 @@ QUERY_ONLY_CHANGES = frozenset({
 QUERY_ONLY_ADDITIONS = frozenset({
     "storage_v2_cached_first_conjunction_order(text[],smallint[],bigint[],text[])",
 })
+# Migration 157 changes posting representation, not any of the seven verifier
+# paths. Its exact pair receipts and hidden partial representation require a
+# live, read-only catalog admission; a function-name allowlist alone is unsafe.
+POSTING_COMPACTION_CHANGES = frozenset({
+    "storage_v2_posting_probe(text,bigint)",
+    "storage_v2_document_posting(bigint,text)",
+    "storage_v2_cached_document_posting(bigint,text)",
+    "storage_v2_scoped_term_posting(bigint[],text)",
+    "storage_v2_scoped_query_posting(bigint[],text[])",
+    "storage_v2_complete_document_posting_blocks(bigint)",
+    "storage_v2_document_word_identifiers(bigint)",
+    "storage_v2_reject_sealed_posting_insert()",
+})
+POSTING_COMPACTION_ADDITIONS = frozenset({
+    "storage_v2_posting_conversion_relation_sha256(regclass)",
+    "storage_v2_posting_conversion_require_operator()",
+    "storage_v2_posting_representation_visible(bigint,text)",
+    "storage_v2_posting_conversion_contract_sha256()",
+    "storage_v2_prepare_posting_conversion(bigint,bytea,bytea)",
+    "storage_v2_copy_posting_conversion_batch(bigint,bytea,bigint,bytea,bigint)",
+    "storage_v2_copy_posting_conversion_group(bigint,bytea,bigint,bytea,bigint,integer)",
+    "storage_v2_publish_posting_conversion(bigint,bytea,bigint,bytea)",
+    "storage_v2_restore_flat_posting_visibility(bigint,bytea)",
+    "storage_v2_retire_converted_flat_postings(bytea,bytea,bigint,bigint,bytea)",
+})
 INTEGRITY_CHECKS = frozenset({
     "artifact_root", "authorization", "body_pack_integrity", "intelligence",
     "intervals", "legacy_intelligence_export", "lexical_segment_integrity",
@@ -86,11 +111,23 @@ def validate_reuse(prior: dict[str, Any], checkpoint: dict[str, Any],
     old_functions = {name: value for name, value in previous_install.get(
         "function_identities", {}).items() if name.startswith("storage_v2_")}
     functions = observed.get("function_identities", {})
+    changes, additions = QUERY_ONLY_CHANGES, QUERY_ONLY_ADDITIONS
+    if POSTING_COMPACTION_ADDITIONS.intersection(functions):
+        admission = observed.get("posting_compaction_admission")
+        guard = "storage_v2_posting_conversion_require_operator()"
+        if (not POSTING_COMPACTION_ADDITIONS.issubset(functions)
+                or not isinstance(admission, dict)
+                or admission.get("schema_version") != "mainrag.storage-v2.posting-compaction-admission.v1"
+                or admission.get("validated_guard_sha256") != functions.get(guard)
+                or not re.fullmatch(r"[0-9a-f]{64}", admission.get("contract_sha256") or "")):
+            raise RuntimeError("completed integrity posting compaction admission is missing or differs")
+        changes = changes | POSTING_COMPACTION_CHANGES
+        additions = additions | POSTING_COMPACTION_ADDITIONS
     if not old_functions or set(old_functions) - set(functions) or (
-            set(functions) - set(old_functions)) - QUERY_ONLY_ADDITIONS:
+            set(functions) - set(old_functions)) - additions:
         raise RuntimeError("completed integrity verifier catalog differs")
     if any(functions[name] != digest for name, digest in old_functions.items()
-           if name not in QUERY_ONLY_CHANGES):
+           if name not in changes):
         raise RuntimeError("completed integrity verifier definitions differ")
     return verified
 
@@ -99,7 +136,16 @@ def observe_immutable_identity(source_id: int, generation_id: int) -> dict[str, 
     """Bounded local catalog read; no source content, pack copy, or verifier run."""
     if type(source_id) is not int or type(generation_id) is not int or min(source_id, generation_id) <= 0:
         raise RuntimeError("positive immutable candidate identity required")
-    sql = f"""BEGIN READ ONLY; SET LOCAL statement_timeout='15s';
+    sql = f"""BEGIN READ ONLY; SET LOCAL statement_timeout='15s'; SET LOCAL lock_timeout='3s';
+DO $admit$
+BEGIN
+ PERFORM set_config('mainrag.integrity_compaction_contract','',true);
+ IF to_regprocedure('storage_v2_posting_conversion_require_operator()') IS NOT NULL THEN
+  PERFORM set_config('app.user_id',(SELECT id::text FROM users WHERE is_admin ORDER BY id LIMIT 1),true);
+  EXECUTE 'SELECT set_config(''mainrag.integrity_compaction_contract'',
+    encode(storage_v2_posting_conversion_contract_sha256(),''hex''),true)';
+ END IF;
+END $admit$;
 SELECT jsonb_build_object(
  'identity',(SELECT jsonb_build_object(
   'source_id',g.source_id,'generation_id',g.id,'generation_seq',g.generation_seq,'status',g.status,
@@ -116,7 +162,13 @@ SELECT jsonb_build_object(
  'function_identities',(SELECT jsonb_object_agg(p.oid::regprocedure::text,
   encode(sha256(convert_to(pg_get_functiondef(p.oid),'UTF8')),'hex'))
  FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
- WHERE n.nspname='public' AND p.proname LIKE 'storage_v2_%'));
+ WHERE n.nspname='public' AND p.proname LIKE 'storage_v2_%'),
+ 'posting_compaction_admission',CASE WHEN current_setting('mainrag.integrity_compaction_contract')<>''
+ THEN jsonb_build_object('schema_version','mainrag.storage-v2.posting-compaction-admission.v1',
+  'contract_sha256',current_setting('mainrag.integrity_compaction_contract'),
+  'validated_guard_sha256',encode(sha256(convert_to(pg_get_functiondef(
+     to_regprocedure('storage_v2_posting_conversion_require_operator()')),'UTF8')),'hex'))
+ ELSE NULL END);
 ROLLBACK;"""
     result = subprocess.run(
         ["sudo", "-n", "-u", "postgres", "psql", "-X", "-qAt", "-v",

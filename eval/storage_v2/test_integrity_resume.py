@@ -56,6 +56,32 @@ class IntegrityResumeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "checkpoint identity"):
             M["validate_reuse"](*args)
 
+    def test_compaction_reuse_requires_live_catalog_admission_and_unchanged_verifier(self):
+        args = self.fixture()
+        functions = args[-1]["function_identities"]
+        functions.update({name: "4" * 64 for name in M["POSTING_COMPACTION_ADDITIONS"]})
+        args[3]["function_identities"].update({name: "1" * 64 for name in M["POSTING_COMPACTION_CHANGES"]})
+        functions.update({name: "5" * 64 for name in M["POSTING_COMPACTION_CHANGES"]})
+        with self.assertRaisesRegex(RuntimeError, "compaction admission"):
+            M["validate_reuse"](*args)
+        args[-1]["posting_compaction_admission"] = {
+            "schema_version": "mainrag.storage-v2.posting-compaction-admission.v1",
+            "validated_guard_sha256": "4" * 64, "contract_sha256": "6" * 64}
+        self.assertEqual(M["validate_reuse"](*args), args[0]["verification"])
+        for fault in ("guard", "contract", "schema", "missing_helper", "verifier"):
+            with self.subTest(fault=fault):
+                changed = copy.deepcopy(args)
+                admission = changed[-1]["posting_compaction_admission"]
+                if fault == "guard": admission["validated_guard_sha256"] = "7" * 64
+                elif fault == "contract": admission["contract_sha256"] = "invalid"
+                elif fault == "schema": admission["schema_version"] = "unreviewed"
+                elif fault == "missing_helper":
+                    del changed[-1]["function_identities"][next(iter(M["POSTING_COMPACTION_ADDITIONS"]))]
+                else:
+                    changed[-1]["function_identities"]["storage_v2_verify_lexical_segment_page(bigint,bigint,integer)"] = "8" * 64
+                with self.assertRaises(RuntimeError):
+                    M["validate_reuse"](*changed)
+
     def test_rejects_verifier_change_removal_addition_and_binary_drift(self):
         for change in ("definition", "removal", "addition", "binary", "receipt"):
             with self.subTest(change=change):
