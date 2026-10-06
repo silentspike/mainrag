@@ -67,6 +67,30 @@ SELECT node_id||':'||view_id FROM view_row;
                     "REVOKE ALL ON FUNCTION fixture_old_lexical_verifier(BIGINT) FROM PUBLIC; "
                     "GRANT EXECUTE ON FUNCTION fixture_old_lexical_verifier(BIGINT) TO mainrag;")
             cls.file(next((cls.schema.ROOT / "migrations").glob("153_*.sql")))
+            predecessor = cls.sql("SELECT pg_get_functiondef('storage_v2_verify_lexical_segments(bigint)'::REGPROCEDURE)")
+            cls.sql(predecessor.replace("FUNCTION public.storage_v2_verify_lexical_segments(",
+                                        "FUNCTION public.fixture_megabyte_lexical_verifier("))
+            cls.sql("ALTER FUNCTION fixture_megabyte_lexical_verifier(BIGINT) OWNER TO mainrag_v2_frontier_owner; "
+                    "REVOKE ALL ON FUNCTION fixture_megabyte_lexical_verifier(BIGINT) FROM PUBLIC; "
+                    "GRANT EXECUTE ON FUNCTION fixture_megabyte_lexical_verifier(BIGINT) TO mainrag;")
+            cls.file(next((cls.schema.ROOT / "migrations").glob("154_*.sql")))
+            # Exercise large retained compact rows through the historical layout
+            # branch of the source-backed constructor. The fixture changes only
+            # its physical-format selector, preserving all canonical validation.
+            constructor = cls.sql("SELECT pg_get_functiondef('storage_v2_put_lexical_segments_located"
+                "(bigint,bigint,bigint[],text[],text[],text[],bigint[],bigint[])'::REGPROCEDURE)")
+            selector = "IF octet_length(v_search_text)>=262144"
+            if constructor.count(selector) != 1:
+                raise AssertionError("one derived-format selector required")
+            constructor = constructor.replace("FUNCTION public.storage_v2_put_lexical_segments_located(",
+                "FUNCTION public.fixture_retained_compact_constructor(").replace(selector, "IF FALSE")
+            cls.sql(constructor)
+            cls.sql("ALTER FUNCTION fixture_retained_compact_constructor"
+                "(BIGINT,BIGINT,BIGINT[],TEXT[],TEXT[],TEXT[],BIGINT[],BIGINT[]) OWNER TO mainrag_v2_frontier_owner; "
+                "REVOKE ALL ON FUNCTION fixture_retained_compact_constructor"
+                "(BIGINT,BIGINT,BIGINT[],TEXT[],TEXT[],TEXT[],BIGINT[],BIGINT[]) FROM PUBLIC; "
+                "GRANT EXECUTE ON FUNCTION fixture_retained_compact_constructor"
+                "(BIGINT,BIGINT,BIGINT[],TEXT[],TEXT[],TEXT[],BIGINT[],BIGINT[]) TO mainrag;")
         except BaseException:
             base.tearDownClass.__func__(cls)
             raise
@@ -75,7 +99,7 @@ SELECT node_id||':'||view_id FROM view_row;
     def tearDownClass(cls):
         base.tearDownClass.__func__(cls)
 
-    def projected(self, text, positions, storage, *, length=48):
+    def projected(self, text, positions, storage, *, length=48, retained_compact=False):
         occurrence, artifact = self.fixture(text)
         generation = int(self.sql(
             "SELECT r.generation_id FROM storage_v2_ingest_run r JOIN occurrence o "
@@ -99,9 +123,11 @@ SELECT node_id||':'||view_id FROM view_row;
                 call = f"SELECT storage_v2_put_lexical_segments_at({common})"
             else:
                 byte_starts = [len(text[:p].encode()) + 1 for p in selected]
-                call = (f"SELECT storage_v2_put_lexical_segments_located({common},"
+                constructor = ("fixture_retained_compact_constructor" if retained_compact
+                               else "storage_v2_put_lexical_segments_located")
+                call = (f"SELECT {constructor}({common},"
                         f"{array(byte_starts, 'BIGINT')})")
-                if storage == "compact":
+                if storage == "compact" and not retained_compact:
                     # This public fixture is ASCII and short: the supported
                     # writer retains persisted compact vectors automatically.
                     self.assertLess(len(text.encode()), 262144)
@@ -114,7 +140,7 @@ SELECT node_id||':'||view_id FROM view_row;
         return json.loads(self.sql(limit + self.admin(f"SELECT {function}({generation})")))
 
     def test_unicode_windows_unordered_duplicates_and_all_representations_match(self):
-        stride = 1048576 - 4096
+        stride = 65536 - 4096
         for storage, text, positions in (
             ("flat", "alpha β 🙂 日本語\n" * 190000,
              [stride + 3, 0, stride - 9, 2 * stride + 1, 0, stride + 3]),
@@ -135,7 +161,8 @@ SELECT node_id||':'||view_id FROM view_row;
     def test_digest_vector_and_derived_byte_corruption_are_rejected(self):
         for storage, text, changes in (
             ("flat", "alpha beta gamma\n" * 80,
-             ["text_sha256=sha256(convert_to('corrupt','UTF8'))", "fts_vector=to_tsvector('simple','corrupt')"]),
+             ["text_sha256=sha256(convert_to('corrupt','UTF8'))", "fts_vector=to_tsvector('simple','corrupt')",
+              "text_start=100000"]),
             ("compact", "alpha beta gamma\n" * 80,
              ["text_hashes=ARRAY[sha256(convert_to('corrupt','UTF8'))]", "fts_vectors=ARRAY[to_tsvector('simple','corrupt')]"]),
             ("derived", "alpha β 🙂 gamma\n" * 25000, ["text_byte_starts=ARRAY[2]"]),
@@ -213,6 +240,44 @@ SELECT node_id||':'||view_id FROM view_row;
                 self.assertEqual(result, reference)
         print("public dense segment verifier:", json.dumps({"segments":8192,
               "input_bytes":len(text.encode()), "segment_length":1500, "seconds":timings}), flush=True)
+
+    def test_dense_unique_segments_in_large_retained_compact_documents(self):
+        records = [" ".join(f"record{n:04d}term{k:03d}" for k in range(60))
+                   .ljust(1000)[:1000] + "\n" for n in range(1024)]
+        ascii_text = "".join(records)
+        # A non-ASCII character near the end invalidates the ASCII path for the
+        # entire document, even though every preceding segment begins in ASCII.
+        variants = (ascii_text, ascii_text[:-2] + "β\n",
+                    "".join(record[:500] + "🙂日本語" + record[504:] for record in records))
+        positions = [n * 1001 for n in range(1024)]
+        for variant, text in enumerate(variants):
+            with self.subTest(encoding_variant=variant):
+                generation, occurrence = self.projected(text, positions, "compact",
+                    length=1000, retained_compact=True)
+                self.assertEqual(self.sql("SELECT sum(cardinality(segment_orders)) FROM "
+                    f"storage_v2_compact_lexical_block WHERE occurrence_id={occurrence}"), "1024")
+                self.assertEqual(self.sql("SELECT count(*) FROM storage_v2_derived_lexical_block "
+                    f"WHERE occurrence_id={occurrence}"), "0")
+                started = time.monotonic()
+                predecessor = json.loads(self.sql(self.admin(
+                    f"SELECT fixture_megabyte_lexical_verifier({generation})")))
+                predecessor_seconds = time.monotonic() - started
+                started = time.monotonic()
+                current = self.verify(generation, bounded=True)
+                current_seconds = time.monotonic() - started
+                self.assertEqual(current, predecessor)
+                self.assertEqual(current["segment_count"], 1024)
+                self.assert_sql_fails("BEGIN; ALTER TABLE storage_v2_compact_lexical_block "
+                    "DISABLE TRIGGER USER; UPDATE storage_v2_compact_lexical_block "
+                    "SET fts_vectors[cardinality(fts_vectors)]=to_tsvector('simple','corrupt') "
+                    f"WHERE occurrence_id={occurrence} AND block_order=(SELECT max(block_order) "
+                    f"FROM storage_v2_compact_lexical_block WHERE occurrence_id={occurrence}); "
+                    + self.admin(f"SELECT storage_v2_verify_lexical_segments({generation});"),
+                    "lexical segment projection is incomplete")
+                print("public large retained compact verifier:", json.dumps(dict(
+                    encoding_variant=variant, input_bytes=len(text.encode()), segments=1024,
+                    segment_length=1000, predecessor_seconds=predecessor_seconds,
+                    byte_sliced_seconds=current_seconds)), flush=True)
 
     def test_definer_rls_and_small_workspace_are_preserved(self):
         self.assertEqual(self.sql("SELECT proowner::REGROLE::TEXT||':'||prosecdef::TEXT||':'||"
