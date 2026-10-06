@@ -182,7 +182,7 @@ jobs:
           cargo test -p mainrag-api --features storage-v2-retrieval --lib source_file_proof -- --nocapture | tee source-file-tests.log
           python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("source-file-tests.log").read_text(), "Expected complete fragment proof regression to execute"'
           cargo test -p mainrag-api --features storage-v2-retrieval --bin mainrag-api api::handlers::admin::fs_cut -- --nocapture | tee cut-config-tests.log
-          python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("cut-config-tests.log").read_text(), "Expected the source configuration CAS regression to execute"'
+          python3 -c 'from pathlib import Path; assert "2 passed; 0 failed; 0 ignored;" in Path("cut-config-tests.log").read_text(), "Expected configuration CAS and retained-cut writer regressions to execute"'
       - name: Verify character boundaries and durable attempt progress
         shell: bash
         run: |
