@@ -1181,6 +1181,46 @@ Include replacement blocks, their indexes, conversion receipts, retained flat
 data and WAL in capacity accounting. Report physical reclamation only from the
 actual filesystem/thin-pool readback, with the required cleanup acceptance.
 
+## Exact candidate indexes
+
+Migration 159 adds an exact lexeme union of the existing compact segment
+vectors and guards two optional GIN indexes. The union includes every stored
+segment, context prefix and chunk kind. Canonical document postings alone are
+not a valid negative filter: a segment boundary or context may introduce a
+valid native lexeme absent from those postings.
+
+The native reader keeps its exact per-segment check and first matching segment
+order. The posting reader keeps exact term comparisons and BIGINT frequencies.
+Posting index keys use complete-term SHA-256 bytes with the original term
+comparison afterward. Fixed-width keys retain multi-kilobyte source terms
+without imposing a GIN entry-size limit or truncating valid contents. A digest
+collision can only add a candidate; it cannot authorize an incorrect result.
+When both reviewed indexes are valid and ready, their exact necessary predicates
+avoid decoding blocks selected only by a sixteen-bit fingerprint collision.
+Until then, the existing readers remain available. An index with a reserved name
+and an unexpected definition is an error, not evidence of readiness.
+
+The migration does not build indexes or rewrite source bodies, vectors or
+posting dictionaries. `exact-lexeme-indexes.py` is the separate local operator
+for sequential concurrent index creation and guarded removal. It requires an
+exact protected manifest, conservative index/temp/WAL reservations and current
+writer, catalog and physical capacity admission. The ordinary pool ceiling
+applies; a source-specific build exception does not authorize index creation.
+Unknown index size or inadequate WAL room blocks the operation.
+
+Keep the original relation/index catalog and operation identity through every
+phase. A disconnect or an invalid concurrent index requires reconciliation of
+that same named operation. Do not create another index as a retry. Only the two
+reviewed additions may change the catalog; the posting-conversion contract is
+updated only after its original columns, constraints, permissions, policies,
+triggers, indexes and unrelated function identities have been checked.
+
+Count the replacement indexes and their temporary build/WAL costs in the whole
+dedup footprint. Their presence does not prove query latency, physical savings,
+candidate qualification or activation. Validate the affected boundary, context,
+collision and late-hit cases together, then measure only the affected target
+searches whose current performance evidence is missing or invalidated.
+
 # Durable source batches
 
 `source-batch.py` runs one source at a time from a private, frozen JSON plan.
