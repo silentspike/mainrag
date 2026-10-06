@@ -453,11 +453,16 @@ jobs:
         run: python3 -m eval.storage_v2.external_cleanup_rehearsal --qdrant-url http://127.0.0.1:6333
 
   schema-search:
-    name: storage-v2 empty search branches
+    name: storage-v2 empty search branches (${{ matrix.shard }})
     runs-on: ubuntu-24.04
-    # The complete suite plus service setup/teardown exceeded the former budget.
-    # Keep every assertion; allow the added representation and retirement checks.
+    # Separate databases keep fixtures isolated. Partition the existing names,
+    # retaining every assertion while leaving time for service teardown.
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: [0, 1]
     services:
       postgres:
         image: pgvector/pgvector@sha256:1d50c689b0a6511b9ea0a15615281c81a59fd04a08eb35057ec8646fb3a2118a
@@ -477,13 +482,15 @@ jobs:
           persist-credentials: false
       - name: Verify full-result identity and zero empty-branch document scans
         env:
+          SCHEMA_SHARD: ${{ matrix.shard }}
           STORAGE_V2_TEST_SOCKET: '127.0.0.1'
           PGUSER: fixture
           PGPASSWORD: fixture_only
         run: |
           python3 - <<'PY'
+          import os
           import unittest
-          suite = unittest.defaultTestLoader.loadTestsFromNames([
+          test_names = [
               'eval.storage_v2.schema.test_empty_search_branches',
               'eval.storage_v2.schema.test_empty_search_branch_benchmark',
               'eval.storage_v2.schema.test_keyword_tie_order',
@@ -524,14 +531,21 @@ jobs:
               'eval.storage_v2.schema.test_cache_reader_metadata.CacheReaderMetadataTests',
               'eval.storage_v2.schema.test_posting_compaction',
               'eval.storage_v2.schema.test_seek_lexical_verification_pages.SeekLexicalVerificationPageTests',
+              'eval.storage_v2.schema.test_exact_lexeme_probes.ExactLexemeProbeTests',
               'eval.storage_v2.schema.test_native_legacy_hit_resolution.NativeLegacyHitResolutionTests',
               'eval.storage_v2.schema.test_cleanup_catalog.CleanupCatalogTests',
               'eval.storage_v2.schema.test_cleanup_apply.CleanupApplyTests',
               'eval.storage_v2.schema.test_native_gc.NativeGcTests',
               'eval.storage_v2.schema.test_active_source_metrics.ActiveSourceMetricsTests',
               'eval.storage_v2.schema.test_active_explore.ActiveExploreTests',
-          ])
-          assert suite.countTestCases() >= 35, 'Expected search, pack reader-fence, append, native intelligence and lexical window regressions'
+          ]
+          shard = int(os.environ['SCHEMA_SHARD'])
+          assert shard in (0, 1), 'Expected one of the two declared schema shards'
+          assert len(set(test_names)) == len(test_names), 'Schema selections must be unique'
+          selected = test_names[shard::2]
+          suite = unittest.defaultTestLoader.loadTestsFromNames(selected)
+          assert suite.countTestCases() >= 35, 'Expected nonempty search, pack, intelligence and lexical regressions in each shard'
+          print(f'Schema shard {shard}: {len(selected)}/{len(test_names)} selections; {suite.countTestCases()} tests', flush=True)
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           raise SystemExit(0 if result.wasSuccessful() and not result.skipped else 1)
           PY
