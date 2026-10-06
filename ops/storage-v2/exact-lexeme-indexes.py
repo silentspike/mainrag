@@ -32,9 +32,11 @@ LOCK_KEY = 'storage-v2-posting-conversion-v1'
 TABLES = ('storage_v2_compact_lexical_block', 'storage_v2_compact_posting_block')
 INDEXES = ('idx_storage_v2_compact_lexical_exact_lexemes',
            'idx_storage_v2_compact_posting_exact_terms')
-EXPRESSIONS = ('public.storage_v2_compact_lexical_exact_lexemes(fts_vectors)', 'terms')
+EXPRESSIONS = ('public.storage_v2_compact_lexical_exact_lexemes(fts_vectors)',
+               'public.storage_v2_compact_posting_exact_term_keys(terms)')
 SIGNATURES = (
     'storage_v2_compact_lexical_exact_lexemes(tsvector[])',
+    'storage_v2_compact_posting_exact_term_keys(text[])',
     'storage_v2_exact_lexeme_probes_ready()',
     'storage_v2_authorized_cached_lexical_first_candidates(bigint[],bigint[],text)',
     'storage_v2_scoped_query_posting(bigint[],text[])')
@@ -240,9 +242,11 @@ FUNCTION_SQL = """SELECT p.oid::regprocedure::text signature,r.rolname owner,
  encode(sha256(convert_to(pg_get_functiondef(p.oid),'UTF8')),'hex') definition_sha256,
  encode(sha256(convert_to((to_jsonb(p)-'prosrc')::text,'UTF8')),'hex') metadata_sha256,
  p.provolatile volatility,p.proisstrict strict,p.proparallel parallel,p.prosecdef definer,
+ p.proleakproof leakproof,p.prosupport::bigint support,l.lanname language,p.prorettype::regtype::text returns,
  p.proconfig config,(SELECT coalesce(jsonb_agg(jsonb_build_array(a.grantee::regrole::text,a.privilege_type,a.is_grantable)
  ORDER BY a.grantee,a.privilege_type),'[]') FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a) acl
- FROM pg_proc p JOIN pg_roles r ON r.oid=p.proowner WHERE p.pronamespace='public'::regnamespace AND p.prokind IN ('f','p') ORDER BY p.oid"""
+ FROM pg_proc p JOIN pg_roles r ON r.oid=p.proowner JOIN pg_language l ON l.oid=p.prolang
+ WHERE p.pronamespace='public'::regnamespace AND p.prokind IN ('f','p') ORDER BY p.oid"""
 CONTRACT_SQL = """SELECT relation_oid::bigint oid,encode(identity_sha256,'hex') pin,
  encode(storage_v2_posting_conversion_relation_sha256(relation_oid::regclass),'hex') actual
  FROM storage_v2_posting_conversion_catalog_contract ORDER BY relation_oid"""
@@ -262,15 +266,18 @@ def catalog(db):
 
 def exact_index(row, phase, snapshot):
     table = next(r for r in snapshot['cores'] if r['name'] == TABLES[phase])
-    expected_expression = 'storage_v2_compact_lexical_exact_lexemes(fts_vectors)' if phase == 0 else None
+    expected_expression = ('storage_v2_compact_lexical_exact_lexemes(fts_vectors)',
+                           'storage_v2_compact_posting_exact_term_keys(terms)')[phase]
     checks = {'table_oid': table['oid'], 'owner': table['core']['owner'], 'method': 'gin',
               'options': None, 'tablespace': 0, 'unique': False, 'primary_key': False, 'exclusion': False,
-              'natts': 1, 'nkeys': 1, 'predicate': None, 'keys': '0' if phase == 0 else '3',
+              'natts': 1, 'nkeys': 1, 'predicate': None, 'keys': '0',
               'expression': expected_expression, 'opclass': 'array_ops', 'opnamespace': 'pg_catalog', 'option': 0}
     if any(row.get(k) != v for k, v in checks.items()):
         raise RuntimeError('a same-name index has a conflicting exact definition')
     if phase == 1:
-        collation = next(c[7] for c in table['core']['columns'] if c[1] == 'terms')
+        # Full-term SHA256 keys are BYTEA[], which have no collation. The raw
+        # terms column remains untouched, including arbitrary-length literals.
+        collation = 0
     else:
         # The reviewed installed catalog records the database default collation OID.
         collation = snapshot['default_collation_oid']
@@ -318,19 +325,22 @@ def delta(original, current, intents, accepted_pins=()):
 def gate_helpers(snapshot, expected):
     functions = {r['signature']: r for r in snapshot['functions']}
     if set(expected) != set(SIGNATURES):
-        raise RuntimeError('all four exact installed SQL159 function identities are required')
+        raise RuntimeError('all five exact installed SQL159 function identities are required')
     for signature in SIGNATURES:
         row = functions.get(signature)
         if row is None or expected[signature] != {k: row[k] for k in ('definition_sha256', 'metadata_sha256')}:
             raise RuntimeError('installed helper/reader byte or authority identity differs')
         for sha in expected[signature].values():
             P.sha_bytes(sha)
-    for i, owner, grants, volatility, strict in (
-            (0, 'mainrag_v2_lexical_rank_owner', {'mainrag_v2_lexical_rank_owner', 'mainrag_v2_frontier_owner'}, 'i', True),
-            (1, 'mainrag_v2_lexical_rank_owner', {'mainrag_v2_lexical_rank_owner', 'mainrag_v2_frontier_owner', 'mainrag'}, 's', False)):
+    for i, owner, grants, volatility, strict, language, returns in (
+            (0, 'mainrag_v2_lexical_rank_owner', {'mainrag_v2_lexical_rank_owner', 'mainrag_v2_frontier_owner'}, 'i', True, 'sql', 'text[]'),
+            (1, 'mainrag_v2_lexical_rank_owner', {'mainrag_v2_lexical_rank_owner', 'mainrag_v2_frontier_owner', 'mainrag'}, 'i', True, 'sql', 'bytea[]'),
+            (2, 'mainrag_v2_lexical_rank_owner', {'mainrag_v2_lexical_rank_owner', 'mainrag_v2_frontier_owner', 'mainrag'}, 's', False, 'plpgsql', 'boolean')):
         row = functions[SIGNATURES[i]]
         if row['owner'] != owner or row['volatility'] != volatility or row['strict'] != strict \
                 or row['definer'] or row['parallel'] != 's' \
+                or row['leakproof'] or catalog_oid(row['support']) != 0 \
+                or row['language'] != language or row['returns'] != returns \
                 or row['config'] != ['search_path=pg_catalog, public, pg_temp'] \
                 or {r[0] for r in row['acl']} != grants \
                 or any(r[1:] != ['EXECUTE', False] for r in row['acl']):
@@ -569,9 +579,9 @@ class Workflow:
 
     def rollback(self):
         additions = self.reconcile()
-        # No helper drop: the installed159 readers depend on both helpers and
+        # No helper drop: the installed159 readers depend on all three helpers and
         # their fallback is precisely what makes a two-index rollback safe.
-        self.state['helpers_retained_for_installed_reader'] = list(SIGNATURES[:2])
+        self.state['helpers_retained_for_installed_reader'] = list(SIGNATURES[:3])
         for phase in (1, 0):
             if phase in additions:
                 self.run_phase(phase, drop=True)

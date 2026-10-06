@@ -47,6 +47,22 @@ REVOKE ALL ON FUNCTION storage_v2_compact_lexical_exact_lexemes(TSVECTOR[]) FROM
 GRANT EXECUTE ON FUNCTION storage_v2_compact_lexical_exact_lexemes(TSVECTOR[])
  TO mainrag_v2_frontier_owner;
 
+-- Fixed-width keys cover complete canonical terms of any accepted length.
+-- Hash overlap is only a necessary condition: the original scoped raw-term
+-- equality and BIGINT frequency checks still decide each returned posting.
+CREATE FUNCTION storage_v2_compact_posting_exact_term_keys(p_terms TEXT[])
+RETURNS BYTEA[] LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+SET search_path=pg_catalog,public,pg_temp AS $term_keys$
+ SELECT ARRAY(SELECT DISTINCT sha256(convert_to(term,'UTF8'))
+  FROM unnest(p_terms) term
+  ORDER BY 1)
+$term_keys$;
+ALTER FUNCTION storage_v2_compact_posting_exact_term_keys(TEXT[])
+ OWNER TO mainrag_v2_lexical_rank_owner;
+REVOKE ALL ON FUNCTION storage_v2_compact_posting_exact_term_keys(TEXT[]) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION storage_v2_compact_posting_exact_term_keys(TEXT[])
+ TO mainrag,mainrag_v2_frontier_owner;
+
 -- One catalog-only decision per reader invocation. Incomplete concurrent
 -- builds use the unchanged fallback. A conflicting definition is drift,
 -- rather than an apparently successful installation of the intended index.
@@ -55,32 +71,45 @@ RETURNS BOOLEAN LANGUAGE plpgsql STABLE PARALLEL SAFE
 SET search_path=pg_catalog,public,pg_temp AS $ready$
 DECLARE expected RECORD; actual RECORD; all_ready BOOLEAN:=TRUE;
 BEGIN
- IF NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang
-  WHERE p.oid='public.storage_v2_compact_lexical_exact_lexemes(tsvector[])'::REGPROCEDURE
-    AND p.proowner='mainrag_v2_lexical_rank_owner'::REGROLE
-    AND l.lanname='sql' AND p.provolatile='i' AND p.proisstrict AND p.proparallel='s'
-    AND NOT p.prosecdef AND NOT p.proleakproof AND p.prosupport=0
-    AND p.proconfig=ARRAY['search_path=pg_catalog, public, pg_temp']::TEXT[]
-    AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='4bbda8a04222fff3a7023125546cef2aa6b1713cc4111a9e5054628f90f5e8d7'
-    AND has_function_privilege('mainrag_v2_frontier_owner',p.oid,'EXECUTE')
-    AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
-      WHERE a.grantee NOT IN (p.proowner,'mainrag_v2_frontier_owner'::REGROLE)
-         OR a.privilege_type<>'EXECUTE' OR (a.is_grantable AND a.grantee<>p.proowner))) THEN
-  RAISE EXCEPTION 'exact lexeme union helper identity differs';
- END IF;
+ FOR expected IN SELECT * FROM (VALUES
+  ('storage_v2_compact_lexical_exact_lexemes(tsvector[])',
+   'text[]',
+   '4bbda8a04222fff3a7023125546cef2aa6b1713cc4111a9e5054628f90f5e8d7',FALSE),
+  ('storage_v2_compact_posting_exact_term_keys(text[])',
+   'bytea[]',
+   '8880cb3c5ce9f982104c78e710d92e4793d378e090d5d7cbfb226ddff70e1ff9',TRUE)
+ ) helpers(signature,return_type,body_sha256,grant_mainrag) LOOP
+  IF NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang
+   WHERE p.oid=('public.'||expected.signature)::REGPROCEDURE
+     AND p.proowner='mainrag_v2_lexical_rank_owner'::REGROLE
+     AND l.lanname='sql' AND p.prokind='f' AND p.provolatile='i'
+     AND p.proisstrict AND p.proparallel='s' AND NOT p.proretset
+     AND p.prorettype=expected.return_type::REGTYPE
+     AND p.pronargdefaults=0 AND p.provariadic=0
+     AND NOT p.prosecdef AND NOT p.proleakproof AND p.prosupport=0
+     AND p.proconfig=ARRAY['search_path=pg_catalog, public, pg_temp']::TEXT[]
+     AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')=expected.body_sha256
+     AND has_function_privilege('mainrag_v2_frontier_owner',p.oid,'EXECUTE')
+     AND (NOT expected.grant_mainrag OR has_function_privilege('mainrag',p.oid,'EXECUTE'))
+     AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+       WHERE (a.grantee NOT IN (p.proowner,'mainrag_v2_frontier_owner'::REGROLE)
+                AND NOT (expected.grant_mainrag AND a.grantee='mainrag'::REGROLE))
+          OR a.privilege_type<>'EXECUTE' OR (a.is_grantable AND a.grantee<>p.proowner))) THEN
+   RAISE EXCEPTION 'exact lexeme union helper identity differs: %',expected.signature;
+  END IF;
+ END LOOP;
  FOR expected IN SELECT * FROM (VALUES
   ('idx_storage_v2_compact_lexical_exact_lexemes',
    'storage_v2_compact_lexical_block',
-   'storage_v2_compact_lexical_exact_lexemes(fts_vectors)',0),
+   'storage_v2_compact_lexical_exact_lexemes(fts_vectors)','default'::REGCOLLATION::OID),
   ('idx_storage_v2_compact_posting_exact_terms',
-   'storage_v2_compact_posting_block',NULL::TEXT,3)
- ) indexes(index_name,table_name,expression,key_number) LOOP
+   'storage_v2_compact_posting_block',
+   'storage_v2_compact_posting_exact_term_keys(terms)',0::OID)
+ ) indexes(index_name,table_name,expression,collation_oid) LOOP
   SELECT i.*,idx.relowner AS index_owner,idx.reloptions AS index_options,
          tbl.relowner AS table_owner,am.amname,
          pg_get_expr(i.indexprs,i.indrelid) AS expression,
-         op.opcname,op.opcnamespace,
-         (SELECT attcollation FROM pg_attribute
-          WHERE attrelid=i.indrelid AND attname='terms' AND NOT attisdropped) AS term_collation
+         op.opcname,op.opcnamespace
     INTO actual FROM pg_index i
     JOIN pg_class idx ON idx.oid=i.indexrelid
     JOIN pg_class tbl ON tbl.oid=i.indrelid
@@ -99,13 +128,11 @@ BEGIN
      OR actual.index_options IS NOT NULL
      OR actual.indisunique OR actual.indisprimary OR actual.indisexclusion
      OR actual.indnatts<>1 OR actual.indnkeyatts<>1 OR actual.indpred IS NOT NULL
-     OR actual.indkey::TEXT<>expected.key_number::TEXT
+     OR actual.indkey::TEXT<>'0'
      OR actual.expression IS DISTINCT FROM expected.expression
      OR actual.opcname<>'array_ops' OR actual.opcnamespace<>'pg_catalog'::REGNAMESPACE
      OR actual.indoption[0]<>0
-     OR actual.indcollation[0] IS DISTINCT FROM
-          (CASE WHEN expected.key_number=0 THEN 'default'::REGCOLLATION::OID
-                ELSE actual.term_collation END) THEN
+     OR actual.indcollation[0] IS DISTINCT FROM expected.collation_oid THEN
    RAISE EXCEPTION 'exact lexeme index definition differs: %',expected.index_name;
   END IF;
   all_ready:=all_ready AND actual.indisvalid AND actual.indisready
@@ -197,7 +224,7 @@ $new$||marker||E'\n            END IF;';
    patched:=replace(patched,marker,marker||E'\n    v_exact_lexeme_probes BOOLEAN := public.storage_v2_exact_lexeme_probes_ready();');
    marker:=$old$         WHERE block.fingerprints && public.storage_v2_posting_fingerprints(v_terms)
            AND block.document_id BETWEEN v_min_document AND v_max_document$old$;
-   replacement:=marker||E'\n           AND (NOT v_exact_lexeme_probes OR block.terms && v_terms)';
+   replacement:=marker||E'\n           AND (NOT v_exact_lexeme_probes OR\n                public.storage_v2_compact_posting_exact_term_keys(block.terms) && v_hashes)';
    IF (length(patched)-length(replace(patched,marker,'')))/length(marker)<>1 THEN
     RAISE EXCEPTION 'posting exact lexeme candidate boundary differs'; END IF;
    patched:=replace(patched,marker,replacement);

@@ -1,6 +1,7 @@
 """Focused index ownership, catalog delta and lost-ack tests; no production I/O."""
 import copy
 import importlib.util
+import os
 from pathlib import Path
 import queue
 from types import SimpleNamespace
@@ -32,9 +33,11 @@ def add_index(current, phase, valid=True):
     row = {'oid': 1000 + phase, 'table_oid': 10 if phase == 0 else 20,
            'name': O.INDEXES[phase], 'owner': 30, 'options': None, 'tablespace': 0,
            'method': 'gin', 'unique': False, 'primary_key': False, 'exclusion': False,
-           'natts': 1, 'nkeys': 1, 'predicate': None, 'keys': '0' if phase == 0 else '3',
-           'expression': 'storage_v2_compact_lexical_exact_lexemes(fts_vectors)' if phase == 0 else None,
-           'opclass': 'array_ops', 'opnamespace': 'pg_catalog', 'option': 0, 'collation': 100,
+           'natts': 1, 'nkeys': 1, 'predicate': None, 'keys': '0',
+           'expression': ('storage_v2_compact_lexical_exact_lexemes(fts_vectors)',
+                          'storage_v2_compact_posting_exact_term_keys(terms)')[phase],
+           'opclass': 'array_ops', 'opnamespace': 'pg_catalog', 'option': 0,
+           'collation': 100 if phase == 0 else 0,
            'valid': valid, 'ready': valid, 'live': True, 'checkxmin': False,
            'definition': O.ddl(phase).replace(' CONCURRENTLY', '')}
     current['indexes'].append(row)
@@ -49,6 +52,29 @@ def intent(phase):
 
 
 class ExactLexemeOwnershipTests(unittest.TestCase):
+    def test_ci_transport_is_fixture_only_and_does_not_copy_private_environment(self):
+        fixture = {'STORAGE_V2_TEST_SOCKET': '127.0.0.1', 'PGUSER': 'fixture',
+                   'PGPASSWORD': 'fixture_only', 'PRIVATE_TOKEN': 'must-not-copy'}
+        def observe(db):
+            self.assertIn('127.0.0.1', db.command)
+            self.assertEqual(db.command[-2:], ['-U', 'fixture'])
+            self.assertEqual(O.clean_environment().get('PGPASSWORD'), 'fixture_only')
+            self.assertNotIn('PRIVATE_TOKEN', O.clean_environment())
+            return {'status': 'fixture-transport-observed'}
+        with patch.dict(os.environ, fixture), patch.dict(os.environ, {'PGSERVICE': 'must-not-copy'}):
+            with patch(__name__ + '._exercise_catalog_protocol', side_effect=observe):
+                self.assertEqual(exercise_disposable_catalog_protocol(
+                    'owned_fixture', Path('127.0.0.1'), '00000000-0000-4000-8000-000000000031'),
+                    {'status': 'fixture-transport-observed'})
+            self.assertNotIn('PGPASSWORD', O.clean_environment())
+            for invalid in ('192.0.2.1', 'localhost', '127.0.0.1:5432'):
+                with self.subTest(host=invalid), self.assertRaises(RuntimeError):
+                    exercise_disposable_catalog_protocol(
+                        'owned_fixture', Path(invalid), '00000000-0000-4000-8000-000000000031')
+            with patch.dict(os.environ, {'PGUSER': 'unrelated-account'}), self.assertRaises(RuntimeError):
+                exercise_disposable_catalog_protocol(
+                    'owned_fixture', Path('127.0.0.1'), '00000000-0000-4000-8000-000000000031')
+
     def test_only_reviewed_constant_ddl_is_available(self):
         for phase in (0, 1):
             self.assertTrue(O.ddl(phase).startswith('CREATE INDEX CONCURRENTLY '))
@@ -65,15 +91,82 @@ class ExactLexemeOwnershipTests(unittest.TestCase):
         self.assertTrue(O.delta(old, now, intent(0))[0][1])
         with self.assertRaisesRegex(RuntimeError, 'pre-DDL intent'):
             O.delta(old, now, {})
-        # Actual catalog JSON emits attcollation OIDs as decimal strings;
-        # INDEX_SQL explicitly casts its observed collation to BIGINT.
+        # Actual column OIDs can be JSON strings. BYTEA[] expression keys have
+        # no collation even while the original terms column remains collated.
         old['cores'][1]['core']['columns'][0][7] = '100'
         now = copy.deepcopy(old)
-        add_index(now, 1)
+        row = add_index(now, 1)
         self.assertTrue(O.delta(old, now, intent(1))[1][1])
-        for invalid in (True, -1, '100;SQL', '01', 4294967296):
+        row['collation'] = '0'
+        self.assertTrue(O.delta(old, now, intent(1))[1][1])
+        old['default_collation_oid'] = '100'
+        now = copy.deepcopy(old)
+        add_index(now, 0)
+        self.assertTrue(O.delta(old, now, intent(0))[0][1])
+        for invalid in (True, -1, '100;SQL', '01', 4294967296, 100.0, '١٠٠'):
             with self.subTest(oid=invalid), self.assertRaises(RuntimeError):
                 O.catalog_oid(invalid)
+
+    def test_posting_probe_requires_full_term_fixed_size_expression_not_raw_terms(self):
+        old = original_catalog()
+        now = copy.deepcopy(old)
+        row = add_index(now, 1)
+        self.assertIn('storage_v2_compact_posting_exact_term_keys(terms)', O.ddl(1))
+        self.assertEqual(row['keys'], '0')
+        self.assertEqual(row['collation'], 0)
+        self.assertTrue(O.delta(old, now, intent(1))[1][1])
+        # The former raw TEXT[] GIN is unsafe for accepted unbounded terms and
+        # must be refused even if its name, table and ready flags match.
+        row.update(keys='3', expression=None, collation=100)
+        with self.assertRaisesRegex(RuntimeError, 'conflicting exact definition'):
+            O.delta(old, now, intent(1))
+        row.update(keys='0', expression='storage_v2_compact_posting_exact_term_keys(terms)', collation=100)
+        with self.assertRaisesRegex(RuntimeError, 'collation differs'):
+            O.delta(old, now, intent(1))
+
+    def test_all_five_pins_and_three_helper_execution_contracts_are_mandatory(self):
+        functions = []
+        expected = {}
+        for i, signature in enumerate(O.SIGNATURES):
+            row = {'signature': signature, 'definition_sha256': 'a' * 64, 'metadata_sha256': 'b' * 64,
+                   'owner': 'mainrag_v2_lexical_rank_owner', 'volatility': 's' if i == 2 else 'i',
+                   'strict': i != 2, 'parallel': 's', 'definer': False, 'leakproof': False,
+                   'support': 0, 'language': 'plpgsql' if i == 2 else 'sql',
+                   'returns': ('text[]', 'bytea[]', 'boolean', 'record', 'record')[i],
+                   'config': ['search_path=pg_catalog, public, pg_temp'],
+                   'acl': [[role, 'EXECUTE', False] for role in
+                       (['mainrag_v2_lexical_rank_owner', 'mainrag_v2_frontier_owner'] +
+                        (['mainrag'] if i in (1, 2) else []))]}
+            functions.append(row)
+            expected[signature] = {k: row[k] for k in ('definition_sha256', 'metadata_sha256')}
+        O.gate_helpers({'functions': functions}, expected)
+        missing = dict(expected)
+        del missing[O.SIGNATURES[1]]
+        with self.assertRaisesRegex(RuntimeError, 'all five'):
+            O.gate_helpers({'functions': functions}, missing)
+        for field, value in (('returns', 'text[]'), ('strict', False), ('leakproof', True),
+                             ('support', 1), ('language', 'plpgsql'), ('parallel', 'u')):
+            changed = copy.deepcopy(functions)
+            changed[1][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(RuntimeError, 'helper owner'):
+                O.gate_helpers({'functions': changed}, expected)
+        changed = copy.deepcopy(functions)
+        changed[1]['acl'] = changed[1]['acl'][:2]
+        with self.assertRaisesRegex(RuntimeError, 'helper owner'):
+            O.gate_helpers({'functions': changed}, expected)
+
+    def test_rollback_retains_all_three_helpers_and_restores_only_owned_indexes(self):
+        old = original_catalog()
+        session = SimpleNamespace(scalar=Mock(return_value=False))
+        state = {'intents': {}}
+        flow = O.Workflow(None, session, {'original': old}, state, lambda s: None, {})
+        flow.reconcile = Mock(return_value={})
+        flow.run_phase = Mock()
+        with patch.object(O, 'catalog', return_value=old):
+            flow.rollback()
+        self.assertEqual(state['helpers_retained_for_installed_reader'], list(O.SIGNATURES[:3]))
+        self.assertEqual(state['status'], 'ROLLED_BACK_ORIGINAL_CATALOG_HELPERS_RETAINED')
+        flow.run_phase.assert_not_called()
 
     def test_invalid_index_is_retained_as_incomplete_and_never_rebuilt(self):
         old = original_catalog()
@@ -224,8 +317,27 @@ def exercise_disposable_catalog_protocol(database, socket, user_id):
     Exercises the real query parser, held session lock, autocommit CIC, catalog
     comparison, narrow pin update, reverse DROP and original-contract restore.
     """
-    db = O.LocalDatabase({'database': database, 'socket': str(socket),
-                         'user_id': user_id, 'peer_admin_via_sudo': False})
+    if Path(socket).is_absolute():
+        db = O.LocalDatabase({'database': database, 'socket': str(socket),
+                             'user_id': user_id, 'peer_admin_via_sudo': False})
+        return _exercise_catalog_protocol(db)
+    # The existing public CI service uses this exact loopback fixture account.
+    # This adapter is test-only: the production constructor/environment still
+    # rejects TCP and credentials. Reuse the same disposable database and real
+    # JSON/session/CIC implementation, without an additional PostgreSQL cluster.
+    if str(socket) != '127.0.0.1' or os.environ.get('STORAGE_V2_TEST_SOCKET') != str(socket) \
+            or os.environ.get('PGUSER') != 'fixture' or os.environ.get('PGPASSWORD') != 'fixture_only':
+        raise RuntimeError('only the declared public CI fixture transport is accepted')
+    db = object.__new__(O.LocalDatabase)
+    db.database, db.user_id = database, str(uuid.UUID(user_id))
+    db.command = ['psql', '-X', '--no-psqlrc', '-qAt', '-v', 'ON_ERROR_STOP=1',
+                  '-h', '127.0.0.1', '-d', database, '-U', 'fixture']
+    environment = O.clean_environment() | {'PGUSER': 'fixture', 'PGPASSWORD': 'fixture_only'}
+    with patch.object(O, 'clean_environment', return_value=environment):
+        return _exercise_catalog_protocol(db)
+
+
+def _exercise_catalog_protocol(db):
     operation = str(uuid.uuid4())
     session = O.Session(db, operation)
     try:
