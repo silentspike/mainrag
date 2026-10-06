@@ -14,6 +14,7 @@ import json
 import os
 import re
 import runpy
+import socket
 import stat
 import subprocess
 import sys
@@ -281,7 +282,8 @@ def bind_live(candidate_set: list[dict], rows: list[dict]) -> list[dict]:
 
 
 def verify_current_api_watermarks(api_url: str, token: str,
-                                  candidate_set: list[dict]) -> None:
+                                  candidate_set: list[dict]) -> list[dict]:
+    observed_rows = []
     parsed = urllib.parse.urlparse(api_url)
     if parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "::1") \
             or parsed.username or parsed.password or parsed.path not in ("", "/") \
@@ -308,6 +310,129 @@ def verify_current_api_watermarks(api_url: str, token: str,
                 or observed.get("adapter_profile_id") != item["adapter_profile_id"] \
                 or observed.get("item_count") != item["item_count"]:
             raise RuntimeError("final source watermark drifted before activation")
+        observed_rows.append({"source_id": source_id,
+                              "watermark_sha256": observed["source_watermark_sha256"],
+                              "adapter_profile_id": observed["adapter_profile_id"],
+                              "item_count": observed["item_count"],
+                              "observed_at_unix": int(time.time())})
+    return observed_rows
+
+
+def api_unit_state() -> dict[str, str]:
+    result = subprocess.run(["systemctl", "show", "mainrag-api.service", "-p",
+                             "LoadState,ActiveState,SubState,MainPID,Result"],
+                            capture_output=True, text=True, check=True)
+    value = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    if value.get("LoadState") != "loaded":
+        raise RuntimeError("API service identity is unavailable")
+    return value
+
+
+def running_binary_sha256(pid: str) -> str:
+    if not pid.isdecimal() or int(pid) <= 1:
+        raise RuntimeError("API process identity differs")
+    value = subprocess.run(["sudo", "-n", "sha256sum", f"/proc/{pid}/exe"],
+                           capture_output=True, text=True, check=True).stdout.split()
+    if not value or not valid_hash(value[0]):
+        raise RuntimeError("running API binary identity is unavailable")
+    return value[0]
+
+
+def require_stopped_api() -> dict[str, str]:
+    value = api_unit_state()
+    if any(value.get(key) != expected for key, expected in
+           {"ActiveState": "inactive", "SubState": "dead", "MainPID": "0",
+            "Result": "success"}.items()):
+        raise RuntimeError("API must remain stopped inside the maintenance boundary")
+    try:
+        connection = socket.create_connection(("127.0.0.1", 3001), timeout=2)
+    except ConnectionRefusedError:
+        return value
+    except OSError as error:
+        raise RuntimeError("API listener absence is unverified") from error
+    connection.close()
+    raise RuntimeError("a live API listener remains inside the maintenance boundary")
+
+
+def capture_watermarks_command(args: argparse.Namespace) -> None:
+    audit = read_private(args.audit, args.audit_sha256)
+    candidates = audit.get("candidate_set")
+    if audit.get("persisted_candidate_set_complete") is not True \
+            or not isinstance(candidates, list) or not candidates \
+            or audit.get("candidate_set_sha256") != sha256(canonical(candidates)):
+        raise RuntimeError("watermark capture requires the complete candidate set")
+    before = api_unit_state()
+    if before.get("ActiveState") != "active":
+        raise RuntimeError("watermark capture requires the live API")
+    binary_sha = sha256(args.installed_binary.read_bytes())
+    if running_binary_sha256(before.get("MainPID", "")) != binary_sha:
+        raise RuntimeError("running watermark reader differs from installed binary")
+    rows = verify_current_api_watermarks(args.api_url, args.api_token, candidates)
+    now = int(time.time())
+    if any(not 0 <= now - row["observed_at_unix"] <= 300 for row in rows):
+        raise RuntimeError("watermark capture exceeded the freshness boundary")
+    if api_unit_state() != before or running_binary_sha256(before["MainPID"]) != binary_sha:
+        raise RuntimeError("watermark reader restarted during capture")
+    receipt = {"schema_version": "mainrag.storage-v2.quiesced-watermarks.v1",
+               "status": "PASS_LIVE_WATERMARKS_BEFORE_API_STOP",
+               "candidate_set_sha256": audit["candidate_set_sha256"],
+               "persisted_audit_sha256": args.audit_sha256,
+               "installed_binary_sha256": binary_sha,
+               "reader_pid": int(before["MainPID"]), "source_count": len(rows),
+               "watermarks": rows, "captured_at_unix": now,
+               "api_stopped": False}
+    private_write(args.output, receipt)
+    print(json.dumps({"status": receipt["status"], "source_count": len(rows),
+                      "watermarks_receipt_sha256": sha256(args.output.read_bytes())}))
+
+
+def verify_quiesced_watermarks(value: dict, candidates: list[dict],
+                              binary_sha: str, now: int) -> None:
+    if value.get("schema_version") != "mainrag.storage-v2.quiesced-watermarks.v1" \
+            or value.get("status") != "PASS_LIVE_WATERMARKS_BEFORE_API_STOP" \
+            or value.get("candidate_set_sha256") != sha256(canonical(candidates)) \
+            or value.get("installed_binary_sha256") != binary_sha \
+            or type(value.get("reader_pid")) is not int or value["reader_pid"] <= 1 \
+            or type(value.get("captured_at_unix")) is not int \
+            or not 0 <= now - value["captured_at_unix"] <= 300 \
+            or type(value.get("source_count")) is not int \
+            or value["source_count"] != len(candidates):
+        raise RuntimeError("quiesced watermark receipt is stale or differs")
+    rows = value.get("watermarks")
+    if not isinstance(rows, list) or len(rows) != len(candidates):
+        raise RuntimeError("quiesced watermark source set is incomplete")
+    by_id = {}
+    for row in rows:
+        if not isinstance(row, dict) or type(row.get("source_id")) is not int \
+                or row["source_id"] in by_id \
+                or type(row.get("item_count")) is not int \
+                or not isinstance(row.get("adapter_profile_id"), str) \
+                or not valid_hash(row.get("watermark_sha256")) \
+                or type(row.get("observed_at_unix")) is not int \
+                or not 0 <= now - row["observed_at_unix"] <= 300:
+            raise RuntimeError("quiesced watermark observation differs")
+        by_id[row["source_id"]] = row
+    for candidate in candidates:
+        row = by_id.get(candidate["source_id"], {})
+        if any(row.get(key) != candidate[expected] for key, expected in
+               {"watermark_sha256": "source_watermark_sha256",
+                "adapter_profile_id": "adapter_profile_id", "item_count": "item_count"}.items()):
+            raise RuntimeError("quiesced source watermark drifted")
+
+
+def verify_activation_watermarks(args: argparse.Namespace, candidates: list[dict],
+                                 acceptance: dict) -> None:
+    path = getattr(args, "quiesced_watermarks", None)
+    digest = getattr(args, "quiesced_watermarks_sha256", None)
+    if path is None:
+        if digest is not None:
+            raise RuntimeError("quiesced watermark path is missing")
+        verify_current_api_watermarks(args.api_url, args.api_token, candidates)
+        return
+    receipt = read_private(path, digest)
+    verify_quiesced_watermarks(receipt, candidates,
+                              acceptance["installed_binary_sha256"], int(time.time()))
+    require_stopped_api()
 
 
 def sql_literal(value: str) -> str:
@@ -379,8 +504,8 @@ def plan_command(args: argparse.Namespace) -> None:
                      preflight, args.preflight_sha256, args.installed_binary,
                      live_rows(args.database, args.local_postgres), args.database,
                      args.local_postgres, now)
-    verify_current_api_watermarks(args.api_url, args.api_token,
-                                  audit["candidate_set"])
+    verify_activation_watermarks(args, audit["candidate_set"], acceptance)
+    plan["quiesced_watermarks_sha256"] = getattr(args, "quiesced_watermarks_sha256", None)
     private_write(args.output, plan)
     print(json.dumps({"status": plan["status"],
                       "plan_sha256": sha256(args.output.read_bytes()),
@@ -525,8 +650,9 @@ def apply_command(args: argparse.Namespace) -> None:
         audit, plan["persisted_audit_sha256"], acceptance,
         plan["aggregate_acceptance_sha256"], args.installed_binary,
         fresh_preflight, now)
-    verify_current_api_watermarks(args.api_url, args.api_token,
-                                  candidate_set)
+    if plan.get("quiesced_watermarks_sha256") != getattr(args, "quiesced_watermarks_sha256", None):
+        raise RuntimeError("approved maintenance watermark binding differs")
+    verify_activation_watermarks(args, candidate_set, acceptance)
     validate_preflight(fresh_preflight, acceptance["preflight_operator_commit_sha"],
                        acceptance["schema_sha256"], now, maximum_age=300)
     entries = bind_live(candidate_set, live_rows(args.database, args.local_postgres))
@@ -581,7 +707,7 @@ def apply_command(args: argparse.Namespace) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("plan", "apply"))
+    parser.add_argument("phase", choices=("capture-watermarks", "plan", "apply"))
     parser.add_argument("--database", required=True)
     parser.add_argument("--local-postgres", action="store_true")
     parser.add_argument("--api-url", default="http://127.0.0.1:3001")
@@ -589,10 +715,12 @@ def main() -> int:
     parser.add_argument("--token-file", type=Path)
     parser.add_argument("--audit", type=Path, required=True)
     parser.add_argument("--audit-sha256")
-    parser.add_argument("--acceptance", type=Path, required=True)
+    parser.add_argument("--acceptance", type=Path)
     parser.add_argument("--acceptance-sha256")
-    parser.add_argument("--preflight", type=Path, required=True)
-    parser.add_argument("--preflight-sha256", required=True)
+    parser.add_argument("--preflight", type=Path)
+    parser.add_argument("--preflight-sha256")
+    parser.add_argument("--quiesced-watermarks", type=Path)
+    parser.add_argument("--quiesced-watermarks-sha256")
     parser.add_argument("--installed-binary", type=Path, required=True)
     parser.add_argument("--plan", type=Path)
     parser.add_argument("--plan-sha256")
@@ -608,6 +736,13 @@ def main() -> int:
             or args.installed_binary.is_symlink() \
             or not args.installed_binary.is_file():
         parser.error("the installed API binary path is required")
+    if (args.quiesced_watermarks is None) != (args.quiesced_watermarks_sha256 is None):
+        parser.error("quiesced watermarks require an exact receipt and digest")
+    if args.phase != "capture-watermarks" and any(getattr(args, key) is None for key in
+                                                 ("acceptance", "preflight", "preflight_sha256")):
+        parser.error("activation plan/apply requires acceptance and exact preflight")
+    if args.phase == "capture-watermarks" and not args.audit_sha256:
+        parser.error("watermark capture requires an exact complete persisted audit")
     if args.phase == "plan" and (not args.audit_sha256 or not args.acceptance_sha256):
         parser.error("plan requires exact audit and aggregate acceptance digests")
     if args.phase == "apply" and any(getattr(args, key) is None for key in (
@@ -622,7 +757,8 @@ def main() -> int:
     except RuntimeError as error:
         parser.error(str(error))
     try:
-        (plan_command if args.phase == "plan" else apply_command)(args)
+        {"capture-watermarks": capture_watermarks_command, "plan": plan_command,
+         "apply": apply_command}[args.phase](args)
     except (RuntimeError, OSError, FileExistsError) as error:
         parser.error(str(error))
     return 0
