@@ -1191,6 +1191,10 @@ valid native lexeme absent from those postings.
 
 The native reader keeps its exact per-segment check and first matching segment
 order. The posting reader keeps exact term comparisons and BIGINT frequencies.
+Posting index keys use complete-term SHA-256 bytes with the original term
+comparison afterward. Fixed-width keys retain multi-kilobyte source terms
+without imposing a GIN entry-size limit or truncating valid contents. A digest
+collision can only add a candidate; it cannot authorize an incorrect result.
 When both reviewed indexes are valid and ready, their exact necessary predicates
 avoid decoding blocks selected only by a sixteen-bit fingerprint collision.
 Until then, the existing readers remain available. An index with a reserved name
