@@ -519,6 +519,7 @@ jobs:
               'eval.storage_v2.schema.test_first_lexical_candidates.FirstLexicalCandidateTests',
               'eval.storage_v2.schema.test_posting_derived_identifiers.PostingDerivedIdentifierTests',
               'eval.storage_v2.schema.test_derived_retrieval_codec.DerivedRetrievalCodecTests',
+              'eval.storage_v2.schema.test_bounded_lexical_verification.BoundedLexicalVerificationTests',
               'eval.storage_v2.schema.test_native_legacy_hit_resolution.NativeLegacyHitResolutionTests',
               'eval.storage_v2.schema.test_cleanup_catalog.CleanupCatalogTests',
               'eval.storage_v2.schema.test_cleanup_apply.CleanupApplyTests',

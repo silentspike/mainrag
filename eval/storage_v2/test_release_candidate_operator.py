@@ -357,6 +357,26 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
         self.assertNotIn("private-source-content", str(caught.exception))
         self.assertNotIn("private-token", str(caught.exception))
 
+    def test_http_error_keeps_only_exact_public_database_classification(self) -> None:
+        message = ("storage-v2 release-candidate verification failed: phase=lexical_segment_integrity; "
+                   "database_sqlstate=57014; reader_epoch_close_sqlstate=25P02; "
+                   "retention_required=true")
+        raw = json.dumps({"error": message, "private": "private-source-content"}).encode()
+        error = urllib.error.HTTPError("http://fixture.invalid/private", 400, "bad", {}, io.BytesIO(raw))
+        with patch.object(MODULE.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaises(MODULE.CandidateRequestFailure) as caught:
+                MODULE.request("http://fixture.invalid", "private-token", "GET", "/state")
+        self.assertEqual(caught.exception.classification, {
+            "database_phase": "lexical_segment_integrity", "database_sqlstate": "57014",
+            "reader_epoch_close_sqlstate": "25P02", "retention_required": True,
+        })
+        self.assertNotIn("private", str(caught.exception))
+        for body in (b"private-source-content", b"x" * 4097,
+                     json.dumps({"error": message + "; private-source-content"}).encode(),
+                     json.dumps({"error": message.replace("lexical_segment_integrity", "private")}).encode(),
+                     json.dumps({"error": message.replace("57014", "secret")}).encode()):
+            self.assertEqual(MODULE.candidate_failure_classification(body), {})
+
     def test_create_only_checkpoint_cannot_replace_an_existing_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             checkpoint = Path(temporary) / "checkpoint.json"
@@ -941,6 +961,30 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
             self.assertEqual(artifact["error"], {"type": "RuntimeError"})
             self.assertEqual(artifact["query_results"], [])
             self.assertFalse(artifact["qualification_attempted"])
+            self.assertNotIn("private-token", arguments.output.read_text())
+
+    def test_database_failure_classification_is_saved_without_response_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            arguments = Namespace(checkpoint=directory / "checkpoint.json", output=directory / "result.json",
+                                  source_id=1, commit_sha="a" * 40, api_url="http://fixture.invalid")
+            MODULE.atomic_private_json(arguments.checkpoint, {
+                "source_id": 1, "commit_sha": "a" * 40,
+                "generation_seq": 1, "server_instance_id": "before",
+            })
+            classification = {"database_phase": "lexical_segment_integrity", "database_sqlstate": "57014",
+                              "reader_epoch_close_sqlstate": "25P02", "retention_required": True}
+            error = MODULE.CandidateRequestFailure(400, classification)
+            error.__cause__ = urllib.error.HTTPError("http://fixture.invalid/private", 400,
+                                                    "private-token", {}, io.BytesIO(b"private-source-content"))
+            with patch.object(MODULE, "source_state", side_effect=error):
+                with self.assertRaises(MODULE.CandidateRequestFailure):
+                    MODULE.verify(arguments, "private-token")
+            artifact = json.loads(arguments.output.read_text())
+            self.assertEqual(artifact["error"], {"type": "CandidateRequestFailure", "http_status": 400,
+                                                **classification})
+            self.assertFalse(artifact["qualification_attempted"])
+            self.assertNotIn("private-source-content", arguments.output.read_text())
             self.assertNotIn("private-token", arguments.output.read_text())
 
     def test_all_supported_commands_are_bounded_and_scope_is_explicit(self):
