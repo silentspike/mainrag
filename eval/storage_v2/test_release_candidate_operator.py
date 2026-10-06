@@ -1282,6 +1282,48 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "owned private regular file"):
                 MODULE.reuse_completed_restart(previous, bad_digest, checkpoint, state)
 
+    def test_completed_replay_survives_later_reader_failure_without_acceptance(self):
+        checkpoint = dict(source_id=17, generation_id=23, generation_seq=2,
+            commit_sha="a" * 40, source_watermark_sha256="b" * 64,
+            item_count=4, active_generation_id=None, build={"fixture_sha256": "c" * 64})
+        verified = {**checkpoint, "status": "verified", "verification_manifest_sha256": "d" * 64,
+            "generation_root_sha256": "e" * 64, "adapter_profile_id": "adapter-fixture",
+            "analysis_profile_id": "analysis-fixture", "search_profile_id": "search-fixture",
+            "checks": {name: "PASS" for name in MODULE.integrity_resume["INTEGRITY_CHECKS"]},
+            "lexical_segment_verification": {"generation_id": 23, "occurrence_count": 4,
+                "missing_count": 0, "invalid_count": 0}}
+        prior = dict(status="FAIL", failed_gate="search_storage_v2", checkpoint=checkpoint,
+            verification=verified, restart_resume=dict(server_instance_changed=True, generation_reused=True),
+            qualification_attempted=False)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "failed-reader.json"
+            def check(value):
+                MODULE.atomic_private_json(path, value)
+                digest = MODULE.hashlib.sha256(path.read_bytes()).hexdigest()
+                return MODULE.reuse_completed_restart(path, digest, checkpoint, verified)
+            reused = check(prior)
+            self.assertTrue(reused["generation_reused"])
+            self.assertFalse(reused["prior_qualification_completed"])
+            self.assertFalse(json.loads(path.read_text())["qualification_attempted"])
+            for field in ("server_instance_changed", "generation_reused"):
+                changed = copy.deepcopy(prior)
+                changed["restart_resume"][field] = False
+                with self.subTest(replay=field), self.assertRaises(RuntimeError):
+                    check(changed)
+            for field in MODULE.integrity_resume["INTEGRITY_CHECKS"]:
+                changed = copy.deepcopy(prior)
+                changed["verification"]["checks"][field] = "FAIL"
+                with self.subTest(integrity=field), self.assertRaises(RuntimeError):
+                    check(changed)
+            for mutation in ("early_phase", "lexical_coverage", "root", "profile"):
+                changed = copy.deepcopy(prior)
+                if mutation == "early_phase": changed["failed_gate"] = "restart_resume"
+                elif mutation == "lexical_coverage": changed["verification"]["lexical_segment_verification"]["missing_count"] = 1
+                elif mutation == "root": changed["verification"]["generation_root_sha256"] = None
+                else: changed["verification"]["adapter_profile_id"] = None
+                with self.subTest(mutation=mutation), self.assertRaises(RuntimeError):
+                    check(changed)
+
     def test_reader_package_is_observed_from_running_service_not_only_installed_path(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "install.json"
