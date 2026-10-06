@@ -1249,6 +1249,22 @@ SQL deadline applies to each bounded statement. Confirmed item/segment totals
 are logged after every page; failure in any page rejects the whole verification.
 The complete SQL function remains available with the same result contract.
 
+Migration 158 selects visible occurrences through the existing ordered
+occurrence index after the committed cursor. Visibility is checked before the
+page limit; document bindings are resolved only for that bounded page. This
+avoids sorting the complete generation for every page without changing any
+body, segment, digest, vector, authorization or result check. The migration
+requires the exact predecessor definition, owner, execution settings, grants,
+validated artifact membership foreign key and non-overlapping intervals. It
+checks that every definition byte outside the selection block is unchanged.
+
+`integrity_resume.py` admits only that exact predecessor-to-successor pair with
+a fresh read-only catalog proof of those authority and multiplicity constraints.
+Other verifier changes still reject reuse. An interrupted page is never counted;
+operators preserve the last complete cursor and counters and record resumed
+pages under the new verifier identity. This change supplies no benchmark result
+or production acceptance by itself.
+
 The public regression includes distinct 1,000-character segments distributed
 across large retained compact documents, including an otherwise ASCII document
 with a Unicode tail and dense mixed UTF-8. It compares complete predecessor
