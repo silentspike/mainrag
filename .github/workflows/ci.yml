@@ -218,7 +218,7 @@ jobs:
         run: |
           cargo test -p mainrag-api --features storage-v2-retrieval --lib services::shadow_slice::managed_append_tests::managed_append_producer_to_verified_delta_and_periodic_full -- --ignored --exact --nocapture | tee managed-append-ingest-tests.log
           python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("managed-append-ingest-tests.log").read_text(), "Expected the producer-to-persistence regression to execute"'
-          python3 -c 'from pathlib import Path; assert "native source writer and verification pass without bootstrap routine or legacy tables" in Path("managed-append-ingest-tests.log").read_text(), "Expected the native successor writer, verification and replay after legacy retirement"'
+          python3 -c 'from pathlib import Path; assert "native ordinary writer: 128 durable items, same-run resume to 257, no duplicate occurrences, positive search without legacy tables" in Path("managed-append-ingest-tests.log").read_text(), "Expected native durable resume, verification and replay after legacy retirement"'
       - name: Verify local WAL checkpoint backpressure policy
         shell: bash
         run: |
