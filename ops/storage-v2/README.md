@@ -1093,10 +1093,19 @@ Migration 154 avoids repeated long character-prefix scans. It proves ASCII
 over the complete canonical document by comparing its character and UTF-8
 byte counts before using character locators as direct byte locators. A single
 non-ASCII character anywhere disables that path for the entire document.
-Other documents use overlapping 64 KiB character windows, enlarged when the
+Other documents use overlapping 8 KiB character windows, enlarged when the
 longest segment requires it. Every segment still receives the same length,
 digest, weighted-vector and applicable character/byte comparison. Source
-authority, RLS, the 8 MiB workspace and the SQL deadline are unchanged.
+authority, RLS, the 8 MiB workspace and the SQL deadline are unchanged. Length
+metadata is scoped to each document, including every storage representation.
+
+The API checks 64 documents per SQL statement inside the existing reader epoch.
+Each page validates its generation, cursor, count and completion marker; only
+complete coverage of the expected item count produces the unchanged aggregate
+result. An exact multiple includes a final empty page. The existing 30-minute
+SQL deadline applies to each bounded statement. Confirmed item/segment totals
+are logged after every page; failure in any page rejects the whole verification.
+The complete SQL function remains available with the same result contract.
 
 The public regression includes distinct 1,000-character segments distributed
 across large retained compact documents, including an otherwise ASCII document

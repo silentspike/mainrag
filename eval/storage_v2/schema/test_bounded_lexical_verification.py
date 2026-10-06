@@ -140,7 +140,7 @@ SELECT node_id||':'||view_id FROM view_row;
         return json.loads(self.sql(limit + self.admin(f"SELECT {function}({generation})")))
 
     def test_unicode_windows_unordered_duplicates_and_all_representations_match(self):
-        stride = 65536 - 4096
+        stride = 8192 - 4096
         for storage, text, positions in (
             ("flat", "alpha β 🙂 日本語\n" * 190000,
              [stride + 3, 0, stride - 9, 2 * stride + 1, 0, stride + 3]),
@@ -327,6 +327,38 @@ END $fixture$;"""))
         self.assertEqual(current["segment_count"], 384)
         self.assertLess(temporary, 16 * 1024**2)
         self.assertEqual(current, self.verify(generation, old=True))
+        # The API uses the same helper in separate bounded statements. Complete
+        # coverage includes the terminal empty page when the count is a multiple
+        # of the page size; a late corruption must still reject the final page.
+        cursor, page_items, page_segments, completed_pages = 0, 0, 0, 0
+        while True:
+            page = json.loads(self.sql(self.admin(
+                f"SELECT storage_v2_verify_lexical_segment_page({generation},{cursor},64)")))
+            self.assertEqual(page["after_occurrence_id"], cursor)
+            self.assertEqual(page["limit"], 64)
+            self.assertEqual(page["missing_count"], 0)
+            self.assertEqual(page["invalid_count"], 0)
+            self.assertEqual(page["complete"], page["occurrence_count"] < 64)
+            completed_pages += 1
+            page_items += page["occurrence_count"]
+            page_segments += page["segment_count"]
+            cursor = page["last_occurrence_id"]
+            if page["complete"]:
+                break
+        self.assertEqual((page_items, page_segments, completed_pages), (384, 384, 7))
+        last_occurrence = int(self.sql(f"SELECT max(id) FROM occurrence WHERE source_id={source}"))
+        self.assert_sql_fails("BEGIN; ALTER TABLE storage_v2_lexical_segment DISABLE TRIGGER USER; "
+            "UPDATE storage_v2_lexical_segment SET fts_vector=to_tsvector('simple','corrupt') "
+            f"WHERE occurrence_id={last_occurrence}; " + self.admin(
+            f"SELECT storage_v2_verify_lexical_segment_page({generation},{last_occurrence - 1},64);"),
+            "lexical segment projection is incomplete")
+        for after, limit in ((-1, 64), (0, 0), (0, 257)):
+            self.assert_sql_fails(self.admin(
+                f"SELECT storage_v2_verify_lexical_segment_page({generation},{after},{limit})"),
+                "bounded lexical page cursor and limit required")
+        self.assert_sql_fails(self.actor(self.schema.OTHER_ID,
+            f"SELECT storage_v2_verify_lexical_segment_page({generation},0,64)"),
+            "verified authorized generation required")
         print("public many-item verifier:", json.dumps({"items":384,
               "visible_input_bytes":384 * len(text.encode()), "bounded_seconds":seconds,
               "bounded_temp_bytes":temporary}), flush=True)

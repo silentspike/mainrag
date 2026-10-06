@@ -1,12 +1,15 @@
 -- Verify every retained segment without repeatedly scanning long UTF-8 prefixes.
 -- Prove ASCII over the complete document before using character offsets as byte
 -- offsets. Other documents retain independent character/byte checks in smaller
--- overlapping windows; hashes, weighted vectors, authority and counts are unchanged.
+-- overlapping windows and bounded pages; complete checks and counts are unchanged.
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 DO $guard$
 BEGIN
+    IF to_regprocedure('storage_v2_verify_lexical_segment_page(bigint,bigint,integer)') IS NOT NULL THEN
+        RAISE EXCEPTION 'lexical page helper already exists; reconcile its identity first';
+    END IF;
     IF encode(sha256(convert_to(pg_get_functiondef(
             'storage_v2_verify_lexical_segments(bigint)'::REGPROCEDURE), 'UTF8')), 'hex')
             <> '788bd356bb01a70bc340a01a7ea5bb7ffa46266c579e4efd53ae3d1f5f70970b'
@@ -17,7 +20,8 @@ BEGIN
     END IF;
 END $guard$;
 
-CREATE OR REPLACE FUNCTION storage_v2_verify_lexical_segments(p_generation_id BIGINT)
+CREATE OR REPLACE FUNCTION storage_v2_verify_lexical_segment_page(
+    p_generation_id BIGINT, p_after_occurrence_id BIGINT, p_limit INTEGER)
 RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path = pg_catalog, public
 SET row_security = on
@@ -26,6 +30,7 @@ SET enable_nestloop = on
 AS $$
 DECLARE
     v_source_id BIGINT;
+    v_last_occurrence_id BIGINT := p_after_occurrence_id;
     v_item RECORD;
     v_group RECORD;
     v_bytes BYTEA;
@@ -47,31 +52,15 @@ DECLARE
     v_invalid BIGINT := 0;
     v_group_invalid BIGINT;
 BEGIN
+    IF p_after_occurrence_id IS NULL OR p_after_occurrence_id < 0
+       OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 256 THEN
+        RAISE EXCEPTION 'bounded lexical page cursor and limit required';
+    END IF;
     SELECT source_id INTO v_source_id FROM source_generation
      WHERE id = p_generation_id AND status IN ('verified', 'release_candidate');
     IF NOT FOUND OR NOT storage_v2_can_access_source(v_source_id, 'read') THEN
         RAISE EXCEPTION 'verified authorized generation required for lexical verification'
             USING ERRCODE = '42501';
-    END IF;
-
-    -- Length metadata has no text/vector payload and includes all representations.
-    SELECT GREATEST(4096::BIGINT, COALESCE(max(length), 0)) INTO v_overlap
-      FROM (
-        SELECT text_length AS length FROM storage_v2_lexical_segment
-         WHERE source_id = v_source_id
-        UNION ALL
-        SELECT length FROM storage_v2_compact_lexical_block block
-         CROSS JOIN LATERAL unnest(block.text_lengths) item(length)
-         WHERE block.source_id = v_source_id
-        UNION ALL
-        SELECT length FROM storage_v2_derived_lexical_block block
-         CROSS JOIN LATERAL unnest(block.text_lengths) item(length)
-         WHERE block.source_id = v_source_id
-      ) lengths;
-    v_chunk_size := GREATEST(65536::BIGINT, v_overlap + 4096);
-    v_stride := v_chunk_size - v_overlap;
-    IF v_stride <= 0 OR v_chunk_size > 2147483647 THEN
-        RAISE EXCEPTION 'lexical verification window bounds are invalid';
     END IF;
 
     FOR v_item IN
@@ -89,8 +78,11 @@ BEGIN
             ON binding.view_id = occurrence_row.view_id AND binding.ordinal = 0
           LEFT JOIN storage_v2_search_document document ON document.id = binding.document_id
          WHERE generation.id = p_generation_id
+           AND occurrence_row.id > p_after_occurrence_id
+         ORDER BY occurrence_row.id LIMIT p_limit
     LOOP
         v_occurrences := v_occurrences + 1;
+        v_last_occurrence_id := v_item.id;
         IF v_item.document_id IS NULL THEN
             v_missing := v_missing + 1;
             CONTINUE;
@@ -103,6 +95,27 @@ BEGIN
         -- the same byte offset; an ASCII prefix alone cannot grant this path.
         v_character_count := char_length(convert_from(v_bytes, 'UTF8'));
         v_ascii := v_character_count = v_byte_count;
+        -- Scope length metadata to this document; never rescan the entire source
+        -- for each page. Every representation contributes to its window bound.
+        SELECT GREATEST(4096::BIGINT, COALESCE(max(length), 0)) INTO v_overlap
+          FROM (
+            SELECT text_length AS length FROM storage_v2_lexical_segment
+             WHERE source_id = v_source_id AND occurrence_id = v_item.id
+            UNION ALL
+            SELECT length FROM storage_v2_compact_lexical_block block
+             CROSS JOIN LATERAL unnest(block.text_lengths) item(length)
+             WHERE block.source_id = v_source_id AND block.occurrence_id = v_item.id
+            UNION ALL
+            SELECT length FROM storage_v2_derived_lexical_block block
+             CROSS JOIN LATERAL unnest(block.text_lengths) item(length)
+             WHERE block.source_id = v_source_id AND block.occurrence_id = v_item.id
+          ) lengths;
+        v_chunk_size := GREATEST(CASE WHEN v_ascii THEN 65536::BIGINT ELSE 8192::BIGINT END,
+                                  v_overlap + 4096);
+        v_stride := v_chunk_size - v_overlap;
+        IF v_stride <= 0 OR v_chunk_size > 2147483647 THEN
+            RAISE EXCEPTION 'lexical verification window bounds are invalid';
+        END IF;
         v_byte_start := 1;
         v_window_start := 1 - v_stride;
         v_window := '';
@@ -223,10 +236,44 @@ BEGIN
         RAISE EXCEPTION 'lexical segment projection is incomplete or differs from immutable source';
     END IF;
     RETURN jsonb_build_object(
+        'schema_version', 'mainrag.storage-v2.lexical-segment-page.v1',
+        'generation_id', p_generation_id, 'after_occurrence_id', p_after_occurrence_id,
+        'last_occurrence_id', v_last_occurrence_id, 'limit', p_limit,
+        'complete', v_occurrences < p_limit,
+        'occurrence_count', v_occurrences, 'segment_count', v_segments,
+        'missing_count', v_missing, 'invalid_count', v_invalid);
+END $$;
+
+-- Preserve the complete SQL contract. The production API consumes the same
+-- complete pages as separate bounded statements in its existing reader epoch.
+CREATE OR REPLACE FUNCTION storage_v2_verify_lexical_segments(p_generation_id BIGINT)
+RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog, public
+SET row_security = on
+SET work_mem = '8MB'
+SET enable_nestloop = on
+AS $$
+DECLARE
+    v_page JSONB;
+    v_after BIGINT := 0;
+    v_occurrences BIGINT := 0;
+    v_segments BIGINT := 0;
+BEGIN
+    LOOP
+        v_page := storage_v2_verify_lexical_segment_page(p_generation_id, v_after, 256);
+        v_occurrences := v_occurrences + (v_page->>'occurrence_count')::BIGINT;
+        v_segments := v_segments + (v_page->>'segment_count')::BIGINT;
+        v_after := (v_page->>'last_occurrence_id')::BIGINT;
+        EXIT WHEN (v_page->>'complete')::BOOLEAN;
+    END LOOP;
+    RETURN jsonb_build_object(
         'schema_version', 'mainrag.storage-v2.lexical-segment-verification.v1',
         'generation_id', p_generation_id, 'occurrence_count', v_occurrences,
-        'segment_count', v_segments, 'missing_count', v_missing, 'invalid_count', v_invalid);
+        'segment_count', v_segments, 'missing_count', 0, 'invalid_count', 0);
 END $$;
+ALTER FUNCTION storage_v2_verify_lexical_segment_page(BIGINT,BIGINT,INTEGER) OWNER TO mainrag_v2_frontier_owner;
+REVOKE ALL ON FUNCTION storage_v2_verify_lexical_segment_page(BIGINT,BIGINT,INTEGER) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION storage_v2_verify_lexical_segment_page(BIGINT,BIGINT,INTEGER) TO mainrag;
 ALTER FUNCTION storage_v2_verify_lexical_segments(BIGINT) OWNER TO mainrag_v2_frontier_owner;
 REVOKE ALL ON FUNCTION storage_v2_verify_lexical_segments(BIGINT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION storage_v2_verify_lexical_segments(BIGINT) TO mainrag;
