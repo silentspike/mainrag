@@ -135,7 +135,10 @@ generation, `release-candidate.py verify` can reuse its restart/replay proof wit
 `--expected-completed-restart-evidence-sha256`. The receipt must be an owned,
 private regular file with the reviewed digest. Producer identity, input hashes,
 profiles, verification manifest, counts and active pointer must still match.
-Interrupted attempts and failed qualifications cannot supply this proof.
+Interrupted replay attempts cannot supply this proof. A later reader failure
+can retain the replay when both restart flags, all completed integrity checks,
+full lexical occurrence coverage and exact immutable identities are proven.
+Its prior qualification remains failed; current reader gates still execute.
 
 This avoids the repeated build endpoint and source traversal. By default,
 body/segment integrity still executes. Original telemetry is not emitted as a
@@ -150,7 +153,7 @@ The original proof must cover every integrity check and every lexical occurrence
 the running verifier binary, sealed generation, original input/build identity,
 profiles, root, verification manifest and pointer must remain unchanged. A live
 bounded catalog observation rejects verifier definition drift. Only the
-explicitly audited reader and exact query-cache changes in migration 155 are
+explicitly audited reader and exact query-cache changes in migrations 155–156 are
 compatible. The cache transition retains original text, hashes, flags and
 identities and must equal the complete original vector with positions stripped.
 The observation must also match the current installation's function identities.
@@ -165,9 +168,61 @@ retokenizing the document; phrases still reconstruct complete positions.
 Existing empty caches can be filled in bounded operator batches. The immutable
 projection trigger permits only the exact empty-to-complete cache transition,
 and no source import, pack copy or generation rebuild is required. Compact
-first-match readers stop at the earliest exact matching block. Derived readers
+first-match readers in migration 156 seek a block identity before a separate
+exact-vector fetch. This execution boundary prevents a sort from evaluating
+later toasted payloads before the earliest match is returned. Derived readers
+and compact readers materialize source/fingerprint block identities before
+applying occurrence scope, preventing repeated physical probes caused by
+underestimated requested-ID cardinality. Exact payloads and provenance remain
+independently checked. Compact readers reuse the collectively resolved first
+block key and generic point plans; only exact misses seek a later key through
+the ordered primary key. The caller's plan configuration is restored on return.
+Derived readers
 can use an exact conjunction cache only when every term first occurs in the
 same segment; other cases retain their exact fallback.
+
+For one positive normalized ASCII term, migration 156 can skip a derived body
+window lacking its lowercase literal substring. This requires PostgreSQL 18,
+the libc default collation provider, the built-in default parser, and only the
+unconfigured built-in simple dictionary. Configuration drift disables the
+optimization. Prefix/type vectors remain independently checked; every substring
+positive still receives the exact weighted-vector predicate. Unlike a negative
+whole-document FTS result, this condition preserves lexemes created by chunk
+boundaries. The parser returns original text slices and the dictionary only
+lowercases them; see the [PostgreSQL parser documentation](https://www.postgresql.org/docs/18/textsearch-parsers.html)
+and [simple dictionary documentation](https://www.postgresql.org/docs/18/textsearch-dictionaries.html).
+
+The scoped literal-posting reader rechecks exact term-array overlap after source
+scope and point identity selection, before returning wide arrays to its decoder.
+Fingerprint collisions cannot force frequency-array decoding for absent terms;
+exact term positions and original frequencies remain decisive.
+
+Migration 156 also preserves complete generation reader metadata when a search
+document update leaves its ID and token count unchanged. Other relation writes,
+changed cached lengths, deletion and truncation still invalidate metadata. The
+independent immutable-document trigger continues to reject forged content or
+vector caches. After filling older caches, publish stale reader metadata before
+measuring the reader; cache population is not itself a query acceptance proof.
+
+### Dedup storage accounting
+
+`dedup-footprint.py` collects bounded read-only database and local storage
+measurements. It separates heap, TOAST and parent indexes without double counting,
+and distinguishes search projections, compatibility data and other metadata.
+Packs and optional retained vector storage use local allocated-block readbacks;
+cluster-wide WAL is reported separately. No archive or backup is contacted.
+
+Supply a reviewed corpus descriptor, or adapt exact accepted qualification
+artifacts with repeated `--qualification-artifact PATH SHA256` and the complete
+`--expected-source-id ID` list. The adapter binds frozen input hashes, watermarks,
+profiles, item counts and input bytes. It does not accept failed qualifications or
+infer how many bytes were newly preserved relative to the legacy corpus.
+
+Compare private snapshots using `--before`, `--after` and `--output`. Different
+coverage, database identities, storage roots or measurement contracts prevent a
+matching comparison. File lengths, allocated blocks and filesystem free space
+are distinct measurements. An observed reduction requires manifest-bound cleanup
+receipts and independent corpus-preservation evidence before attribution to dedup.
 
 Use `--reader-package-receipt` and
 `--expected-reader-package-receipt-sha256` to bind the new reader checks to the

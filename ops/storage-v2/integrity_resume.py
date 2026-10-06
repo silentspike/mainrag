@@ -7,7 +7,7 @@ import subprocess
 from typing import Any
 
 
-# Migration 155 changes query readers and an exact, positional-free query cache.
+# Migrations 155-156 change query readers and an exact positional-free cache.
 # Cache transitions preserve every original field and are checked against the
 # complete canonical vector by the mutation trigger. The integrity verifier,
 # pack delivery, lexical reconstruction and intelligence export are unchanged.
@@ -19,8 +19,11 @@ QUERY_ONLY_CHANGES = frozenset({
     "storage_v2_source_segment_body_matches(bigint,text)",
     "storage_v2_authorized_cached_lexical_first_candidates(bigint[],bigint[],text)",
     "storage_v2_derived_lexical_first_candidates(bigint[],bigint[],text)",
+    "storage_v2_derived_lexical_candidate_occurrences(bigint[],bigint[],integer[])",
+    "storage_v2_scoped_query_posting(bigint[],text[])",
     "storage_v2_prepare_document_vector()",
     "storage_v2_reject_document_mutation()",
+    "storage_v2_invalidate_reader_metadata()",
 })
 QUERY_ONLY_ADDITIONS = frozenset({
     "storage_v2_cached_first_conjunction_order(text[],smallint[],bigint[],text[])",

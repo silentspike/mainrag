@@ -1366,14 +1366,32 @@ def reuse_completed_restart(path: Path, expected_sha256: str, checkpoint: dict[s
 
     This reuses only restart/replay evidence. Integrity, live source review,
     frozen gold, search, intelligence, resource and qualification still run.
+    A later reader failure does not invalidate a completed replay and proof.
     """
     prior = read_private_receipt(path, expected_sha256)
     qualification = prior.get("qualification", {})
     manifest = qualification.get("manifest", {})
     result = prior.get("result", {})
     failures, _ = candidate_proof(manifest)
-    if failures or result.get("status") != "release_candidate" \
-            or result.get("evidence_id") != qualification.get("evidence_id"):
+    normal = not failures and result.get("status") == "release_candidate" \
+        and result.get("evidence_id") == qualification.get("evidence_id")
+    verified = prior.get("verification", {})
+    restart = manifest.get("restart", {}) if normal else prior.get("restart_resume", {})
+    completed_before_reader_failure = prior.get("status") == "FAIL" \
+        and prior.get("failed_gate") in {
+            "source_snapshot_review", "gold_suite", "intelligence", "search_current",
+            "search_storage_v2", "query_coverage", "search_gates", "dual_read",
+            "resource_budget", "reader_continuity",
+        } and all(verified.get("checks", {}).get(name) == "PASS"
+                  for name in integrity_resume["INTEGRITY_CHECKS"]) \
+        and restart.get("server_instance_changed") is True \
+        and restart.get("generation_reused") is True
+    lexical = verified.get("lexical_segment_verification", {})
+    completed_before_reader_failure = completed_before_reader_failure \
+        and lexical.get("generation_id") == checkpoint.get("generation_id") \
+        and lexical.get("occurrence_count") == checkpoint.get("item_count") \
+        and lexical.get("missing_count") == 0 and lexical.get("invalid_count") == 0
+    if not normal and not completed_before_reader_failure:
         raise RuntimeError("restart evidence is not a completed normal qualification")
     previous = prior.get("checkpoint", {})
     for name in ("source_id", "generation_id", "generation_seq", "commit_sha",
@@ -1387,8 +1405,7 @@ def reuse_completed_restart(path: Path, expected_sha256: str, checkpoint: dict[s
     if previous.get("build", {}).get("fixture_sha256") != checkpoint.get("build", {}).get("fixture_sha256") \
             or not checkpoint.get("build", {}).get("fixture_sha256"):
         raise RuntimeError("restart evidence build fixture differs")
-    verified = prior.get("verification", {})
-    if manifest.get("server_verification_sha256") != sha256_text(json.dumps(verified, sort_keys=True)):
+    if normal and manifest.get("server_verification_sha256") != sha256_text(json.dumps(verified, sort_keys=True)):
         raise RuntimeError("restart evidence verification digest differs")
     for name in ("source_id", "generation_id", "generation_seq", "source_watermark_sha256",
                  "item_count", "active_generation_id", "verification_manifest_sha256"):
@@ -1398,17 +1415,23 @@ def reuse_completed_restart(path: Path, expected_sha256: str, checkpoint: dict[s
             or not re.fullmatch(r"[0-9a-f]{64}", state.get("verification_manifest_sha256") or ""):
         raise RuntimeError("restart evidence live generation is not verified")
     for name in ("adapter_profile_id", "analysis_profile_id", "search_profile_id"):
-        if not verified.get(name) or qualification.get(name) != verified[name]:
+        if not verified.get(name) or (normal and qualification.get(name) != verified[name]):
             raise RuntimeError("restart evidence producer profile differs")
     for name in ("generation_id", "commit_sha", "source_watermark_sha256"):
-        if qualification.get(name) != checkpoint[name]:
+        if not normal and name == "commit_sha":
+            # Verification binds the sealed generation and root, while the
+            # immutable checkpoint above binds the original producer commit.
+            continue
+        producer = qualification if normal else verified
+        if producer.get(name) != checkpoint[name]:
             raise RuntimeError("restart evidence producer identity differs")
     identity = {name: verified.get(name) for name in (
         "adapter_profile_id", "analysis_profile_id", "search_profile_id",
         "generation_root_sha256", "verification_manifest_sha256")}
     if not re.fullmatch(r"[0-9a-f]{64}", identity["generation_root_sha256"] or ""):
         raise RuntimeError("restart evidence generation root is invalid")
-    return {**manifest["restart"], "reused_completed_evidence_sha256": expected_sha256,
+    return {**restart, "reused_completed_evidence_sha256": expected_sha256,
+            "prior_qualification_completed": normal,
             "verified_producer_identity": identity}
 
 
