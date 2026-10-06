@@ -34,6 +34,7 @@ candidate_proof = runpy.run_path(
 )["candidate_proof"]
 complete_file_proof_valid = runpy.run_path(
     str(Path(__file__).with_name("candidate-aggregate-audit.py")))["complete_file_proof_valid"]
+integrity_resume = runpy.run_path(str(Path(__file__).with_name("integrity_resume.py")))
 
 
 CHECKS = (
@@ -1479,13 +1480,39 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
         repeated = replay_completed_build(arguments, token, checkpoint)
         progress["restart_resume"] = {"server_instance_changed": True, "generation_reused": True}
     progress["phase"] = "integrity"
-    verified = request(
-        arguments.api_url,
-        token,
-        "POST",
-        f"/api/v1/admin/sources/{arguments.source_id}/storage-v2-release-candidate-verify",
-        {"generation_id": checkpoint["generation_id"]},
-    )
+    completed_integrity = getattr(arguments, "completed_integrity_evidence", None)
+    if completed_integrity is None:
+        verified = request(
+            arguments.api_url, token, "POST",
+            f"/api/v1/admin/sources/{arguments.source_id}/storage-v2-release-candidate-verify",
+            {"generation_id": checkpoint["generation_id"]},
+        )
+    else:
+        if reader_package is None:
+            raise RuntimeError("completed integrity reuse requires a bound local reader")
+        prior = read_private_receipt(completed_integrity,
+                                     arguments.expected_completed_integrity_evidence_sha256)
+        previous_install = read_private_receipt(arguments.integrity_verifier_receipt,
+                                               arguments.expected_integrity_verifier_receipt_sha256)
+        observed = integrity_resume["observe_immutable_identity"](
+            arguments.source_id, checkpoint["generation_id"])
+        current_install = read_private_receipt(arguments.reader_package_receipt,
+                                              arguments.expected_reader_package_receipt_sha256)
+        current_functions = {name: digest for name, digest in current_install.get(
+            "function_identities", {}).items() if name.startswith("storage_v2_")}
+        if not current_functions or current_functions != observed["function_identities"]:
+            raise RuntimeError("completed integrity current reader catalog differs from installation")
+        verified = integrity_resume["validate_reuse"](
+            prior, checkpoint, state, previous_install,
+            arguments.expected_integrity_verifier_receipt_sha256, reader_package, observed)
+        progress["integrity_reuse"] = {
+            "policy": "immutable-generation-unchanged-verifier-exact-query-cache-v1",
+            "completed_evidence_sha256": arguments.expected_completed_integrity_evidence_sha256,
+            "verifier_installation_sha256": arguments.expected_integrity_verifier_receipt_sha256,
+            "live_identity_sha256": sha256_text(json.dumps(observed, sort_keys=True)),
+            "current_reader_installation_sha256": reader_package["installation_receipt_sha256"],
+            "current_reader_checks_repeated": True,
+        }
     progress["verification"] = verified
     if restart_evidence is not None:
         identity = progress["restart_resume"]["verified_producer_identity"]
@@ -1705,6 +1732,7 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             "status": "PASS",
             "checks": checks,
             "server_verification_sha256": sha256_text(json.dumps(verified, sort_keys=True)),
+            **({"integrity_reuse": progress["integrity_reuse"]} if "integrity_reuse" in progress else {}),
             "dual_read_evidence_id": dual["evidence_id"],
             "dual_read_artifact_sha256": dual["artifact_sha256"],
             "query_results": query_results,
@@ -1770,6 +1798,11 @@ def main() -> int:
     parser.add_argument("--completed-restart-evidence", type=Path,
                         help="Reuse only a completed, same-generation normal restart/replay proof")
     parser.add_argument("--expected-completed-restart-evidence-sha256")
+    parser.add_argument("--completed-integrity-evidence", type=Path,
+                        help="Reuse completed immutable proof with an unchanged local verifier")
+    parser.add_argument("--expected-completed-integrity-evidence-sha256")
+    parser.add_argument("--integrity-verifier-receipt", type=Path)
+    parser.add_argument("--expected-integrity-verifier-receipt-sha256")
     parser.add_argument("--reader-package-receipt", type=Path,
                         help="Bind current reader gates to a verified local installation receipt")
     parser.add_argument("--expected-reader-package-receipt-sha256")
@@ -1788,6 +1821,14 @@ def main() -> int:
     parser.add_argument("--git-snapshot-commit-sha")
     parser.add_argument("--expected-source-watermark-sha256")
     arguments = parser.parse_args()
+    reuse_fields = (arguments.completed_integrity_evidence,
+                    arguments.expected_completed_integrity_evidence_sha256,
+                    arguments.integrity_verifier_receipt,
+                    arguments.expected_integrity_verifier_receipt_sha256)
+    if any(value is not None for value in reuse_fields) and (
+            any(value is None for value in reuse_fields) or arguments.phase != "verify"
+            or arguments.reader_package_receipt is None):
+        parser.error("completed integrity reuse requires all four identities and a local verify reader")
     if ((arguments.reader_package_receipt is None)
             != (arguments.expected_reader_package_receipt_sha256 is None)):
         parser.error("reader package receipt requires its reviewed SHA-256")
