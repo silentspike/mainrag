@@ -503,6 +503,227 @@ mod qualification_reader_tests {
         assert!(diagnostic.contains("database_sqlstate=none"));
         assert!(!diagnostic.contains("protected"));
     }
+
+    fn lexical_page(after: i64, last: i64, items: i64, segments: i64) -> LexicalVerificationPage {
+        LexicalVerificationPage {
+            schema_version: "mainrag.storage-v2.lexical-segment-page.v1".to_string(),
+            generation_id: 7,
+            after_occurrence_id: after,
+            last_occurrence_id: last,
+            limit: LEXICAL_VERIFICATION_PAGE_ITEMS,
+            complete: items < LEXICAL_VERIFICATION_PAGE_ITEMS,
+            occurrence_count: items,
+            segment_count: segments,
+            missing_count: 0,
+            invalid_count: 0,
+        }
+    }
+
+    #[test]
+    fn lexical_pages_require_complete_coverage_before_aggregate_acceptance() {
+        let mut totals = LexicalVerificationAccumulator::new(7, 65).unwrap();
+        totals.accept(lexical_page(0, 120, 64, 7000)).unwrap();
+        assert!(totals.result().is_err());
+        totals.accept(lexical_page(120, 129, 1, 42)).unwrap();
+        let result = totals.result().unwrap();
+        assert_eq!(result["occurrence_count"], 65);
+        assert_eq!(result["segment_count"], 7042);
+        assert!(totals.accept(lexical_page(129, 129, 0, 0)).is_err());
+    }
+
+    #[test]
+    fn lexical_page_boundary_requires_the_terminal_empty_page() {
+        let mut totals = LexicalVerificationAccumulator::new(7, 64).unwrap();
+        totals.accept(lexical_page(0, 128, 64, 100)).unwrap();
+        assert!(totals.result().is_err());
+        totals.accept(lexical_page(128, 128, 0, 0)).unwrap();
+        assert_eq!(totals.result().unwrap()["segment_count"], 100);
+        let mut empty = LexicalVerificationAccumulator::new(7, 0).unwrap();
+        empty.accept(lexical_page(0, 0, 0, 0)).unwrap();
+        assert_eq!(empty.result().unwrap()["occurrence_count"], 0);
+    }
+
+    #[test]
+    fn lexical_pages_reject_identity_cursor_count_and_late_integrity_failures() {
+        for fault in 0..9 {
+            let mut totals = LexicalVerificationAccumulator::new(7, 65).unwrap();
+            totals.accept(lexical_page(0, 128, 64, 100)).unwrap();
+            let mut page = lexical_page(128, 140, 1, 20);
+            match fault {
+                0 => page.generation_id = 8,
+                1 => page.after_occurrence_id = 127,
+                2 => page.last_occurrence_id = 128,
+                3 => page.limit = 63,
+                4 => page.invalid_count = 1,
+                5 => page.missing_count = 1,
+                6 => page.occurrence_count = 2,
+                7 => page.complete = false,
+                8 => page.segment_count = -1,
+                _ => unreachable!(),
+            }
+            assert!(totals.accept(page).is_err(), "fault {fault}");
+            assert!(totals.result().is_err());
+            assert_eq!(
+                (totals.cursor, totals.occurrences, totals.segments),
+                (128, 64, 100)
+            );
+        }
+        let mut premature = LexicalVerificationAccumulator::new(7, 1).unwrap();
+        assert!(premature.accept(lexical_page(0, 0, 0, 0)).is_err());
+    }
+
+    #[test]
+    fn lexical_pages_reject_counter_overflow_and_nonempty_terminal_results() {
+        let mut totals = LexicalVerificationAccumulator::new(7, 65).unwrap();
+        totals.accept(lexical_page(0, 128, 64, i64::MAX)).unwrap();
+        assert!(totals.accept(lexical_page(128, 140, 1, 1)).is_err());
+        assert!(totals.result().is_err());
+        let mut empty = LexicalVerificationAccumulator::new(7, 0).unwrap();
+        assert!(empty.accept(lexical_page(0, 0, 0, 1)).is_err());
+    }
+}
+
+const LEXICAL_VERIFICATION_PAGE_ITEMS: i64 = 64;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LexicalVerificationPage {
+    schema_version: String,
+    generation_id: i64,
+    after_occurrence_id: i64,
+    last_occurrence_id: i64,
+    limit: i64,
+    complete: bool,
+    occurrence_count: i64,
+    segment_count: i64,
+    missing_count: i64,
+    invalid_count: i64,
+}
+
+struct LexicalVerificationAccumulator {
+    generation_id: i64,
+    expected_items: i64,
+    cursor: i64,
+    occurrences: i64,
+    segments: i64,
+    complete: bool,
+}
+
+impl LexicalVerificationAccumulator {
+    fn new(generation_id: i64, expected_items: i64) -> Result<Self> {
+        if generation_id <= 0 || expected_items < 0 {
+            bail!("candidate lexical page identity or item count is invalid");
+        }
+        Ok(Self {
+            generation_id,
+            expected_items,
+            cursor: 0,
+            occurrences: 0,
+            segments: 0,
+            complete: false,
+        })
+    }
+
+    fn accept(&mut self, page: LexicalVerificationPage) -> Result<()> {
+        if self.complete
+            || page.schema_version != "mainrag.storage-v2.lexical-segment-page.v1"
+            || page.generation_id != self.generation_id
+            || page.after_occurrence_id != self.cursor
+            || page.limit != LEXICAL_VERIFICATION_PAGE_ITEMS
+            || !(0..=LEXICAL_VERIFICATION_PAGE_ITEMS).contains(&page.occurrence_count)
+            || page.segment_count < 0
+            || page.missing_count != 0
+            || page.invalid_count != 0
+            || page.complete != (page.occurrence_count < LEXICAL_VERIFICATION_PAGE_ITEMS)
+            || (page.occurrence_count == 0 && page.last_occurrence_id != self.cursor)
+            || (page.occurrence_count == 0 && page.segment_count != 0)
+            || (page.occurrence_count > 0 && page.last_occurrence_id <= self.cursor)
+        {
+            bail!("candidate lexical page contract or cursor differs");
+        }
+        let occurrences = self
+            .occurrences
+            .checked_add(page.occurrence_count)
+            .context("candidate lexical occurrence count overflow")?;
+        let segments = self
+            .segments
+            .checked_add(page.segment_count)
+            .context("candidate lexical segment count overflow")?;
+        if occurrences > self.expected_items
+            || (page.complete && occurrences != self.expected_items)
+        {
+            bail!("candidate lexical pages do not cover every expected occurrence");
+        }
+        self.occurrences = occurrences;
+        self.segments = segments;
+        self.cursor = page.last_occurrence_id;
+        self.complete = page.complete;
+        Ok(())
+    }
+
+    fn result(&self) -> Result<serde_json::Value> {
+        if !self.complete || self.occurrences != self.expected_items {
+            bail!("candidate lexical verification is incomplete");
+        }
+        Ok(json!({
+            "schema_version": "mainrag.storage-v2.lexical-segment-verification.v1",
+            "generation_id": self.generation_id,
+            "occurrence_count": self.occurrences,
+            "segment_count": self.segments,
+            "missing_count": 0,
+            "invalid_count": 0,
+        }))
+    }
+}
+
+async fn verify_candidate_lexical_pages<C>(
+    client: &C,
+    generation_id: i64,
+    expected_items: i64,
+) -> Result<serde_json::Value>
+where
+    C: GenericClient + Sync,
+{
+    // Retain compatibility with older fixture schemas. A current installation
+    // binds the new helper definition and binary before source qualification.
+    let page_function: Option<String> = client
+        .query_one(
+            "SELECT to_regprocedure('storage_v2_verify_lexical_segment_page(bigint,bigint,integer)')::TEXT",
+            &[],
+        )
+        .await?
+        .get(0);
+    if page_function.is_none() {
+        return Ok(client
+            .query_one(
+                "SELECT storage_v2_verify_lexical_segments($1)",
+                &[&generation_id],
+            )
+            .await?
+            .get(0));
+    }
+    let mut totals = LexicalVerificationAccumulator::new(generation_id, expected_items)?;
+    while !totals.complete {
+        let raw: serde_json::Value = client
+            .query_one(
+                "SELECT storage_v2_verify_lexical_segment_page($1,$2,$3)",
+                &[
+                    &generation_id,
+                    &totals.cursor,
+                    &(LEXICAL_VERIFICATION_PAGE_ITEMS as i32),
+                ],
+            )
+            .await?
+            .get(0);
+        totals.accept(serde_json::from_value(raw)?)?;
+        tracing::info!(
+            verified_occurrences = totals.occurrences,
+            expected_occurrences = expected_items,
+            verified_segments = totals.segments,
+            "candidate lexical integrity progress"
+        );
+    }
+    totals.result()
 }
 
 async fn verify_release_candidate_in_epoch<C>(
@@ -615,14 +836,13 @@ where
         .query_one("SELECT set_config('statement_timeout', '30min', TRUE)", &[])
         .await
         .context(CandidateVerificationPhase("verification_timeout_set"))?;
-    let lexical_segment_verification: serde_json::Value = client
-        .query_one(
-            "SELECT storage_v2_verify_lexical_segments($1)",
-            &[&input.generation_id],
-        )
-        .await
-        .context(CandidateVerificationPhase("lexical_segment_integrity"))?
-        .get(0);
+    // Each complete page has the same bounded SQL deadline. Every page runs on
+    // this client inside the existing reader epoch; only full coverage produces
+    // the aggregate result. No segment sampling or deadline increase is used.
+    let lexical_segment_verification =
+        verify_candidate_lexical_pages(client, input.generation_id, expected_item_count)
+            .await
+            .context(CandidateVerificationPhase("lexical_segment_integrity"))?;
     if lexical_segment_verification["schema_version"]
         != "mainrag.storage-v2.lexical-segment-verification.v1"
         || lexical_segment_verification["generation_id"] != input.generation_id

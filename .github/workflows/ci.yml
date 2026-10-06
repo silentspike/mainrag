@@ -133,7 +133,7 @@ jobs:
         shell: bash
         run: |
           cargo test -p mainrag-api --features storage-v2-retrieval --lib qualification_reader_tests -- --nocapture | tee qualification-reader-tests.log
-          python3 -c 'from pathlib import Path; assert "8 passed; 0 failed; 0 ignored;" in Path("qualification-reader-tests.log").read_text(), "Expected all complete export and reader diagnostic regressions to execute"'
+          python3 -c 'from pathlib import Path; assert "12 passed; 0 failed; 0 ignored;" in Path("qualification-reader-tests.log").read_text(), "Expected all complete export, lexical page and reader diagnostic regressions to execute"'
       - name: Verify native legacy hit production, committed replay and corrupt body rejection
         shell: bash
         env:
