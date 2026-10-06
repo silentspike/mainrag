@@ -137,10 +137,37 @@ private regular file with the reviewed digest. Producer identity, input hashes,
 profiles, verification manifest, counts and active pointer must still match.
 Interrupted attempts and failed qualifications cannot supply this proof.
 
-This avoids the repeated build endpoint and source traversal. Body/segment
-integrity, live input review, frozen gold, search quality/latency, intelligence,
-resources and the final qualification POST still execute. Original telemetry is
-not emitted as a new replay measurement.
+This avoids the repeated build endpoint and source traversal. By default,
+body/segment integrity still executes. Original telemetry is not emitted as a
+new replay measurement.
+
+A completed integrity phase can also survive a later query failure. Use
+`--completed-integrity-evidence` with its reviewed
+`--expected-completed-integrity-evidence-sha256`, plus
+`--integrity-verifier-receipt` and its
+`--expected-integrity-verifier-receipt-sha256`. This requires a bound local reader.
+The original proof must cover every integrity check and every lexical occurrence;
+the running verifier binary, sealed generation, original input/build identity,
+profiles, root, verification manifest and pointer must remain unchanged. A live
+bounded catalog observation rejects verifier definition drift. Only the
+explicitly audited reader and exact query-cache changes in migration 155 are
+compatible. The cache transition retains original text, hashes, flags and
+identities and must equal the complete original vector with positions stripped.
+The observation must also match the current installation's function identities.
+This does not carry forward query results or qualify a failed attempt: live input
+review, frozen gold, search quality/latency, intelligence, resources and the final
+qualification POST still execute. The final manifest records both proof and
+installation digests and the current identity observation.
+
+Migration 155 retains the full normalized lexeme set in the existing derived
+document vector field. Cached positive and negative simple conjunctions avoid
+retokenizing the document; phrases still reconstruct complete positions.
+Existing empty caches can be filled in bounded operator batches. The immutable
+projection trigger permits only the exact empty-to-complete cache transition,
+and no source import, pack copy or generation rebuild is required. Compact
+first-match readers stop at the earliest exact matching block. Derived readers
+can use an exact conjunction cache only when every term first occurs in the
+same segment; other cases retain their exact fallback.
 
 Use `--reader-package-receipt` and
 `--expected-reader-package-receipt-sha256` to bind the new reader checks to the
