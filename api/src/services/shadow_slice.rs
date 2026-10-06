@@ -877,22 +877,21 @@ where
     .await
 }
 
-/// Build an ordinary active-source successor using only native lexical inputs.
-/// Legacy bootstrap readers are deliberately absent from this path.
-pub async fn run_active_source_build<C>(
-    client: &C,
+/// Use the same durable complete-item protocol for ordinary active-source sync.
+/// The caller keeps the original active pointer fenced until preparation ends.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_active_source_build_checkpointed(
+    session: &crate::db::build_checkpoint::BuildCheckpointSession,
     source_id: i64,
     source_type: &str,
     source_path: &Path,
     pack_root: &Path,
     io_buffer_bytes: usize,
     commit_sha: &str,
-) -> Result<ShadowSliceResult>
-where
-    C: GenericClient + Sync,
-{
+    progress: Option<&super::build_progress::BuildProgressRecorder>,
+) -> Result<ShadowSliceResult> {
     run_storage_v2_slice(
-        client,
+        session.client(),
         source_id,
         source_type,
         source_path,
@@ -903,8 +902,8 @@ where
         false,
         None,
         None,
-        None,
-        None,
+        progress,
+        Some(session),
     )
     .await
 }

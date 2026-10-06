@@ -14,12 +14,12 @@ use tokio_postgres::GenericClient;
 
 use super::shadow_slice::{
     observe_release_watermark_configured, observe_release_watermark_with_prefix,
-    run_active_source_build, verify_release_candidate, ReleaseCandidateVerifyInput,
+    run_active_source_build_checkpointed, verify_release_candidate, ReleaseCandidateVerifyInput,
     ReleaseCandidateVerifyResult, ReleaseWatermarkObservation, ShadowSliceResult,
 };
 use crate::plugins::managed_append::TrustedPrefix;
 
-const MINIMUM_PACK_FREE_BYTES: u64 = 40 * 1024 * 1024 * 1024;
+const MINIMUM_PACK_FREE_BYTES: u64 = 42 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 pub struct ActiveIngestResult {
@@ -142,17 +142,17 @@ async fn observe_active_watermark<C: GenericClient + Sync>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn prepare_active_source<C>(
-    client: &C,
+pub async fn prepare_active_source_checkpointed(
+    session: &crate::db::build_checkpoint::BuildCheckpointSession,
+    progress: Option<&super::build_progress::BuildProgressRecorder>,
     source_id: i64,
     manifest_sha256: &str,
     commit_sha: &str,
     pack_root: &Path,
     io_buffer_bytes: usize,
-) -> Result<ActiveIngestPreparation>
-where
-    C: GenericClient + Sync,
-{
+) -> Result<ActiveIngestPreparation> {
+    session.validate_source(source_id)?;
+    let client = session.client();
     ensure!(source_id > 0, "active ingest requires a source");
     ensure!(
         manifest_sha256.len() == 64
@@ -248,14 +248,15 @@ where
         "storage-v2 pack filesystem cannot hold the observed source and reserve"
     );
 
-    let built = run_active_source_build(
-        client,
+    let built = run_active_source_build_checkpointed(
+        session,
         source_id,
         &source_type,
         Path::new(&source_path),
         pack_root,
         io_buffer_bytes,
         commit_sha,
+        progress,
     )
     .await?;
     ensure!(
