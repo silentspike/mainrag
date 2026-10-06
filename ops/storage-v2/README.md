@@ -1076,6 +1076,25 @@ and marks the missing original capacity observation explicitly. Qualification
 still rechecks current resource reserve, generation identity, restart, search,
 intelligence, integrity, and source drift before promotion.
 
+### Bounded candidate integrity and failure classification
+
+Migration 153 retains the lexical verification result contract and source
+authorization. The complete verifier processes one immutable document at a
+time, advances through UTF-8 using bounded overlapping character windows, and
+checks groups of at most 256 segments. Flat and compact rows retain digest and
+weighted-vector comparisons. Derived rows independently compare character
+slices with their canonical byte slices and digests; their vectors are defined
+by those validated bytes and context. Existing generation mask/cache validation
+remains required. No representation is rebuilt or sampled by this migration.
+Identical text/context/type inputs share one FTS reconstruction within each
+bounded group; every original row still receives its own digest/vector check.
+
+The verification deadline remains unchanged. A failed qualification retains its
+generation and receipts; choose a new attempt only after correcting the cause.
+The operator preserves the API's exact allowlisted verification phase, SQLSTATE,
+reader-epoch-close SQLSTATE and retention flag in failure receipts. Arbitrary
+error bodies, extra JSON fields, headers and source text are never retained.
+
 ### Durable candidate build progress
 
 `release-candidate.py build` saves a private `<checkpoint>.progress.json` before

@@ -87,6 +87,39 @@ THIN_POOL_MAX_DATA_PERCENT = Decimal(75)
 THIN_POOL_MAX_METADATA_PERCENT = Decimal(70)
 
 
+class CandidateRequestFailure(RuntimeError):
+    """Transport status and validated public classification, without response text."""
+
+    def __init__(self, status: int, classification: dict[str, Any]) -> None:
+        super().__init__(f"API request failed with HTTP {status}")
+        self.classification = classification
+
+
+def candidate_failure_classification(raw: bytes) -> dict[str, Any]:
+    if len(raw) > 4096:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (ValueError, UnicodeError):
+        return {}
+    message = value.get("error") if isinstance(value, dict) else None
+    if not isinstance(message, str):
+        return {}
+    match = re.fullmatch(
+        r"storage-v2 release-candidate verification failed: "
+        r"phase=(lexical_segment_integrity|intelligence_export|validation_or_reader_epoch|"
+        r"test_scope|candidate_identity|generation_root|body_inventory|body_pack_integrity|"
+        r"source_state|timeout_read|verification_timeout_set|verification_timeout_restore|query_seeds); "
+        r"database_sqlstate=(none|[0-9A-Z]{5}); "
+        r"reader_epoch_close_sqlstate=(none|[0-9A-Z]{5}); "
+        r"retention_required=(true|false)", message,
+    )
+    if match is None:
+        return {}
+    return {"database_phase": match[1], "database_sqlstate": match[2],
+            "reader_epoch_close_sqlstate": match[3], "retention_required": match[4] == "true"}
+
+
 def request(api_url: str, token: str, method: str, path: str,
             body: object | None = None, *, timeout_seconds: float = 24 * 3600) -> Any:
     data = None if body is None else json.dumps(body, separators=(",", ":")).encode()
@@ -100,9 +133,13 @@ def request(api_url: str, token: str, method: str, path: str,
         with urllib.request.urlopen(call, timeout=timeout_seconds) as response:
             return json.load(response)
     except urllib.error.HTTPError as error:
-        # API error bodies can contain protected source or query details. The
-        # status is sufficient for the private failure artifact and console.
-        raise RuntimeError(f"API request failed with HTTP {error.code}") from error
+        # Preserve only the API's exact public classification grammar. Never
+        # retain arbitrary response text, headers, paths or exception messages.
+        try:
+            classification = candidate_failure_classification(error.read(4097))
+        except (OSError, ValueError):
+            classification = {}
+        raise CandidateRequestFailure(error.code, classification) from error
 
 
 def atomic_private_json(path: Path, value: object, *, replace: bool = True) -> None:
@@ -1261,6 +1298,8 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
             seen: set[int] = set()
             while cause is not None and id(cause) not in seen:
                 seen.add(id(cause))
+                if isinstance(cause, CandidateRequestFailure):
+                    failure.update(cause.classification)
                 if isinstance(cause, urllib.error.HTTPError):
                     failure["http_status"] = cause.code
                     break
