@@ -181,13 +181,24 @@ def switch(args: argparse.Namespace) -> dict:
     if not isinstance(runtime_commit, str) or re.fullmatch(r"[0-9a-f]{40}", runtime_commit) is None:
         raise RuntimeError("active ingest runtime commit is invalid")
     file_state = switch_file_state(intended, runtime_commit)
-    pid, current, current_commit = read_service_state()
-    if service_binary_sha256(pid) != plan["installed_binary_sha256"]:
-        raise RuntimeError("running API binary differs from activation plan")
-    current_api = api_read_path(args.api_url, args.api_token_file)
-    if file_state == "NEW" and (current or current_commit or current_api != "current"):
+    cold_start = False
+    if plan.get("quiesced_watermarks_sha256") is not None:
+        service = OPERATOR.api_unit_state()
+        cold_start = service.get("ActiveState") == "inactive"
+        if cold_start:
+            OPERATOR.require_stopped_api()
+    if cold_start:
+        # The stopped API has no observable read selector. Start it only after
+        # installing the accepted default; never expose an intermediate legacy API.
+        pid, current, current_commit, current_api = 0, None, None, None
+    else:
+        pid, current, current_commit = read_service_state()
+        if service_binary_sha256(pid) != plan["installed_binary_sha256"]:
+            raise RuntimeError("running API binary differs from activation plan")
+        current_api = api_read_path(args.api_url, args.api_token_file)
+    if not cold_start and file_state == "NEW" and (current or current_commit or current_api != "current"):
         raise RuntimeError("API default selector was already changed")
-    if file_state == "EXACT_EXISTING" and not (
+    if not cold_start and file_state == "EXACT_EXISTING" and not (
         (current == intended and current_commit == runtime_commit
          and current_api == "storage_v2_active")
         or (not current and not current_commit and current_api == "current")
@@ -196,7 +207,7 @@ def switch(args: argparse.Namespace) -> dict:
     result = {"schema_version": "mainrag.storage-v2.default-switch.v1",
               "status": "SWITCH_PENDING", "plan_sha256": args.plan_sha256,
               "manifest_sha256": intended, "activation_id": manifest["activation_id"],
-              "started_at_unix": now}
+              "started_at_unix": now, "cold_start_after_quiesced_activation": cold_start}
     OPERATOR.private_write(args.output, result)
     try:
         if file_state == "NEW":
@@ -205,7 +216,7 @@ def switch(args: argparse.Namespace) -> dict:
                                      + runtime_commit + "\n").encode())
             atomic_create(DROPIN, ("[Service]\nEnvironmentFile=" + str(ENV_FILE)
                                    + "\n").encode())
-        if current_api == "current":
+        if cold_start or current_api == "current":
             systemctl("daemon-reload")
             systemctl("restart", UNIT)
             pid = verify_restarted_api(args.api_url, args.api_token_file,
