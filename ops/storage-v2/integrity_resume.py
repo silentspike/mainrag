@@ -61,6 +61,9 @@ IDENTITY_FIELDS = (
     "source_id", "generation_id", "generation_seq", "source_watermark_sha256",
     "item_count", "active_generation_id", "verification_manifest_sha256",
 )
+LEXICAL_PAGE_SIGNATURE = "storage_v2_verify_lexical_segment_page(bigint,bigint,integer)"
+LEXICAL_PAGE_PREDECESSOR_SHA256 = "084ebd93de9f702ac96400313ecd1bdce284ce57bf8b837ad51ba8f6a6f075ce"
+LEXICAL_PAGE_SEEK_SHA256 = "0f8d7439612da0047dc76a6747e9ff0d5c0e74845864a1e04a07686b0f58cea4"
 
 
 def validate_reuse(prior: dict[str, Any], checkpoint: dict[str, Any],
@@ -112,6 +115,19 @@ def validate_reuse(prior: dict[str, Any], checkpoint: dict[str, Any],
         "function_identities", {}).items() if name.startswith("storage_v2_")}
     functions = observed.get("function_identities", {})
     changes, additions = QUERY_ONLY_CHANGES, QUERY_ONLY_ADDITIONS
+    if functions.get(LEXICAL_PAGE_SIGNATURE) == LEXICAL_PAGE_SEEK_SHA256:
+        admission = observed.get("lexical_traversal_admission")
+        if (not isinstance(admission, dict)
+                or admission.get("schema_version") != "mainrag.storage-v2.lexical-page-traversal-admission.v1"
+                or admission.get("predecessor_sha256") != LEXICAL_PAGE_PREDECESSOR_SHA256
+                or admission.get("current_sha256") != LEXICAL_PAGE_SEEK_SHA256
+                or admission.get("authority_and_multiplicity_validated") is not True):
+            raise RuntimeError("completed integrity lexical traversal admission is missing or differs")
+        # Migration 158 replaces only the visible-page selection. Its guarded
+        # byte comparison preserves every body/window/vector verification rule;
+        # validated FK/exclusion constraints preserve row multiplicity.
+        if old_functions.get(LEXICAL_PAGE_SIGNATURE) == LEXICAL_PAGE_PREDECESSOR_SHA256:
+            changes = changes | {LEXICAL_PAGE_SIGNATURE}
     if POSTING_COMPACTION_ADDITIONS.intersection(functions):
         admission = observed.get("posting_compaction_admission")
         guard = "storage_v2_posting_conversion_require_operator()"
@@ -168,7 +184,26 @@ SELECT jsonb_build_object(
   'contract_sha256',current_setting('mainrag.integrity_compaction_contract'),
   'validated_guard_sha256',encode(sha256(convert_to(pg_get_functiondef(
      to_regprocedure('storage_v2_posting_conversion_require_operator()')),'UTF8')),'hex'))
- ELSE NULL END);
+ ELSE NULL END,
+ 'lexical_traversal_admission',(SELECT jsonb_build_object(
+   'schema_version','mainrag.storage-v2.lexical-page-traversal-admission.v1',
+   'predecessor_sha256','{LEXICAL_PAGE_PREDECESSOR_SHA256}',
+   'current_sha256','{LEXICAL_PAGE_SEEK_SHA256}',
+   'authority_and_multiplicity_validated',true)
+ FROM pg_proc page WHERE page.oid=to_regprocedure('{LEXICAL_PAGE_SIGNATURE}')
+  AND encode(sha256(convert_to(pg_get_functiondef(page.oid),'UTF8')),'hex')='{LEXICAL_PAGE_SEEK_SHA256}'
+  AND page.proowner='mainrag_v2_frontier_owner'::regrole
+  AND page.proconfig=ARRAY['search_path=pg_catalog, public','row_security=on','work_mem=8MB','enable_nestloop=on']::text[]
+  AND page.proacl=ARRAY['mainrag_v2_frontier_owner=X/mainrag_v2_frontier_owner'::aclitem,
+                       'mainrag=X/mainrag_v2_frontier_owner'::aclitem]
+  AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='generation_item_version'::regclass
+    AND conname='generation_item_version_artifact_version_id_source_item_i_fkey1'
+    AND convalidated AND contype='f'
+    AND pg_get_constraintdef(oid)='FOREIGN KEY (artifact_version_id, source_item_id, source_id) REFERENCES artifact_version(id, item_id, source_id) ON DELETE RESTRICT')
+  AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='generation_item_version'::regclass
+    AND conname='generation_item_version_source_id_source_item_id_int8range_excl'
+    AND convalidated AND contype='x'
+    AND pg_get_constraintdef(oid)='EXCLUDE USING gist (source_id WITH =, source_item_id WITH =, int8range(valid_from_seq, valid_to_seq, ''[)''::text) WITH &&)')));
 ROLLBACK;"""
     result = subprocess.run(
         ["sudo", "-n", "-u", "postgres", "psql", "-X", "-qAt", "-v",

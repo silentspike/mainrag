@@ -96,6 +96,57 @@ class IntegrityResumeTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     M["validate_reuse"](*args)
 
+    def traversal_fixture(self):
+        args = self.fixture()
+        name = M["LEXICAL_PAGE_SIGNATURE"]
+        args[3]["function_identities"][name] = M["LEXICAL_PAGE_PREDECESSOR_SHA256"]
+        args[-1]["function_identities"][name] = M["LEXICAL_PAGE_SEEK_SHA256"]
+        args[-1]["lexical_traversal_admission"] = {
+            "schema_version": "mainrag.storage-v2.lexical-page-traversal-admission.v1",
+            "predecessor_sha256": M["LEXICAL_PAGE_PREDECESSOR_SHA256"],
+            "current_sha256": M["LEXICAL_PAGE_SEEK_SHA256"],
+            "authority_and_multiplicity_validated": True}
+        return args
+
+    def test_exact_selection_change_reuses_complete_proof_with_live_admission(self):
+        args = self.traversal_fixture()
+        self.assertEqual(M["validate_reuse"](*args), args[0]["verification"])
+        args[3]["function_identities"][M["LEXICAL_PAGE_SIGNATURE"]] = M["LEXICAL_PAGE_SEEK_SHA256"]
+        self.assertEqual(M["validate_reuse"](*args), args[0]["verification"])
+        del args[-1]["lexical_traversal_admission"]
+        with self.assertRaisesRegex(RuntimeError, "traversal admission"):
+            M["validate_reuse"](*args)
+
+    def test_selection_reuse_rejects_unknown_predecessor_or_admission_drift(self):
+        for fault in ("missing", "schema_version", "predecessor_sha256", "current_sha256",
+                      "authority_and_multiplicity_validated", "unknown_predecessor"):
+            with self.subTest(fault=fault):
+                args = self.traversal_fixture()
+                if fault == "missing":
+                    del args[-1]["lexical_traversal_admission"]
+                elif fault == "unknown_predecessor":
+                    args[3]["function_identities"][M["LEXICAL_PAGE_SIGNATURE"]] = "9" * 64
+                else:
+                    args[-1]["lexical_traversal_admission"][fault] = "unreviewed"
+                with self.assertRaises(RuntimeError):
+                    M["validate_reuse"](*args)
+
+    def test_selection_admission_does_not_allow_other_verifier_changes(self):
+        args = self.traversal_fixture()
+        args[3]["function_identities"]["storage_v2_verify_roots(bigint)"] = "6" * 64
+        args[-1]["function_identities"]["storage_v2_verify_roots(bigint)"] = "7" * 64
+        with self.assertRaisesRegex(RuntimeError, "verifier definitions"):
+            M["validate_reuse"](*args)
+        args[-1]["function_identities"]["storage_v2_verify_roots(bigint)"] = "6" * 64
+        functions = args[-1]["function_identities"]
+        functions.update({name: "4" * 64 for name in M["POSTING_COMPACTION_ADDITIONS"]})
+        args[3]["function_identities"].update({name: "1" * 64 for name in M["POSTING_COMPACTION_CHANGES"]})
+        functions.update({name: "5" * 64 for name in M["POSTING_COMPACTION_CHANGES"]})
+        args[-1]["posting_compaction_admission"] = {
+            "schema_version": "mainrag.storage-v2.posting-compaction-admission.v1",
+            "validated_guard_sha256": "4" * 64, "contract_sha256": "6" * 64}
+        self.assertEqual(M["validate_reuse"](*args), args[0]["verification"])
+
     def test_incomplete_or_corrupt_proof_is_never_reused(self):
         for check in M["INTEGRITY_CHECKS"]:
             with self.subTest(check=check):
