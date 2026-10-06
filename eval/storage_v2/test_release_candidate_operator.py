@@ -602,6 +602,72 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "output already exists"):
                     MODULE.verify(arguments, "private-token")
 
+    def test_deferred_performance_keeps_quality_and_never_publishes(self) -> None:
+        seed, current = self.search_fixture()
+        for fault in (None, "quality", "integrity", "lexical"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                arguments = Namespace(checkpoint=directory / "checkpoint.json",
+                    output=directory / "attempt.json", source_id=1, commit_sha="a" * 40,
+                    api_url="http://fixture.invalid", max_query_ms=2000,
+                    pack_root=directory, minimum_free_bytes=0, defer_performance_gates=True)
+                checkpoint = {"source_id": 1, "source_ref": "b" * 64, "commit_sha": "a" * 40,
+                    "generation_id": 2, "generation_seq": 1, "item_count": 1,
+                    "source_watermark_sha256": "c" * 64, "active_generation_id": None,
+                    "server_instance_id": "before"}
+                MODULE.atomic_private_json(arguments.checkpoint, checkpoint)
+                repeated = {**checkpoint, "reused_generation": True,
+                    "active_generation_before": None, "active_generation_after": None, "telemetry": {}}
+                verified = {**checkpoint, "status": "verified", "query_seeds": [],
+                    "intelligence_export": {},
+                    "checks": {name: "PASS" for name in MODULE.integrity_resume["INTEGRITY_CHECKS"]},
+                    "lexical_segment_verification": {"generation_id": 2, "occurrence_count": 1,
+                        "segment_count": 1, "missing_count": 0, "invalid_count": 0}}
+                storage = {**current, "took_ms": 90000}
+                if fault == "quality":
+                    storage["results"] = []
+                if fault == "integrity":
+                    verified["checks"]["body_pack_integrity"] = "FAIL"
+                if fault == "lexical":
+                    verified["lexical_segment_verification"]["occurrence_count"] = 0
+                with patch.object(MODULE, "source_state", return_value={"server_instance_id": "after"}), \
+                     patch.object(MODULE, "load_gold_suite", return_value=([seed, {**seed, "id": "second-case"}], {})), \
+                     patch.object(MODULE, "validate_telemetry"), \
+                     patch.object(MODULE, "verify_intelligence", return_value={}), \
+                     patch.object(MODULE, "request", side_effect=[repeated, verified, current, storage]) as request:
+                    if fault is None:
+                        MODULE.verify(arguments, "private-token")
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            MODULE.verify(arguments, "private-token")
+                    self.assertEqual(request.call_count, 4)
+                    self.assertTrue(all(call.kwargs.get("timeout_seconds") == 120
+                                        for call in request.call_args_list[2:]))
+                    self.assertFalse(any("qualify" in call.args[3] or "dual-read" in call.args[3]
+                                         for call in request.call_args_list))
+                artifact = json.loads(arguments.output.read_text())
+                if fault is None:
+                    self.assertEqual(artifact["status"], "FUNCTIONAL_COMPLETE_PERFORMANCE_DEFERRED")
+                    self.assertIsNone(artifact["checks"]["performance"])
+                    self.assertEqual(artifact["original_max_query_ms"], 2000)
+                    self.assertTrue(artifact["checks"]["integrity"] and artifact["checks"]["quality"])
+                    self.assertFalse(artifact["qualification_submitted"])
+                    self.assertFalse(artifact["current_candidate_acceptance_claimed"])
+                    result = artifact["query_results"][0]
+                    self.assertEqual(len(artifact["query_results"]), 2)
+                    self.assertIsNone(result["performance_passed"])
+                    for name in ("current_took_ms", "storage_v2_took_ms", "max_query_ms"):
+                        self.assertNotIn(name, result)
+                    journal = json.loads(arguments.output.with_name("attempt.json.progress.json").read_text())
+                    self.assertEqual(journal["status"], "DEFERRED")
+                    self.assertEqual(journal["qualification_outcome"], "NOT_ATTEMPTED")
+                else:
+                    self.assertEqual(artifact["status"], "FAIL")
+                self.assertEqual(stat.S_IMODE(arguments.output.stat().st_mode), 0o600)
+                self.assertNotIn("private-token", arguments.output.read_text())
+                with self.assertRaisesRegex(RuntimeError, "output already exists"):
+                    MODULE.verify(arguments, "private-token")
+
     def coverage_fixture(self):
         seed, current = self.search_fixture()
         seed["query"] = "private_query"
