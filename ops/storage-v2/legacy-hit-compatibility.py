@@ -56,13 +56,32 @@ def immutable_inventory(source):
     return dict(source_id=source['source_id'],generation_id=source['generation_id'],legacy_epoch=source['legacy_epoch'],
         files=[{key:file[key] for key in ('file_id','file_sha256','legacy_revision','hit_count')} for file in source['files']])
 
-def capacity(args):
+def full_capacity(args):
     if shutil.disk_usage('/').free<20*1024**3 or shutil.disk_usage(args.pack_root).free<42*1024**3+args.source_spool_budget_bytes:
         raise RuntimeError('local root or data reserve is exhausted')
     observed=R.thin_pool_capacity(args.pack_root,args.maximum_growth_bytes+42*1024**3,require_estimate=True)
     if observed is None:
         raise RuntimeError('explicit physical thin-pool admission is required for this operator')
     return observed
+
+def capacity(args):
+    if not getattr(args, 'kernel_capacity_readback', False):
+        return full_capacity(args)
+    # Keep the original root/data free-space guards on every batch.
+    if shutil.disk_usage('/').free<20*1024**3 or shutil.disk_usage(args.pack_root).free<42*1024**3+args.source_spool_budget_bytes:
+        raise RuntimeError('local root or data reserve is exhausted')
+    identity = (str(args.pack_root.resolve(strict=True)), args.maximum_growth_bytes, args.source_spool_budget_bytes)
+    guard = getattr(args, '_kernel_capacity_guard', None)
+    if guard is None:
+        spec=importlib.util.spec_from_file_location('legacy_kernel_capacity', HERE/'legacy_capacity.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        guard=module.LiveKernelCapacity(lambda: full_capacity(args), args.pack_root)
+        args._kernel_capacity_guard=(identity, guard)
+    else:
+        bound, guard = guard
+        if bound != identity:
+            raise RuntimeError('reviewed capacity inputs changed during bootstrap')
+    return guard.observe()
 
 def wait_unknown_outcome(args,token,source,file):
     # Only a currently held backend lease proves ongoing producer work. A
@@ -82,7 +101,8 @@ def wait_unknown_outcome(args,token,source,file):
 def apply(args,token,plan,package):
     if plan.get('schema_version')!='mainrag.storage-v2.legacy-hit-plan.v1' or plan.get('package')!=package \
         or plan.get('include_test')!=args.include_test or plan.get('source_spool_budget_bytes')!=args.source_spool_budget_bytes \
-        or plan.get('maximum_growth_bytes')!=args.maximum_growth_bytes:
+        or plan.get('maximum_growth_bytes')!=args.maximum_growth_bytes \
+        or plan.get('kernel_capacity_readback',False)!=getattr(args,'kernel_capacity_readback',False):
         raise RuntimeError('reviewed legacy plan package, scope or resource admission differs')
     state=dict(schema_version='mainrag.storage-v2.legacy-hit-run.v1',plan_sha256=args.apply,
         status='RUNNING',source_index=0,file_index=0,after_hit_id=0,batches=0)
@@ -162,6 +182,7 @@ def main():
     parser.add_argument('--expected-reader-package-receipt-sha256',required=True)
     parser.add_argument('--pack-root',type=Path,required=True);parser.add_argument('--maximum-growth-bytes',type=int,required=True)
     parser.add_argument('--source-spool-budget-bytes',type=int,required=True)
+    parser.add_argument('--kernel-capacity-readback',action='store_true',help='Fresh kernel pool occupancy per batch; full LVM policy is rechecked every 60 seconds')
     parser.add_argument('--include-test',action='store_true');parser.add_argument('--plan-file',type=Path,required=True)
     parser.add_argument('--candidate-set',type=Path);parser.add_argument('--candidate-set-sha256')
     parser.add_argument('--apply');parser.add_argument('--state',type=Path)
@@ -190,7 +211,7 @@ def main():
         snapshots=[inventory(args,token,dict(source_id=source['source_id'],generation_id=source['generation_id'])) for source in sources]
         plan=dict(schema_version='mainrag.storage-v2.legacy-hit-plan.v1',package=package,
             include_test=args.include_test,source_spool_budget_bytes=args.source_spool_budget_bytes,
-            maximum_growth_bytes=args.maximum_growth_bytes,sources=snapshots,candidate_set_sha256=args.candidate_set_sha256)
+            maximum_growth_bytes=args.maximum_growth_bytes,kernel_capacity_readback=args.kernel_capacity_readback,sources=snapshots,candidate_set_sha256=args.candidate_set_sha256)
         R.atomic_private_json(args.plan_file,plan,replace=False)
         print(hashlib.sha256(args.plan_file.read_bytes()).hexdigest())
     return 0
