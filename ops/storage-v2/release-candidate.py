@@ -1312,7 +1312,7 @@ def verify(arguments: argparse.Namespace, token: str) -> None:
         progress.finish("FAILED")
         raise
     else:
-        progress.finish("COMPLETED")
+        progress.finish("DEFERRED" if progress.get("performance_gates_deferred") else "COMPLETED")
 
 
 def read_private_receipt(path: Path, expected_sha256: str) -> dict[str, Any]:
@@ -1589,6 +1589,10 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
     quality_passed = True
     performance_passed = True
     degradation_passed = True
+    defer_performance = getattr(arguments, "defer_performance_gates", False)
+    functional_pairs: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    functional_coverage: dict[tuple[str, str], dict[str, Any]] = {}
+    query_timeout = {"timeout_seconds": 120} if defer_performance else {}
     for ordinal, (kind, seed) in enumerate(
         [("automatic", seed) for seed in verified["query_seeds"]]
         + [("gold", case) for case in gold_cases], 1
@@ -1598,15 +1602,18 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
         progress["pending_query"] = pending
         common = {"query": seed["query"], "source_id": arguments.source_id, "limit": 10}
         progress["phase"] = "search_current"
-        current = request(arguments.api_url, token, "POST", "/api/v1/search/keyword", common)
+        cached_pair = functional_pairs.get(seed["query"]) if defer_performance else None
+        current = cached_pair[0] if cached_pair else request(
+            arguments.api_url, token, "POST", "/api/v1/search/keyword", common, **query_timeout)
         expectation_binding = None
         if kind == "automatic":
             seed, expectation_binding = bind_automatic_expectation(seed, current, source_review)
         pending["current"] = ranked(current["results"])
         pending["current_path_sha256"] = path_identity(current["results"])
-        pending["current_ms"] = current.get("took_ms")
+        if not defer_performance:
+            pending["current_ms"] = current.get("took_ms")
         progress["phase"] = "search_storage_v2"
-        storage = request(arguments.api_url, token, "POST", "/api/v1/search/keyword", {
+        storage = cached_pair[1] if cached_pair else request(arguments.api_url, token, "POST", "/api/v1/search/keyword", {
             **common,
             "read_path": "storage_v2",
             "generation": str(checkpoint["generation_seq"]),
@@ -1614,10 +1621,13 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             "graph_profile": "candidate-unavailable-v1",
             "semantic_profile": "candidate-unavailable-v1",
             "rerank_profile": "candidate-unavailable-v1",
-        })
+        }, **query_timeout)
+        if defer_performance:
+            functional_pairs[seed["query"]] = (current, storage)
         pending["storage_v2"] = ranked(storage["results"])
         pending["storage_v2_path_sha256"] = path_identity(storage["results"])
-        pending["storage_v2_ms"] = storage.get("took_ms")
+        if not defer_performance:
+            pending["storage_v2_ms"] = storage.get("took_ms")
         progress["phase"] = "query_coverage"
         current_by_path: dict[str, list[str]] = {}
         for result in current["results"]:
@@ -1637,15 +1647,19 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             path_review = source_review["paths"].get(path_sha) if source_review else None
             complete_required = (isinstance(path_review, dict) and path_review.get("status") == "changed_bytes"
                 and path_sha in path_identity(storage["results"]) and path_sha not in file_cache)
-            coverage = request(
-                arguments.api_url, token, "POST",
-                f"/api/v1/admin/sources/{arguments.source_id}/storage-v2-candidate-query-evidence",
-                {"generation_id": checkpoint["generation_id"], "commit_sha": arguments.commit_sha,
-                 "query": seed["query"],
-                 "candidate_occurrence_ids": [hit["chunk_id"] for hit in storage["results"]],
-                 "current_chunk_ids": [hit["chunk_id"] for hit in current["results"]],
-                 **({"complete_source_path_sha256": path_sha} if complete_required else {})},
-            )
+            coverage_key = (seed["query"], path_sha)
+            coverage = functional_coverage.get(coverage_key) if defer_performance else None
+            if coverage is None:
+                coverage = request(
+                    arguments.api_url, token, "POST",
+                    f"/api/v1/admin/sources/{arguments.source_id}/storage-v2-candidate-query-evidence",
+                    {"generation_id": checkpoint["generation_id"], "commit_sha": arguments.commit_sha,
+                     "query": seed["query"],
+                     "candidate_occurrence_ids": [hit["chunk_id"] for hit in storage["results"]],
+                     "current_chunk_ids": [hit["chunk_id"] for hit in current["results"]],
+                     **({"complete_source_path_sha256": path_sha} if complete_required else {})},
+                    **query_timeout,
+                )
             if complete_required:
                 complete = coverage.get("complete_source_file")
                 if not complete_file_proof_valid(complete) or any(
@@ -1656,15 +1670,25 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
                 file_cache[path_sha] = complete
             elif path_sha in file_cache:
                 coverage["complete_source_file"] = file_cache[path_sha]
+            if defer_performance:
+                functional_coverage[coverage_key] = coverage
             query_coverage.append(coverage)
         gates = search_query_gates(seed, current, storage, arguments.max_query_ms,
                                    coverage, checkpoint, source_review)
+        if defer_performance:
+            # These single requests establish functional results. Their timing
+            # is not a hardware-normalized performance acceptance observation.
+            gates["performance_passed"] = None
+            gates["performance_status"] = "DEFERRED_OWNER_HARDWARE"
+            for field in ("current_took_ms", "storage_v2_took_ms", "max_query_ms"):
+                gates.pop(field, None)
         if expectation_binding is not None:
             gates["automatic_expectation_binding"] = expectation_binding
         case_run_id = sha256_text(f"{kind}:{seed['id']}")
         gates["id"] = case_run_id
         quality_passed &= gates["quality_passed"]
-        performance_passed &= gates["performance_passed"]
+        if not defer_performance:
+            performance_passed &= gates["performance_passed"]
         degradation_passed &= gates["degradation_passed"]
         # Gold cases may reuse automatic seed IDs. Both dual-read fixtures and
         # persisted query results need unique IDs across the two sets.
@@ -1685,7 +1709,8 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
     if source_review is not None:
         require_live_snapshot(arguments.api_url, token, arguments.source_id,
                               source_review, checkpoint.get("git_snapshot_commit_sha"))
-    if not query_results or not (quality_passed and performance_passed and degradation_passed):
+    if not query_results or not (quality_passed and degradation_passed
+                                and (defer_performance or performance_passed)):
         atomic_private_json(arguments.output, {
             "status": "FAIL", "failed_gate": "candidate_search",
             "checkpoint": checkpoint, "verification": verified,
@@ -1696,11 +1721,14 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
             "source_snapshot_review": progress.get("source_snapshot_review"),
             "query_coverage": query_coverage,
             "checks": {"quality": quality_passed and bool(query_results),
-                       "performance": performance_passed and bool(query_results),
+                       "performance": None if defer_performance else performance_passed and bool(query_results),
                        "degradation": degradation_passed and bool(query_results)},
             "qualification_submitted": False,
         })
         raise RuntimeError("candidate search quality, latency, or degradation gate failed")
+    if defer_performance:
+        retain_functional_progress(arguments, progress, verified)
+        return
     dual_request = {
         "generation": checkpoint["generation_seq"],
         "commit_sha": arguments.commit_sha,
@@ -1809,6 +1837,48 @@ def verify_candidate(arguments: argparse.Namespace, token: str, progress: dict[s
     }, sort_keys=True))
 
 
+def retain_functional_progress(arguments: argparse.Namespace, progress: dict[str, Any],
+                               verified: dict[str, Any]) -> None:
+    """Keep completed work while leaving every publication gate unfulfilled."""
+    checkpoint = progress["checkpoint"]
+    if any(verified.get("checks", {}).get(name) != "PASS"
+           for name in integrity_resume["INTEGRITY_CHECKS"]):
+        raise RuntimeError("deferred functional evidence requires every integrity check")
+    lexical = verified.get("lexical_segment_verification", {})
+    if (lexical.get("generation_id") != checkpoint["generation_id"]
+            or lexical.get("occurrence_count") != checkpoint["item_count"]
+            or any(type(lexical.get(name)) is not int or lexical[name] != 0
+                   for name in ("missing_count", "invalid_count"))):
+        raise RuntimeError("deferred functional evidence requires complete lexical coverage")
+    progress["phase"] = "deferred_resource_readback"
+    if shutil.disk_usage(arguments.pack_root).free < arguments.minimum_free_bytes:
+        raise RuntimeError("resource reserve is below the approved minimum")
+    pool = thin_pool_capacity(arguments.pack_root, 0, require_estimate=False)
+    require_same_pool(checkpoint.get("pack_capacity_before_build", {}).get("thin_pool"), pool)
+    progress["thin_pool_after_verification"] = pool
+    progress["phase"] = "performance_gates_deferred"
+    progress["performance_gates_deferred"] = True
+    progress["qualification_attempted"] = False
+    progress["qualification_outcome"] = "NOT_ATTEMPTED"
+    if "completed_phase_reuse" in verified:
+        progress["integrity_reuse"] = verified["completed_phase_reuse"]
+    atomic_private_json(arguments.output, {
+        **progress,
+        "schema_version": "mainrag.storage-v2.deferred-functional-evidence.v1",
+        "status": "FUNCTIONAL_COMPLETE_PERFORMANCE_DEFERRED",
+        "checks": {"integrity": True, "quality": True, "degradation": True,
+                   "performance": None},
+        "deferred_gates": ["performance_envelope", "dual_read_publication", "qualification"],
+        "performance_status": "DEFERRED_OWNER_HARDWARE",
+        "original_max_query_ms": arguments.max_query_ms,
+        "qualification_submitted": False,
+        "current_candidate_acceptance_claimed": False,
+    }, replace=False)
+    print(json.dumps({"status": "FUNCTIONAL_COMPLETE_PERFORMANCE_DEFERRED",
+                      "qualification_submitted": False,
+                      "current_candidate_acceptance_claimed": False}, sort_keys=True))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=("build", "verify"))
@@ -1836,6 +1906,8 @@ def main() -> int:
     parser.add_argument("--maximum-build-bytes", type=int)
     parser.add_argument("--maximum-pool-growth-bytes", type=int)
     parser.add_argument("--max-query-ms", type=int, default=2000)
+    parser.add_argument("--defer-performance-gates", action="store_true",
+                        help="Retain functional checks without applying latency acceptance or submitting qualification")
     parser.add_argument("--gold-suite", type=Path)
     parser.add_argument("--expected-gold-suite-sha256")
     parser.add_argument("--source-snapshot-review", type=Path)
@@ -1844,6 +1916,8 @@ def main() -> int:
     parser.add_argument("--git-snapshot-commit-sha")
     parser.add_argument("--expected-source-watermark-sha256")
     arguments = parser.parse_args()
+    if arguments.defer_performance_gates and arguments.phase != "verify":
+        parser.error("--defer-performance-gates applies only to verify")
     reuse_fields = (arguments.completed_integrity_evidence,
                     arguments.expected_completed_integrity_evidence_sha256,
                     arguments.integrity_verifier_receipt,

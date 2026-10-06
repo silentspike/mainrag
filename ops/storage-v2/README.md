@@ -1121,6 +1121,66 @@ provide deletion authority. The separate transactional PostgreSQL operator
 consumes the reviewed inputs only after its live gates. Accepted activation,
 fresh owner authority for an exact
 manifest, and post-cleanup verification remain separate gates.
+
+## Retain functional progress while performance acceptance is deferred
+
+`release-candidate.py verify --defer-performance-gates` performs the normal
+restart/integrity, frozen gold, intelligence, exact query-result and source
+coverage checks. Each distinct search pair and matching coverage request runs
+once for functional evidence, with a 120-second request deadline; their
+latencies are excluded from query acceptance results. Integrity and resource
+failures still stop the operation. The original latency limit remains recorded
+and is not increased.
+
+The create-only private artifact has status
+`FUNCTIONAL_COMPLETE_PERFORMANCE_DEFERRED`, a null performance result and an
+explicit list of pending gates. The progress journal ends in `DEFERRED`.
+Neither dual-read publication nor qualification is submitted, and no current
+candidate acceptance is claimed. A zero operator exit establishes completed
+functional work, not an accepted release candidate. Resume normal acceptance
+using a new output path and compatible completed proofs when the intended
+hardware conditions are available. Activation and cleanup continue to require
+their full accepted evidence.
+
+## Lossless compaction of retained flat postings
+
+Migration 157 and `posting-compaction.py` convert existing flat posting pairs
+to the established compact codec without tokenizing source bodies again.
+Every original literal term and its exact frequency is preserved. The manifest
+binds document materializations, retained generations, source pointers, the
+operator package and the actual runtime. This changes a search representation;
+it does not activate candidates or establish release acceptance.
+
+`status` reads committed conversion state. `advance` copies bounded batches
+with durable database receipts and cursor reconciliation. Partial compact
+blocks remain invisible to readers. `publish` requires an exact, digest-bound
+correctness receipt and current live contract checks, then switches one complete
+document atomically. `rollback`
+restores its original flat representation while that representation is retained.
+Reader, permission, guard or resource drift stops subsequent operations.
+After a lost acknowledgement, read the retained receipt for the same operation
+before continuing; do not invent a replacement operation identity.
+
+Completed immutable integrity evidence remains reusable only with the same
+producer/generation/verifier identities and a successful read-only admission
+against the installed compaction function, view, relation and permission
+contracts. Unknown catalog additions or verifier changes still reject reuse.
+This preserves the original proof provenance; current search/gold correctness
+must be established separately against the published representation.
+
+The batch CLI does not retire flat data. The separate final SQL surface requires
+complete converted coverage, exact manifest/count/digest binding and a drained
+database. External admission must prevent new readers and writers throughout
+retirement. Draining active queries alone is insufficient: idle transactions
+can retain snapshots, and PostgreSQL `TRUNCATE` is not MVCC-safe. Retirement
+preserves document/generation identities and never uses `CASCADE`. Reversal
+to the old flat representation is unavailable after retirement.
+
+Copied/published counts and relation allocation are not physical savings.
+Include replacement blocks, their indexes, conversion receipts, retained flat
+data and WAL in capacity accounting. Report physical reclamation only from the
+actual filesystem/thin-pool readback, with the required cleanup acceptance.
+
 # Durable source batches
 
 `source-batch.py` runs one source at a time from a private, frozen JSON plan.
