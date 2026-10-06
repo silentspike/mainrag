@@ -1020,57 +1020,77 @@ async fn run_active_ingest(
     commit: String,
 ) -> Result<Json<serde_json::Value>> {
     use crate::services::active_ingest::{
-        commit_active_source, prepare_active_source, ActiveIngestPreparation,
+        commit_active_source, prepare_active_source_checkpointed, ActiveIngestPreparation,
     };
+    use crate::services::build_progress::BuildProgressRecorder;
 
     let pack_root = state.config.storage_v2_pack_root.clone();
     let io_buffer_bytes = state.config.storage_v2_pack_io_buffer_bytes;
-    fs_cut::capture_before_active_ingest(state, user_id, source_id, manifest.clone()).await?;
-    let prepared = state
-        .rls_client
-        .with_rls(user_id, true, move |transaction| {
-            Box::pin(async move {
-                prepare_active_source(
-                    &**transaction,
-                    source_id,
-                    &manifest,
-                    &commit,
-                    &pack_root,
-                    io_buffer_bytes,
-                )
-                .await
-                .map_err(|error| {
-                    tracing::error!(error = %format!("{error:#}"),
-                    "ordinary active storage-v2 ingest preparation failed");
-                    AppError::Internal("ordinary active storage-v2 ingest failed".to_string())
-                })
-            })
-        })
-        .await?;
-    let result = match prepared {
-        ActiveIngestPreparation::NoChange(result) => result,
-        ActiveIngestPreparation::Candidate(candidate) => {
-            let pack_root = state.config.storage_v2_pack_root.clone();
-            let io_buffer_bytes = state.config.storage_v2_pack_io_buffer_bytes;
-            state
-                .rls_client
-                .with_rls(user_id, true, move |transaction| {
-                    Box::pin(async move {
-                        commit_active_source(&**transaction, candidate, &pack_root, io_buffer_bytes)
-                            .await
-                            .map_err(|error| {
-                                tracing::error!(error = %format!("{error:#}"),
-                                "ordinary active storage-v2 ingest activation failed");
-                                AppError::Internal(
-                                    "ordinary active storage-v2 ingest failed".to_string(),
-                                )
-                            })
+    let attempt = Uuid::new_v4();
+    let progress = Arc::new(
+        BuildProgressRecorder::create(&pack_root, source_id, &commit, state.instance_id, attempt)
+            .map_err(|_| {
+            AppError::Internal("ordinary ingest progress cannot be created".to_string())
+        })?,
+    );
+    tracing::info!(source_id, progress_attempt_id=%attempt, "ordinary storage-v2 ingest started");
+    let build_progress = progress.clone();
+    let capture_state = state.clone();
+    let result = async {
+        let prepared = state.rls_client.with_checkpointed_source(
+            user_id, source_id, None, pack_root.clone(), move |session| {
+                Box::pin(async move {
+                    build_progress.phase("source_cut", None, None).map_err(|_| {
+                        AppError::Internal("ordinary ingest progress cannot be persisted".to_string())
+                    })?;
+                    fs_cut::capture_before_active_ingest(
+                        &capture_state, session, user_id, source_id, &manifest, &commit,
+                    ).await?;
+                    prepare_active_source_checkpointed(
+                        session, Some(&build_progress), source_id, &manifest, &commit,
+                        &pack_root, io_buffer_bytes,
+                    ).await.map_err(|error| {
+                        if build_progress.record_failure(&error).is_err() {
+                            tracing::error!("ordinary ingest failure diagnostics could not be persisted");
+                        }
+                        tracing::error!(error=%format!("{error:#}"),
+                            "ordinary active storage-v2 ingest preparation failed");
+                        AppError::Internal("ordinary active storage-v2 ingest failed".to_string())
                     })
                 })
-                .await?
+            },
+        ).await?;
+        match prepared {
+            ActiveIngestPreparation::NoChange(result) => Ok(result),
+            ActiveIngestPreparation::Candidate(candidate) => {
+                let pack_root = state.config.storage_v2_pack_root.clone();
+                let commit_progress = progress.clone();
+                state.rls_client.with_rls(user_id, true, move |transaction| {
+                    Box::pin(async move {
+                        commit_active_source(&**transaction, candidate, &pack_root, io_buffer_bytes)
+                            .await.map_err(|error| {
+                                if commit_progress.record_failure(&error).is_err() {
+                                    tracing::error!("ordinary ingest activation diagnostics could not be persisted");
+                                }
+                                tracing::error!(error=%format!("{error:#}"),
+                                    "ordinary active storage-v2 ingest activation failed");
+                                AppError::Internal("ordinary active storage-v2 ingest failed".to_string())
+                            })
+                    })
+                }).await
+            }
         }
-    };
-    Ok(Json(active_ingest_response(&result)))
+    }.await;
+    if progress.finish(result.is_ok()).is_err() {
+        tracing::error!(
+            "ordinary ingest final progress persistence failed; reconcile the generation"
+        );
+    }
+    result.map(|result| {
+        let mut response = active_ingest_response(&result);
+        response["storage_v2"]["progress_attempt_id"] = serde_json::json!(attempt);
+        Json(response)
+    })
 }
 
 pub async fn admin_sync_source(

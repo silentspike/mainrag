@@ -180,17 +180,32 @@ pub async fn admin_capture_filesystem_cut(
             "source-cut capture identity differs".to_string(),
         ));
     }
-    Ok(Json(
-        capture_registration(&state, user_id, source_id, registered).await?,
-    ))
+    let pack_root = state.config.storage_v2_pack_root.clone();
+    let capture_state = state.clone();
+    state.rls_client.with_checkpointed_source(
+        user_id, source_id, None, pack_root, move |session| Box::pin(async move {
+            let pending: bool = session.client().query_one(
+                "SELECT EXISTS(SELECT 1 FROM storage_v2_ingest_run WHERE source_id=$1 AND status='building')",
+                &[&source_id]).await?.get(0);
+            if pending {
+                return Err(AppError::Conflict("cannot replace the cut of a retained building run".to_string()));
+            }
+            Ok(Json(capture_registration(&capture_state, user_id, source_id, registered).await?))
+        }),
+    ).await
 }
 
 pub(super) async fn capture_before_active_ingest(
     state: &Arc<AppState>,
+    session: &crate::db::build_checkpoint::BuildCheckpointSession,
     user_id: Uuid,
     source_id: i64,
-    manifest: String,
+    manifest: &str,
+    commit: &str,
 ) -> Result<()> {
+    session
+        .validate_source(source_id)
+        .map_err(|_| AppError::Conflict("source-cut writer session differs".to_string()))?;
     let registered = registration(state, user_id, source_id).await?;
     if registered.0 != "fs" {
         return Ok(());
@@ -201,21 +216,91 @@ pub(super) async fn capture_before_active_ingest(
     if !scope.cut_consistency {
         return Ok(());
     }
-    state.rls_client.with_rls(user_id,true,move |transaction|Box::pin(async move {
-        transaction.query_one("SELECT storage_v2_require_complete_active_set($1)",&[&manifest]).await?;
-        let count:i64=transaction.query_one(
-            "SELECT count(*) FROM logical_source pointer JOIN source_generation generation \
-             ON generation.id=pointer.active_generation_id WHERE pointer.id=$1 AND generation.status='active'",&[&source_id]).await?.get(0);
-        if count!=1 {return Err(AppError::BadRequest("source-cut regular ingest requires an active source".to_string()));}
-        Ok(())
-    })).await?;
+    let client = session.client();
+    client
+        .query_one(
+            "SELECT storage_v2_require_complete_active_set($1)",
+            &[&manifest],
+        )
+        .await?;
+    let active: i64 = client.query_opt(
+        "SELECT generation.id FROM logical_source pointer JOIN source_generation generation \
+         ON generation.id=pointer.active_generation_id WHERE pointer.id=$1 AND generation.status='active'",
+        &[&source_id]).await?.ok_or_else(|| AppError::BadRequest(
+            "source-cut regular ingest requires an active source".to_string()))?.get(0);
+    if let Some(pending) = client.query_opt(
+        "SELECT run.id,run.expected_active_generation_id,generation.witness \
+         FROM storage_v2_ingest_run run JOIN source_generation generation ON generation.id=run.generation_id \
+         WHERE run.source_id=$1 AND run.status='building'", &[&source_id]).await? {
+        session.validate_run(pending.get("id")).map_err(|_| AppError::Conflict(
+            "retained active-source run differs".to_string()))?;
+        if pending.get::<_,Option<i64>>("expected_active_generation_id") != Some(active) {
+            return Err(AppError::Conflict("retained source-cut predecessor differs".to_string()));
+        }
+        let expected = retained_active_cut(&pending.get::<_,Value>("witness"), commit)
+            .map_err(|_| AppError::Conflict("retained source-cut writer identity differs".to_string()))?;
+        let root = PathBuf::from(registered.1);
+        let selected = tokio::task::spawn_blocking(move || fs_cut::ReadCut::select(&root))
+            .await.map_err(|_| AppError::Internal("retained source-cut inspector failed".to_string()))?
+            .map_err(|_| AppError::Conflict("retained source cut is unavailable".to_string()))?;
+        if selected.proof != expected {
+            return Err(AppError::Conflict("retained immutable source cut changed".to_string()));
+        }
+        return Ok(());
+    }
     capture_registration(state, user_id, source_id, registered).await?;
     Ok(())
+}
+
+fn retained_active_cut(witness: &Value, commit: &str) -> anyhow::Result<fs_cut::CutProof> {
+    anyhow::ensure!(
+        witness["lexical_input"] == "native"
+            && witness["checkpoint_protocol"] == "complete-items-v1"
+            && witness["commit_sha"].as_str() == Some(commit),
+        "retained run is not the current native checkpointed writer"
+    );
+    let observation: fs_cut::CutObservation =
+        serde_json::from_value(witness["filesystem_cut"].clone())?;
+    Ok(observation.cut)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_cut_resume_requires_original_native_checkpoint_writer() {
+        let commit = "6363636363636363636363636363636363636363";
+        let cut = fs_cut::CutProof {
+            format: "mainrag.fs-read-cut.v1".into(),
+            cut_id: Uuid::from_u128(1),
+            source_root_sha256: "a".repeat(64),
+            descriptor_sha256: "b".repeat(64),
+            snapshot_uuid: Uuid::from_u128(2),
+            origin_uuid: Uuid::from_u128(3),
+            captured_at_unix: 1,
+        };
+        let witness = serde_json::json!({
+            "lexical_input":"native", "checkpoint_protocol":"complete-items-v1",
+            "commit_sha":commit, "filesystem_cut":fs_cut::CutObservation {
+                cut:cut.clone(), fixture_sha256:"c".repeat(64), item_count:257, input_bytes:4096,
+            },
+        });
+        assert_eq!(retained_active_cut(&witness, commit).unwrap(), cut);
+        assert!(retained_active_cut(&witness, &"d".repeat(40)).is_err());
+        for (field, value) in [
+            ("lexical_input", serde_json::json!("legacy")),
+            ("checkpoint_protocol", Value::Null),
+            ("filesystem_cut", Value::Null),
+        ] {
+            let mut incompatible = witness.clone();
+            incompatible[field] = value;
+            assert!(retained_active_cut(&incompatible, commit).is_err());
+        }
+        let mut replaced = cut.clone();
+        replaced.descriptor_sha256 = "e".repeat(64);
+        assert_ne!(retained_active_cut(&witness, commit).unwrap(), replaced);
+    }
 
     #[test]
     fn cut_selection_preserves_historical_configuration_and_exact_scope() {

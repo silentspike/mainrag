@@ -562,19 +562,79 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         std::fs::create_dir(&native_root)?;
         let native_text = "native Über 東京 lexical content\n".repeat(10_000);
         std::fs::write(native_root.join("native.txt"), &native_text)?;
+        for index in 0..256 {
+            std::fs::write(native_root.join(format!("item-{index:03}.txt")),
+                format!("native checkpoint fixture item {index}\n"))?;
+        }
         let native_path = native_root.to_str().context("fixture source path is not UTF-8")?;
         client.execute("INSERT INTO sources(id,name,type,path) VALUES(166,'native-retired','fs',$1)",
             &[&native_path]).await?;
+        let interrupted_id = Uuid::new_v4();
+        let interrupted_progress = crate::services::build_progress::BuildProgressRecorder::create(
+            &packs,166,COMMIT,Uuid::new_v4(),interrupted_id)?;
+        let session = crate::db::build_checkpoint::BuildCheckpointSession::open(
+            &pool,principal,166,&packs).await?;
+        session.fail_after_checkpoints(2);
+        let interrupted = Box::pin(run_active_source_build_checkpointed(
+            &session,166,"fs",&native_root,&packs,4096,COMMIT,Some(&interrupted_progress),
+        )).await.unwrap_err();
+        ensure!(interrupted.to_string().contains("controlled interruption"),
+            "native ordinary writer did not stop at its durable boundary");
+        interrupted_progress.record_failure(&interrupted)?;
+        interrupted_progress.finish(false)?;
+        drop(session);
+        let retained = client.query_one("SELECT id,generation_id, \
+            (SELECT count(*) FROM storage_v2_ingest_run_item WHERE run_id=run.id) AS items \
+            FROM storage_v2_ingest_run run WHERE source_id=166 AND status='building'",&[]).await?;
+        let retained_run: i64 = retained.get("id");
+        let retained_generation: i64 = retained.get("generation_id");
+        let interrupted_receipt = crate::services::build_progress::read(&packs,166,COMMIT,interrupted_id)?;
+        ensure!(retained.get::<_,i64>("items")==128
+            && interrupted_receipt.committed_items==128
+            && !interrupted_receipt.transaction_committed,
+            "native interruption lost durable rows or claimed a finished successor");
+        let replaced_path = native_root.join("item-000.txt");
+        let original_bytes = std::fs::read(&replaced_path)?;
+        let mut replacement = original_bytes.clone();
+        replacement[0] = b'N';
+        std::fs::write(&replaced_path, replacement)?;
+        let changed_session = crate::db::build_checkpoint::BuildCheckpointSession::open(
+            &pool,principal,166,&packs).await?.expect_run(Some(retained_run));
+        ensure!(Box::pin(run_active_source_build_checkpointed(
+            &changed_session,166,"fs",&native_root,&packs,4096,COMMIT,None,
+        )).await.is_err(), "native resume accepted a same-length input replacement");
+        drop(changed_session);
+        std::fs::write(replaced_path, original_bytes)?;
+        ensure!(client.query_one("SELECT count(*) FROM source_generation WHERE source_id=166",&[])
+            .await?.get::<_,i64>(0)==1,
+            "rejected native resume committed another generation");
+        let resumed_id = Uuid::new_v4();
+        let resumed_progress = crate::services::build_progress::BuildProgressRecorder::create(
+            &packs,166,COMMIT,Uuid::new_v4(),resumed_id)?;
+        let session = crate::db::build_checkpoint::BuildCheckpointSession::open(
+            &pool,principal,166,&packs).await?.expect_run(Some(retained_run));
+        let native = Box::pin(run_active_source_build_checkpointed(
+            &session,166,"fs",&native_root,&packs,4096,COMMIT,Some(&resumed_progress),
+        )).await?;
+        session.finish().await?;
+        drop(session);
+        resumed_progress.finish(true)?;
+        ensure!(native.run_id==retained_run && native.generation_id==retained_generation,
+            "native resume changed the retained run or generation");
+        let counts = client.query_one("SELECT \
+            (SELECT count(*) FROM source_generation WHERE source_id=166) AS generations, \
+            (SELECT count(*) FROM occurrence WHERE source_id=166) AS occurrences",&[]).await?;
+        ensure!(counts.get::<_,i64>("generations")==1 && counts.get::<_,i64>("occurrences")==257,
+            "native resume duplicated generations or occurrences");
+        ensure!(crate::services::build_progress::read(&packs,166,COMMIT,resumed_id)?.committed_items==257,
+            "native resume did not retain all durable progress");
         let transaction = client.transaction().await?;
         transaction.batch_execute(&format!("SET LOCAL app.user_id='{PRINCIPAL}'")).await?;
-        let native = Box::pin(run_active_source_build(
-            &transaction,166,"fs",&native_root,&packs,4096,COMMIT,
-        )).await?;
         let native_verified = Box::pin(verify_release_candidate(
             &transaction,166,&ReleaseCandidateVerifyInput {generation_id:native.generation_id},
             &packs,4096,
         )).await?;
-        ensure!(native.item_count==1
+        ensure!(native.item_count==257
             && native.telemetry["ablauf"]["lexical_segments_copied"]==0
             && native.telemetry["ablauf"]["lexical_segments_generated"].as_u64().unwrap_or(0)>0
             && native_verified.checks.values().all(|state| state=="PASS"),
@@ -599,15 +659,16 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
                 hex::encode(Sha256::digest(path.as_bytes()))==seed.expected_path_sha256))),
             "native query seed did not resolve its source-backed path after legacy retirement");
         transaction.commit().await?;
-        let transaction = client.transaction().await?;
-        transaction.batch_execute(&format!("SET LOCAL app.user_id='{PRINCIPAL}'")).await?;
-        let repeated = Box::pin(run_active_source_build(
-            &transaction,166,"fs",&native_root,&packs,4096,COMMIT,
+        let session = crate::db::build_checkpoint::BuildCheckpointSession::open(
+            &pool,principal,166,&packs).await?;
+        let repeated = Box::pin(run_active_source_build_checkpointed(
+            &session,166,"fs",&native_root,&packs,4096,COMMIT,None,
         )).await?;
         ensure!(repeated.reused_generation && repeated.generation_id==native.generation_id,
             "native successor replay duplicated its generation");
-        transaction.commit().await?;
-        println!("native source writer and verification pass without bootstrap routine or legacy tables");
+        session.finish().await?;
+        drop(session);
+        println!("native ordinary writer: 128 durable items, same-run resume to 257, no duplicate occurrences, positive search without legacy tables");
         Ok(())
     }.await;
     drop(admin);
