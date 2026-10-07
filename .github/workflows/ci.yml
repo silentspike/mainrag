@@ -533,6 +533,7 @@ jobs:
               'eval.storage_v2.schema.test_seek_lexical_verification_pages.SeekLexicalVerificationPageTests',
               'eval.storage_v2.schema.test_exact_lexeme_probes.ExactLexemeProbeTests',
               'eval.storage_v2.schema.test_transaction_lexical_context.TransactionLexicalContextTests',
+              'eval.storage_v2.schema.test_document_cache_conversion.DocumentCacheConversionTests',
               'eval.storage_v2.schema.test_native_legacy_hit_resolution.NativeLegacyHitResolutionTests',
               'eval.storage_v2.schema.test_cleanup_catalog.CleanupCatalogTests',
               'eval.storage_v2.schema.test_cleanup_apply.CleanupApplyTests',

@@ -1714,6 +1714,29 @@ original complete A/B/C concatenation order. Byte bounds are checked first.
 Full-document vector derivation retains the
 previous oversized-vector fallback and existing cached values.
 
+Retained full-document caches can be converted through a named maintenance
+manifest without changing content, materialization hashes, generation identity
+or search-document bindings. The converter accepts at most 16 documents and
+8 MiB of UTF-8 search text per transaction, with an externally armed statement
+timeout of at most 30 seconds and a lock timeout of at most three seconds.
+It requires a local administrative session, rejects active writers, and checks
+complete equality with the original logical positional vector before replacing
+that redundant vector with its stripped lexeme cache and original fingerprints.
+Unsupported or inconsistent caches remain unchanged. Existing SQL138 identifier
+conversion retains its separate sealed-set equality check.
+
+Plain position-free queries can use the stripped cache. Phrase, negation and
+other complex query predicates retain the complete positional-vector fallback
+in all four rank-reader signatures. The focused fixture compares actual ranked
+results and source authorization before and after conversion, alongside exact
+search envelopes, materialization identity and idempotent replay. Immutable
+conversion receipts do not add document retention roots; replay after legitimate
+native GC rejects a missing document and preserves the historical audit record.
+A smaller datum does not establish physical storage release: heap, TOAST and
+index reclamation require separately admitted maintenance and measured physical
+before/after accounting. This migration neither rewrites relations nor authorizes
+legacy cleanup or activation.
+
 Candidate verification selects generation-backed native query seeds when a
 source has no bootstrap chunk inputs, including after legacy tables have been
 retired. The original producer identity remains attached to retained generations.
