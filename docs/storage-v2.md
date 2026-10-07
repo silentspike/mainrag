@@ -995,6 +995,26 @@ cleanup issue proves that no supported reader/writer depends on it.
 
 ### Candidate staging and progress
 
+Large-document lexical preparation shares exact first-occurrence searches across
+bounded groups of distinct patterns. Repeated chunks still resolve to their
+earliest occurrence anywhere in the canonical source, including overlapping
+Unicode text; producer chunk offsets do not replace this identity contract.
+
+Migration 160 adds a transaction-local lexical document context. The controlled
+writer stages groups of at most 256 segments into trusted temporary scratch
+tables, then loads the canonical document and validates all byte/character
+anchors once before writing the existing immutable representations. The context
+binds the ingest run, document identity, backend and transaction; caller-provided
+temporary objects cannot serve as proof. Scratch ceilings select this optimized
+path only. Larger documents continue through the original complete constructor.
+The original public constructor remains available to existing packages.
+
+`db_staging_ms` includes Rust preparation as well as SQL waits.
+`staging_sql_await_ms` separately measures awaited document, lexical and card
+queries; it excludes analysis, pack and checkpoint queries and is not server CPU
+time. `lexical_preparation_ms` measures chunking and exact locator preparation.
+Neither an item counter nor a SQL call counter measures completed acceptance.
+
 The candidate writer groups node/view/item/search binding and unavailable scores
 in one dependent statement. Structural cards are submitted in groups of at most
 64 through the existing immutable, authorized scalar function. Migration 083

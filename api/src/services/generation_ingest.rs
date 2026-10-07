@@ -450,6 +450,11 @@ pub struct ShadowIngestMeasurements {
     pub lexical_segment_batch_calls: u64,
     pub structural_card_batch_calls: u64,
     pub db_staging_round_trips: u64,
+    /// Awaited document, lexical, and structural-card SQL only. This excludes
+    /// analysis, pack storage, and checkpoint queries, and is not server CPU time.
+    pub staging_sql_duration: Duration,
+    /// Chunk generation and exact first-occurrence locator preparation.
+    pub lexical_preparation_duration: Duration,
 }
 
 impl ShadowIngestMeasurements {
@@ -457,6 +462,19 @@ impl ShadowIngestMeasurements {
         self.stage_durations
             .get(&ShadowIngestStage::DatabaseStage)
             .map_or(0.0, |duration| duration.as_secs_f64() * 1000.0)
+    }
+
+    pub fn staging_sql_await_ms(&self) -> f64 {
+        self.staging_sql_duration.as_secs_f64() * 1000.0
+    }
+
+    pub fn lexical_preparation_ms(&self) -> f64 {
+        self.lexical_preparation_duration.as_secs_f64() * 1000.0
+    }
+
+    pub fn record_staging_sql(&mut self, duration: Duration) {
+        self.staging_sql_duration += duration;
+        self.db_staging_round_trips = self.db_staging_round_trips.saturating_add(1);
     }
 
     pub fn record_stage(&mut self, stage: ShadowIngestStage, duration: Duration) {
@@ -544,6 +562,9 @@ impl ShadowIngestMeasurements {
                 "lexical_segment_batch_calls": self.lexical_segment_batch_calls,
                 "structural_card_batch_calls": self.structural_card_batch_calls,
                 "db_staging_round_trips": self.db_staging_round_trips,
+                "staging_sql_await_ms": self.staging_sql_await_ms(),
+                "lexical_preparation_ms": self.lexical_preparation_ms(),
+                "db_staging_ms_scope": "document_staging_including_rust_preparation",
             },
             "phase": phases,
             "source_io": {
@@ -868,6 +889,8 @@ mod tests {
             measurements.record_stage(stage, Duration::from_millis((index + 1) as u64));
         }
         measurements.record_total(Duration::from_millis(28));
+        measurements.record_staging_sql(Duration::from_millis(2));
+        measurements.lexical_preparation_duration = Duration::from_millis(3);
         let json = measurements.to_telemetry_json();
         assert_eq!(json["ablauf"]["latenz_ms"], 28.0);
         assert_eq!(json["ablauf"]["eingang_bytes"], 100);
@@ -877,6 +900,10 @@ mod tests {
         assert_eq!(json["ablauf"]["io_buffer_bytes"], 8192);
         assert_eq!(json["ablauf"]["fragments_created"], 3);
         assert_eq!(json["ablauf"]["largest_item_bytes"], 4096);
+        assert_eq!(json["ablauf"]["staging_sql_await_ms"], 2.0);
+        assert_eq!(json["ablauf"]["lexical_preparation_ms"], 3.0);
+        assert_eq!(json["ablauf"]["db_staging_round_trips"], 1);
+        assert_eq!(json["phase"]["db_staging_ms"], 5.0);
         assert_eq!(json["phase"].as_object().unwrap().len(), 7);
         assert_eq!(json["phase"]["lesen_hashen_ms"], 1.0);
         assert_eq!(json["phase"]["sealing_ms"], 7.0);
