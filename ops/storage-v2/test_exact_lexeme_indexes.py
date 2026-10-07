@@ -288,7 +288,7 @@ class ExactLexemeOwnershipTests(unittest.TestCase):
         seen = []
         def readback(config, db, growth):
             seen.append(growth)
-            return {'used': 100, 'free': 100 * O.GIB, 'wal': 0,
+            return {'used': 100, 'free': 100 * O.GIB, 'wal': 0, 'wal_ready': 0,
                     'ram': 8 * O.GIB, 'temp_free': 100 * O.GIB}
         with patch.object(O, 'resource_observation', side_effect=readback):
             O.admission(config, None, 0, drop=True)
@@ -305,8 +305,53 @@ class ExactLexemeOwnershipTests(unittest.TestCase):
                     'conservative_method': 'public fixture complete array bound',
                     'complete_existing_cache_arrays': True}}}
         for wal in (24 * O.GIB + 1, 27 * O.GIB):
-            with patch.object(O, 'resource_observation', return_value={'wal': wal}), self.assertRaisesRegex(RuntimeError, 'drained'):
+            with patch.object(O, 'resource_observation', return_value={'wal_ready': wal}), self.assertRaisesRegex(RuntimeError, 'drained'):
                 O.admission(config, None, 0)
+
+    def test_reusable_wal_stock_is_not_backlog_and_both_budgets_remain_enforced(self):
+        config = {'storage_root': '/', 'temp_root': '/',
+                  'bounds': {'0': {'index_bytes': O.GIB, 'temp_bytes': O.GIB,
+                    'wal_bytes': 4 * O.GIB, 'ram_bytes': O.GIB, 'seconds': 60}},
+                  'estimates': {'0': {'input_relation_bytes': O.GIB,
+                    'conservative_method': 'public fixture complete array bound',
+                    'complete_existing_cache_arrays': True}}}
+        db = Mock()
+        db.capacity.block_sectors = 128
+        db.capacity.observe.return_value = {'pool_size_bytes': 1024 * O.GIB,
+            'data_percent_before_build': 10, 'metadata_percent_before_build': 1,
+            'autoextend_threshold_percent': 80}
+        observed = {'directory': '/', 'temp_spaces': '', 'default_space': '',
+                    'default_database_space': True, 'wal': 30 * O.GIB, 'wal_ready': 0}
+        db.query.return_value = [observed]
+        with patch.object(O.shutil, 'disk_usage', return_value=SimpleNamespace(free=100 * O.GIB)), \
+                patch.object(Path, 'read_text', return_value='MemAvailable: 8388608 kB\n'):
+            start = O.admission(config, db, 0)
+            self.assertEqual(start['wal'], 30 * O.GIB)
+            self.assertEqual(start['wal_ready'], 0)
+            self.assertEqual(start['wal_absolute_ceiling'], 34 * O.GIB)
+            self.assertEqual(start['wal_ready_absolute_ceiling'], 4 * O.GIB)
+            query = db.query.call_args.args[0]
+            self.assertIn('pg_ls_waldir()', query)
+            self.assertIn('public.storage_v2_local_wal_ready_bytes()', query)
+            for stock, ready, message in ((30 * O.GIB, 28 * O.GIB, 'queued WAL'),
+                                          (32 * O.GIB + 1, 0, 'hard stock32'),
+                                          (30 * O.GIB, -1, 'observation is invalid'),
+                                          (True, 0, 'observation is invalid')):
+                observed.update(wal=stock, wal_ready=ready)
+                with self.subTest(stock=stock, ready=ready), self.assertRaisesRegex(RuntimeError, message):
+                    O.admission(config, db, 0)
+        # Archived segments can be reused without new allocation. A growing
+        # archive queue still must remain within the reviewed phase burst.
+        resource = dict(start)
+        db.query.return_value = [{'bytes': 0}]
+        with patch.object(O, 'resource_observation', return_value=resource):
+            O.monitor_budget(config, db, 0, start, O.time.monotonic())
+            resource['wal_ready'] = start['wal_ready_absolute_ceiling'] + 1
+            with self.assertRaisesRegex(RuntimeError, 'reviewed physical/WAL'):
+                O.monitor_budget(config, db, 0, start, O.time.monotonic())
+            resource.update(wal_ready=0, wal=32 * O.GIB + 1)
+            with self.assertRaisesRegex(RuntimeError, 'reviewed physical/WAL'):
+                O.monitor_budget(config, db, 0, start, O.time.monotonic())
 
 
 def exercise_disposable_catalog_protocol(database, socket, user_id):

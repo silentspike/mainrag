@@ -435,7 +435,7 @@ def resource_observation(config, db, growth=0):
     temp_free = shutil.disk_usage(temp).free
     if free - growth < 42 * GIB or root_free < 20 * GIB:
         raise RuntimeError('data42GiB/root20GiB filesystem reserve failed')
-    db_info = db.query("SELECT current_setting('data_directory') directory,current_setting('temp_tablespaces') temp_spaces,current_setting('default_tablespace') default_space,(SELECT dattablespace=(SELECT oid FROM pg_tablespace WHERE spcname='pg_default') FROM pg_database WHERE datname=current_database()) default_database_space,(SELECT coalesce(sum(size),0)::bigint FROM pg_ls_waldir()) wal")[0]
+    db_info = db.query("SELECT current_setting('data_directory') directory,current_setting('temp_tablespaces') temp_spaces,current_setting('default_tablespace') default_space,(SELECT dattablespace=(SELECT oid FROM pg_tablespace WHERE spcname='pg_default') FROM pg_database WHERE datname=current_database()) default_database_space,(SELECT coalesce(sum(size),0)::bigint FROM pg_ls_waldir()) wal,public.storage_v2_local_wal_ready_bytes() wal_ready")[0]
     if os.stat(db_info['directory']).st_dev != os.stat(root).st_dev or db_info['temp_spaces'] \
             or db_info['default_space'] or db_info['default_database_space'] is not True:
         raise RuntimeError('DB data or nondefault temporary tablespaces differ from the admitted physical roots')
@@ -445,23 +445,32 @@ def resource_observation(config, db, growth=0):
     for line in Path('/proc/meminfo').read_text().splitlines():
         key, value = line.split(':', 1)
         mem[key] = int(value.strip().split()[0]) * 1024
-    if db_info['wal'] >= 28 * GIB:
-        raise RuntimeError('actual WAL reached high28GiB (hard stock32GiB remains enforced)')
+    if type(db_info['wal']) is not int or type(db_info['wal_ready']) is not int \
+            or not 0 <= db_info['wal_ready'] <= db_info['wal']:
+        raise RuntimeError('actual WAL stock or archive backlog observation is invalid')
+    # Reusable archived segments remain allocated. They count toward physical
+    # stock and pool usage, but only .ready segments require archive drainage.
+    if db_info['wal'] > 32 * GIB:
+        raise RuntimeError('actual allocated WAL exceeds hard stock32GiB')
+    if db_info['wal_ready'] >= 28 * GIB:
+        raise RuntimeError('actual queued WAL reached high28GiB')
     return {'pool': pool, 'used': used, 'free': free, 'root_free': root_free,
-            'temp_free': temp_free, 'wal': db_info['wal'], 'ram': mem['MemAvailable']}
+            'temp_free': temp_free, 'wal': db_info['wal'],
+            'wal_ready': db_info['wal_ready'], 'ram': mem['MemAvailable']}
 
 
 def admission(config, db, phase, drop=False):
     b = bounds(config, phase, drop)
     growth = b.get('index_bytes', 0) + b['temp_bytes'] + b['wal_bytes']
     r = resource_observation(config, db, growth)
-    if r['wal'] > 24 * GIB or r['wal'] + b['wal_bytes'] > 28 * GIB:
+    if r['wal_ready'] > 24 * GIB or r['wal_ready'] + b['wal_bytes'] > 28 * GIB:
         raise RuntimeError('WAL must be drained to low24GiB and the reviewed burst fit high28GiB')
     if r['ram'] < b['ram_bytes'] + 2 * GIB or r['temp_free'] < b['temp_bytes'] + 42 * GIB:
         raise RuntimeError('conservative RAM or temporary allocation admission failed')
     r['pool_absolute_ceiling'] = r['used'] + growth
     r['filesystem_absolute_floor'] = r['free'] - growth
     r['wal_absolute_ceiling'] = r['wal'] + b['wal_bytes']
+    r['wal_ready_absolute_ceiling'] = r['wal_ready'] + b['wal_bytes']
     return r
 
 
@@ -474,6 +483,7 @@ def monitor_budget(config, db, phase, start, started, drop=False):
                     ('public.' + INDEXES[phase],))[0]['bytes']
     if r['used'] > start['pool_absolute_ceiling'] or r['free'] < start['filesystem_absolute_floor'] \
             or r['wal'] > start['wal_absolute_ceiling'] or r['wal'] > 32 * GIB \
+            or r['wal_ready'] > start['wal_ready_absolute_ceiling'] \
             or (not drop and size > b['index_bytes']) or r['ram'] < 2 * GIB \
             or time.monotonic() - started > b['seconds']:
         raise RuntimeError('owned index phase exceeded a reviewed physical/WAL/RAM/runtime bound')
