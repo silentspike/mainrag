@@ -188,8 +188,8 @@ jobs:
         run: |
           cargo test -p mainrag-api --features storage-v2-retrieval --lib services::chunker::character::tests -- --nocapture | tee character-tests.log
           python3 -c 'from pathlib import Path; assert "3 passed; 0 failed; 0 ignored;" in Path("character-tests.log").read_text(), "Expected all character chunker regressions to execute"'
-          cargo test -p mainrag-api --features storage-v2-retrieval --lib services::build_progress::tests -- --nocapture | tee build-progress-tests.log
-          python3 -c 'from pathlib import Path; assert "2 passed; 0 failed; 0 ignored;" in Path("build-progress-tests.log").read_text(), "Expected durable progress and private-operation redaction regressions to execute"'
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib -- services::build_progress::tests telemetry_json_exposes_every_optimization_stage_and_dedup_dimension --nocapture | tee build-progress-tests.log
+          python3 -c 'from pathlib import Path; assert "3 passed; 0 failed; 0 ignored;" in Path("build-progress-tests.log").read_text(), "Expected durable progress, scoped stage timing, and private-operation redaction regressions to execute"'
       - name: Verify unavailable grammar distinction and supported parser failures
         shell: bash
         run: |
@@ -198,8 +198,8 @@ jobs:
       - name: Verify canonical segment positions for repeated Unicode text
         shell: bash
         run: |
-          cargo test -p mainrag-api --features storage-v2-retrieval --lib services::shadow_slice::tests::lexical_first_positions_preserve_repeated_unicode_identity -- --exact --nocapture | tee lexical-position-tests.log
-          python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("lexical-position-tests.log").read_text(), "Expected first-position regression to execute"'
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib services::shadow_slice::tests::lexical_first_positions -- --nocapture | tee lexical-position-tests.log
+          python3 -c 'from pathlib import Path; assert "4 passed; 0 failed; 0 ignored;" in Path("lexical-position-tests.log").read_text(), "Expected canonical and bounded shared-position regressions to execute"'
       - name: Verify Git cache safety and bounded transport cleanup
         shell: bash
         run: |
@@ -532,6 +532,7 @@ jobs:
               'eval.storage_v2.schema.test_posting_compaction',
               'eval.storage_v2.schema.test_seek_lexical_verification_pages.SeekLexicalVerificationPageTests',
               'eval.storage_v2.schema.test_exact_lexeme_probes.ExactLexemeProbeTests',
+              'eval.storage_v2.schema.test_transaction_lexical_context.TransactionLexicalContextTests',
               'eval.storage_v2.schema.test_native_legacy_hit_resolution.NativeLegacyHitResolutionTests',
               'eval.storage_v2.schema.test_cleanup_catalog.CleanupCatalogTests',
               'eval.storage_v2.schema.test_cleanup_apply.CleanupApplyTests',

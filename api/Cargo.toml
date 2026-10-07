@@ -19,7 +19,7 @@ path = "src/main.rs"
 [features]
 default = []
 pdf-mupdf = ["dep:mupdf"]
-storage-v2-shadow-ingest = []
+storage-v2-shadow-ingest = ["dep:aho-corasick"]
 storage-v2-intelligence = ["storage-v2-shadow-ingest"]
 storage-v2-retrieval = ["storage-v2-intelligence", "dep:aho-corasick"]
 

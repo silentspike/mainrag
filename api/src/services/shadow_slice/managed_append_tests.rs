@@ -161,12 +161,12 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
             )
             .await?;
         // Run the actual native producer/delta/full path with the complete
-        // required schema, including the located writer, compact readers and
-        // the complete record-stream exporter used by candidate verification.
+        // required schema, including the transaction-local lexical writer,
+        // compact readers and the complete record-stream exporter.
         let migrations = std::fs::read_dir(project.join("migrations"))?
             .map(|entry| entry.map(|value| value.path()))
             .collect::<std::io::Result<Vec<_>>>()?;
-        for number in 66..=152 {
+        for number in 66..=160 {
             let reader_role = match number {
                 142 => Some("mainrag_v2_presence_owner"),
                 145 => Some("mainrag_v2_metadata_reader"),

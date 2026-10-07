@@ -2244,6 +2244,7 @@ where
             });
             let expected_content_hash = hex::encode(&body.digest);
             let identifiers = search_exact_identifiers(text);
+            let sql_started = Instant::now();
             let (staged, copied) = generation_ingest::stage_shadow_document(
                 client,
                 &generation_ingest::StageDocument {
@@ -2285,7 +2286,7 @@ where
                 },
             )
             .await?;
-            measurements.db_staging_round_trips += 1;
+            measurements.record_staging_sql(sql_started.elapsed());
             if mode == SliceMode::ReleaseCandidate {
                 if copied > 0 {
                     measurements.lexical_segments_copied = measurements
@@ -2293,6 +2294,7 @@ where
                         .checked_add(u64::try_from(copied)?)
                         .context("lexical segment copy count overflow")?;
                 } else if !text.is_empty() {
+                    let lexical_started = Instant::now();
                     let chunks = CharacterChunker::default().chunk(text, language.as_deref());
                     let complete = !chunks.is_empty()
                         && chunks.iter().all(|chunk| {
@@ -2301,6 +2303,58 @@ where
                     if complete {
                         let (character_starts, byte_starts) =
                             lexical_first_positions(text, &chunks)?;
+                        measurements.lexical_preparation_duration += lexical_started.elapsed();
+                        // This is an optimization ceiling, not a document limit.
+                        // Larger inputs retain the complete existing constructor.
+                        let scratch_bytes = chunks.iter().try_fold(0_usize, |total, chunk| {
+                            total
+                                .checked_add(chunk.text.len())?
+                                .checked_add(chunk.context_prefix.as_deref().unwrap_or("").len())?
+                                .checked_add(chunk.chunk_type.to_string().len())
+                        });
+                        let use_document_context = text.len() >= 262144
+                            && text.len() <= 128 * 1024 * 1024
+                            && chunks.len() <= 65536
+                            && scratch_bytes.is_some_and(|bytes| bytes <= 128 * 1024 * 1024)
+                            && chunks.chunks(256).enumerate().all(|(index, batch)| {
+                                let start = index * 256;
+                                let starts = &character_starts[start..start + batch.len()];
+                                let bytes = &byte_starts[start..start + batch.len()];
+                                let max_characters = batch
+                                    .iter()
+                                    .map(|chunk| chunk.text.chars().count() as i64)
+                                    .max()
+                                    .unwrap_or(0);
+                                let max_bytes = batch
+                                    .iter()
+                                    .map(|chunk| chunk.text.len() as i64)
+                                    .max()
+                                    .unwrap_or(0);
+                                starts.iter().max().unwrap_or(&1)
+                                    - starts.iter().min().unwrap_or(&1)
+                                    + max_characters
+                                    <= 8388608
+                                    && bytes.iter().max().unwrap_or(&1)
+                                        - bytes.iter().min().unwrap_or(&1)
+                                        + max_bytes
+                                        <= 33554432
+                            });
+                        if use_document_context {
+                            let count = i32::try_from(chunks.len())?;
+                            let sql_started = Instant::now();
+                            client
+                                .query_one(
+                                    "SELECT storage_v2_begin_lexical_document_context($1,$2,$3,$4)",
+                                    &[
+                                        &run.id,
+                                        &staged.occurrence_id,
+                                        &staged.artifact_version_id,
+                                        &count,
+                                    ],
+                                )
+                                .await?;
+                            measurements.record_staging_sql(sql_started.elapsed());
+                        }
                         for (batch_index, batch) in chunks.chunks(256).enumerate() {
                             let start = batch_index
                                 .checked_mul(256)
@@ -2330,7 +2384,13 @@ where
                             let window_bound = starts.iter().max().unwrap_or(&1)
                                 - starts.iter().min().unwrap_or(&1)
                                 + max_length;
-                            let staged_count: i64 = if window_bound <= 8388608 {
+                            let sql_started = Instant::now();
+                            let staged_count: i64 = if use_document_context {
+                                client.query_one(
+                                    "SELECT storage_v2_stage_lexical_document_context($1,$2,$3,$4,$5,$6,$7,$8)",
+                                    &[&staged.occurrence_id,&staged.artifact_version_id,&orders,&texts,&prefixes,&types,&starts,&byte_starts],
+                                ).await?.get(0)
+                            } else if window_bound <= 8388608 {
                                 client.query_one(
                                     "SELECT storage_v2_put_lexical_segments_located($1,$2,$3,$4,$5,$6,$7,$8)",
                                     &[&staged.occurrence_id,&staged.artifact_version_id,&orders,&texts,&prefixes,&types,&starts,&byte_starts],
@@ -2352,9 +2412,23 @@ where
                                     .get(0)
                             };
                             measurements.lexical_segment_batch_calls += 1;
-                            measurements.db_staging_round_trips += 1;
+                            measurements.record_staging_sql(sql_started.elapsed());
                             if staged_count != i64::try_from(batch.len())? {
                                 bail!("lexical segment group was not staged completely");
+                            }
+                        }
+                        if use_document_context {
+                            let sql_started = Instant::now();
+                            let count: i64 = client
+                                .query_one(
+                                    "SELECT storage_v2_finish_lexical_document_context($1,$2)",
+                                    &[&staged.occurrence_id, &staged.artifact_version_id],
+                                )
+                                .await?
+                                .get(0);
+                            measurements.record_staging_sql(sql_started.elapsed());
+                            if count != i64::try_from(chunks.len())? {
+                                bail!("lexical document context was not staged completely");
                             }
                         }
                         measurements.lexical_segments_generated = measurements
@@ -2362,10 +2436,12 @@ where
                             .checked_add(u64::try_from(chunks.len())?)
                             .context("lexical segment count overflow")?;
                     } else {
+                        measurements.lexical_preparation_duration += lexical_started.elapsed();
                         let orders = [0_i64];
                         let texts = [text];
                         let prefixes = [""];
                         let types = ["document"];
+                        let sql_started = Instant::now();
                         client
                             .query_one(
                                 "SELECT storage_v2_put_lexical_segments($1,$2,$3,$4,$5,$6)",
@@ -2380,7 +2456,7 @@ where
                             )
                             .await?;
                         measurements.lexical_segment_batch_calls += 1;
-                        measurements.db_staging_round_trips += 1;
+                        measurements.record_staging_sql(sql_started.elapsed());
                         measurements.lexical_segments_generated = measurements
                             .lexical_segments_generated
                             .checked_add(1)
@@ -2410,6 +2486,7 @@ where
                     .as_array()
                     .context("card group must be an array")?
                     .len();
+                let sql_started = Instant::now();
                 let rows = client
                     .query(
                         "SELECT bundle.id FROM jsonb_array_elements($4::JSONB) card \
@@ -2432,7 +2509,7 @@ where
                     bail!("structural card group was not staged completely");
                 }
                 measurements.structural_card_batch_calls += 1;
-                measurements.db_staging_round_trips += 1;
+                measurements.record_staging_sql(sql_started.elapsed());
             }
             measurements.record_stage(ShadowIngestStage::DatabaseStage, database_started.elapsed());
             staged_items += 1;
@@ -2726,14 +2803,125 @@ where
     })
 }
 
-/// Preserve the established first-match locator, including repeated text. Byte
-/// searches are followed by one shared UTF-8 walk, not one prefix count per chunk.
+/// Preserve the earliest exact occurrence anywhere in the source, including
+/// duplicate and overlapping chunks. Bounded pattern groups share each byte
+/// search, followed by one ordered UTF-8 walk for all character positions.
 fn lexical_first_positions(text: &str, chunks: &[Chunk]) -> Result<(Vec<i64>, Vec<i64>)> {
+    use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
+
+    const PATTERN_BYTES: usize = 256 * 1024;
+    const PATTERN_COUNT: usize = 1024;
+    const MATCH_EVENTS: usize = 4096;
+    const AUTOMATON_BYTES: usize = 16 * 1024 * 1024;
+
+    fn locate_batch<'a>(
+        text: &str,
+        patterns: &mut Vec<&'a str>,
+        offsets: &mut BTreeMap<&'a str, Option<usize>>,
+    ) -> Result<()> {
+        while !patterns.is_empty() {
+            // Explicitly avoid an unconstrained DFA or dense deep states. The
+            // sparse trie has bounded input bytes/count; only its root is dense.
+            // Every batch also has one byte length and distinct patterns, so
+            // suffix outputs cannot multiply the NFA's match-link allocation.
+            let matcher = AhoCorasick::builder()
+                .kind(Some(AhoCorasickKind::NoncontiguousNFA))
+                .match_kind(MatchKind::Standard)
+                .dense_depth(1)
+                .build(patterns.iter().copied())
+                .context("bounded lexical first-match automaton failed")?;
+            if matcher.memory_usage() > AUTOMATON_BYTES {
+                // Keep a defensive retained-size guard in addition to bounded
+                // construction input; fall back to the exact single-pattern reader.
+                drop(matcher);
+                for pattern in patterns.drain(..) {
+                    offsets.insert(
+                        pattern,
+                        Some(
+                            text.find(pattern)
+                                .context("lexical text is absent from source")?,
+                        ),
+                    );
+                }
+                return Ok(());
+            }
+            let mut remaining = patterns.len();
+            let mut events = 0;
+            for found in matcher.find_overlapping_iter(text.as_bytes()) {
+                let pattern = patterns[found.pattern().as_usize()];
+                let offset = offsets
+                    .get_mut(pattern)
+                    .context("lexical first-match pattern identity is missing")?;
+                if offset.is_none() {
+                    // Standard overlapping search reports increasing end
+                    // positions. For one fixed pattern its first end also has
+                    // the earliest start, regardless of other pattern lengths.
+                    *offset = Some(found.start());
+                    remaining -= 1;
+                }
+                events += 1;
+                if remaining == 0 || events == MATCH_EVENTS {
+                    break;
+                }
+            }
+            if remaining == 0 {
+                patterns.clear();
+                return Ok(());
+            }
+            let before = patterns.len();
+            patterns.retain(|pattern| offsets.get(pattern).is_some_and(Option::is_none));
+            // Remove resolved patterns before searching again. A repetitive
+            // haystack plus one missing pattern otherwise enumerates unbounded
+            // already-known overlapping matches. Every restart removes at least
+            // one pattern, or absence is final; no zero-progress retry exists.
+            if patterns.len() == before || events < MATCH_EVENTS {
+                bail!("lexical text is absent from source");
+            }
+        }
+        Ok(())
+    }
+
+    let mut offsets = chunks
+        .iter()
+        .map(|chunk| (chunk.text.as_str(), None))
+        .collect::<BTreeMap<_, _>>();
+    let mut distinct = offsets.keys().copied().collect::<Vec<_>>();
+    distinct.sort_unstable_by_key(|pattern| pattern.len());
+    let mut patterns = Vec::new();
+    let mut pattern_bytes = 0;
+    let mut pattern_length = 0;
+    for pattern in distinct {
+        if pattern.is_empty() || pattern.len() > PATTERN_BYTES {
+            offsets.insert(
+                pattern,
+                Some(
+                    text.find(pattern)
+                        .context("lexical text is absent from source")?,
+                ),
+            );
+            continue;
+        }
+        if pattern_bytes + pattern.len() > PATTERN_BYTES
+            || patterns.len() == PATTERN_COUNT
+            || (!patterns.is_empty() && pattern.len() != pattern_length)
+        {
+            locate_batch(text, &mut patterns, &mut offsets)?;
+            pattern_bytes = 0;
+        }
+        patterns.push(pattern);
+        pattern_bytes += pattern.len();
+        pattern_length = pattern.len();
+    }
+    locate_batch(text, &mut patterns, &mut offsets)?;
+
     let mut positions = chunks
         .iter()
         .enumerate()
         .map(|(index, chunk)| {
-            text.find(&chunk.text)
+            offsets
+                .get(chunk.text.as_str())
+                .copied()
+                .flatten()
                 .map(|offset| (offset, index))
                 .context("lexical text is absent from source")
         })
@@ -2751,7 +2939,11 @@ fn lexical_first_positions(text: &str, chunks: &[Chunk]) -> Result<(Vec<i64>, Ve
     let mut next = 0;
     for (character, (offset, _)) in text.char_indices().enumerate() {
         while next < positions.len() && positions[next].0 == offset {
-            output[positions[next].1] = i64::try_from(character + 1)?;
+            output[positions[next].1] = i64::try_from(
+                character
+                    .checked_add(1)
+                    .context("lexical character offset overflow")?,
+            )?;
             next += 1;
         }
         if next == positions.len() {
@@ -3826,6 +4018,117 @@ mod tests {
         );
     }
     use super::*;
+
+    fn lexical_test_chunks(patterns: &[String]) -> Vec<Chunk> {
+        let base = CharacterChunker::default()
+            .chunk("fixture", None)
+            .pop()
+            .unwrap();
+        patterns
+            .iter()
+            .map(|pattern| {
+                let mut chunk = base.clone();
+                chunk.text = pattern.clone();
+                // Deliberately unrelated producer offsets: canonical locators
+                // must remain the first occurrence anywhere in the whole text.
+                chunk.start_byte = usize::MAX;
+                chunk.end_byte = usize::MAX;
+                chunk
+            })
+            .collect()
+    }
+
+    fn lexical_reference_positions(text: &str, chunks: &[Chunk]) -> (Vec<i64>, Vec<i64>) {
+        let mut characters = Vec::new();
+        let mut bytes = Vec::new();
+        for chunk in chunks {
+            let offset = text.find(&chunk.text).unwrap();
+            characters.push(i64::try_from(text[..offset].chars().count() + 1).unwrap());
+            bytes.push(i64::try_from(offset + 1).unwrap());
+        }
+        (characters, bytes)
+    }
+
+    #[test]
+    fn lexical_first_positions_shared_patterns_preserve_exact_unicode_overlap() {
+        let text = "é🙂x--aba--ababa--é🙂x";
+        let patterns =
+            ["é🙂x", "🙂x", "aba", "ba", "ababa", "x", "a", "é🙂x", ""].map(str::to_owned);
+        let chunks = lexical_test_chunks(&patterns);
+        assert_eq!(
+            lexical_first_positions(text, &chunks).unwrap(),
+            lexical_reference_positions(text, &chunks),
+        );
+        let shorter_final = CharacterChunker::new(crate::services::chunker::ChunkerConfig {
+            max_chars: Some(3),
+            overlap_chars: Some(0),
+            ..Default::default()
+        })
+        .chunk("é🙂x甲Ω", None);
+        assert_eq!(
+            lexical_first_positions("é🙂x甲Ω", &shorter_final).unwrap(),
+            lexical_reference_positions("é🙂x甲Ω", &shorter_final),
+        );
+    }
+
+    #[test]
+    fn lexical_first_positions_bound_pattern_bytes_count_and_large_fallback() {
+        let mut patterns = (0..65)
+            .map(|index| format!("fixture-{index:02}:{};", "q".repeat(4090)))
+            .collect::<Vec<_>>();
+        let text = patterns.join("🙂");
+        patterns.push(patterns[0].clone());
+        let chunks = lexical_test_chunks(&patterns);
+        assert_eq!(
+            lexical_first_positions(&text, &chunks).unwrap(),
+            lexical_reference_positions(&text, &chunks),
+        );
+        let patterns = (0..1025)
+            .map(|index| format!("[{index:04}]"))
+            .collect::<Vec<_>>();
+        let text = patterns.join("é");
+        let chunks = lexical_test_chunks(&patterns);
+        assert_eq!(
+            lexical_first_positions(&text, &chunks).unwrap(),
+            lexical_reference_positions(&text, &chunks),
+        );
+        let pattern = format!("Ω{}", "x".repeat(256 * 1024));
+        let text = format!("🙂{pattern}--{pattern}");
+        let chunks = lexical_test_chunks(&[pattern.clone(), pattern]);
+        assert_eq!(
+            lexical_first_positions(&text, &chunks).unwrap(),
+            lexical_reference_positions(&text, &chunks),
+        );
+    }
+
+    #[test]
+    fn lexical_first_positions_repetitive_outputs_and_absence_are_bounded() {
+        let text = format!("{}Ω", "a".repeat(8192));
+        let mut patterns = (1..=96)
+            .map(|length| "a".repeat(length))
+            .collect::<Vec<_>>();
+        patterns.push("Ω".to_owned());
+        let chunks = lexical_test_chunks(&patterns);
+        assert_eq!(
+            lexical_first_positions(&text, &chunks).unwrap(),
+            lexical_reference_positions(&text, &chunks),
+        );
+        patterns.push("missing".to_owned());
+        assert!(lexical_first_positions(&text, &lexical_test_chunks(&patterns)).is_err());
+        // Equal-length patterns exercise bounded output/restart work: the late
+        // pattern must be found after thousands of repeated resolved matches.
+        let repetitive = format!("{}{}", "a".repeat(8192), "b".repeat(8192));
+        let patterns = vec!["a".repeat(1000), "b".repeat(1000)];
+        let chunks = lexical_test_chunks(&patterns);
+        assert_eq!(
+            lexical_first_positions(&repetitive, &chunks).unwrap(),
+            lexical_reference_positions(&repetitive, &chunks),
+        );
+        let absent = lexical_test_chunks(&["a".repeat(1000), "c".repeat(1000)]);
+        assert!(lexical_first_positions(&repetitive, &absent).is_err());
+        assert_eq!(lexical_first_positions("", &[]).unwrap(), (vec![], vec![]));
+        assert!(lexical_first_positions("", &lexical_test_chunks(&[String::new()])).is_err());
+    }
 
     #[tokio::test]
     async fn configured_fs_scope_binds_watermark_and_preserves_ignore_rules() {
