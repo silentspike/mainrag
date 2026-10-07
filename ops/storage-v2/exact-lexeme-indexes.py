@@ -27,6 +27,8 @@ import uuid
 
 HERE = Path(__file__).resolve().parent
 GIB = 1024 ** 3
+GUARDED_INDEX_CAP = 7 * GIB // 2
+GUARDED_POLL_SECONDS = 2
 SCHEMA = 'mainrag.storage-v2.exact-lexeme-indexes.v1'
 LOCK_KEY = 'storage-v2-posting-conversion-v1'
 TABLES = ('storage_v2_compact_lexical_block', 'storage_v2_compact_posting_block')
@@ -396,6 +398,42 @@ def runtime_gate(config, package):
         raise RuntimeError('actual package runtime PID, binary bytes or process identity differs')
 
 
+def estimate_mode(config, phase):
+    mode = config.get('estimates', {}).get(str(phase), {}).get('estimate_mode', 'conservative')
+    if mode not in ('conservative', 'guarded_complete_build'):
+        raise RuntimeError('unknown index estimate mode')
+    return mode
+
+
+def terminal_page_wal_bound(index_bytes):
+    """PG18/8KiB-page envelope, not a prediction of the finished index size.
+
+    ginbuild() WAL-logs every completed index page at the end. Reserve 9KiB
+    per 8KiB image for record/page framing and 64MiB for segment rounding and
+    reviewed ancillary DDL work. Compression/unused-page holes need no credit.
+    """
+    integer(index_bytes, minimum=0)
+    return ((index_bytes + 8191) // 8192) * 9216 + 64 * 1024 ** 2
+
+
+def guarded_contract(config, phase, reviewed):
+    estimate = config['estimates'][str(phase)]
+    contract = estimate.get('guarded_complete_build', {})
+    acknowledged = ('unknown_final_index_size', 'reactive_monitor_may_overshoot',
+                    'retain_incomplete_index', 'one_attempt_no_automatic_retry')
+    if estimate.get('complete_existing_cache_arrays') is not False \
+            or any(contract.get(key) is not True for key in acknowledged):
+        raise RuntimeError('guarded construction requires explicit unknown-size/overshoot/retention acknowledgements, not a complete-array estimate')
+    reserve = integer(contract.get('overshoot_reserve_bytes'))
+    physical = reviewed['index_bytes'] + reviewed['temp_bytes'] + reviewed['wal_bytes']
+    if reserve < physical:
+        raise RuntimeError('guarded overshoot reserve must cover one additional complete phase allocation')
+    if reviewed['index_bytes'] > GUARDED_INDEX_CAP \
+            or terminal_page_wal_bound(reviewed['index_bytes']) > reviewed['wal_bytes']:
+        raise RuntimeError('guarded index cap must fit the complete terminal-page WAL envelope within the reviewed4GiB policy')
+    return contract
+
+
 def bounds(config, phase, drop=False):
     reviewed = config['drop_bounds' if drop else 'bounds'][str(phase)]
     keys = {'temp_bytes', 'wal_bytes', 'ram_bytes', 'seconds'} | (set() if drop else {'index_bytes'})
@@ -408,7 +446,9 @@ def bounds(config, phase, drop=False):
     if not drop:
         estimate = config['estimates'][str(phase)]
         integer(estimate['input_relation_bytes'])
-        if not isinstance(estimate.get('conservative_method'), str) or len(estimate['conservative_method'].strip()) < 20 \
+        if estimate_mode(config, phase) == 'guarded_complete_build':
+            guarded_contract(config, phase, reviewed)
+        elif not isinstance(estimate.get('conservative_method'), str) or len(estimate['conservative_method'].strip()) < 20 \
                 or estimate.get('complete_existing_cache_arrays') is not True:
             raise RuntimeError('unknown index size cannot be admitted; a complete-cache conservative estimate is required')
     return reviewed
@@ -462,10 +502,19 @@ def resource_observation(config, db, growth=0):
 def admission(config, db, phase, drop=False):
     b = bounds(config, phase, drop)
     growth = b.get('index_bytes', 0) + b['temp_bytes'] + b['wal_bytes']
-    r = resource_observation(config, db, growth)
+    guarded = not drop and estimate_mode(config, phase) == 'guarded_complete_build'
+    overshoot = guarded_contract(config, phase, b)['overshoot_reserve_bytes'] if guarded else 0
+    r = resource_observation(config, db, growth + overshoot)
+    if guarded:
+        profile = db.query("SELECT current_setting('server_version_num')::bigint version,current_setting('block_size')::bigint block_bytes,pg_size_bytes(current_setting('wal_segment_size')) segment_bytes")[0]
+        if not 180000 <= profile['version'] < 190000 or profile['block_bytes'] != 8192 \
+                or profile['segment_bytes'] != 16 * 1024 ** 2:
+            raise RuntimeError('guarded terminal WAL envelope requires PostgreSQL18/8KiB pages/16MiB WAL segments')
+        r['guarded_runtime_profile'] = profile
+        r['overshoot_reserve_bytes'] = overshoot
     if r['wal_ready'] > 24 * GIB or r['wal_ready'] + b['wal_bytes'] > 28 * GIB:
         raise RuntimeError('WAL must be drained to low24GiB and the reviewed burst fit high28GiB')
-    if r['ram'] < b['ram_bytes'] + 2 * GIB or r['temp_free'] < b['temp_bytes'] + 42 * GIB:
+    if r['ram'] < b['ram_bytes'] + 2 * GIB or r['temp_free'] < b['temp_bytes'] + overshoot + 42 * GIB:
         raise RuntimeError('conservative RAM or temporary allocation admission failed')
     r['pool_absolute_ceiling'] = r['used'] + growth
     r['filesystem_absolute_floor'] = r['free'] - growth
@@ -481,6 +530,9 @@ def monitor_budget(config, db, phase, start, started, drop=False):
     r = resource_observation(config, db)
     size = db.query('SELECT coalesce(pg_total_relation_size(to_regclass(%s)),0)::bigint bytes',
                     ('public.' + INDEXES[phase],))[0]['bytes']
+    if not drop and estimate_mode(config, phase) == 'guarded_complete_build' \
+            and terminal_page_wal_bound(size) > b['wal_bytes']:
+        raise RuntimeError('owned guarded index exceeds the terminal-page WAL envelope; cancel and retain it')
     if r['used'] > start['pool_absolute_ceiling'] or r['free'] < start['filesystem_absolute_floor'] \
             or r['wal'] > start['wal_absolute_ceiling'] or r['wal'] > 32 * GIB \
             or r['wal_ready'] > start['wal_ready_absolute_ceiling'] \
@@ -508,11 +560,41 @@ class Workflow:
         self.state['updated_at_unix'] = time.time()
         self.save(self.state)
 
-    def reconcile(self):
+    def complete_build_proof(self, phase, row, *, allow_overcap_for_rollback=False):
+        if estimate_mode(self.config, phase) != 'guarded_complete_build':
+            return
+        reviewed = bounds(self.config, phase)
+        before = self.state['intents'][str(phase)].get('before', {})
+        profile = before.get('guarded_runtime_profile')
+        if not isinstance(profile, dict) or not 180000 <= profile.get('version', 0) < 190000 \
+                or profile.get('block_bytes') != 8192 or profile.get('segment_bytes') != 16 * 1024 ** 2:
+            raise RuntimeError('guarded complete build lacks its retained original runtime-profile admission')
+        actual = self.db.query('SELECT pg_total_relation_size(%s::regclass)::bigint bytes',
+                               ('public.' + INDEXES[phase],))[0]['bytes']
+        integer(actual)
+        proof = {'mode': 'guarded_complete_build', 'index_oid': row['oid'],
+                 'index_bytes': actual, 'terminal_page_wal_upper_bytes': terminal_page_wal_bound(actual),
+                 'whole_relation_unfiltered': True, 'valid_ready': True,
+                 'predicted_complete_array_size_claimed': False,
+                 'reactive_monitor_overshoot_acknowledged': True}
+        proof['admitted'] = actual <= reviewed['index_bytes'] \
+            and proof['terminal_page_wal_upper_bytes'] <= reviewed['wal_bytes']
+        self.state.setdefault('complete_build_proofs', {})[str(phase)] = proof
+        if not proof['admitted'] and not allow_overcap_for_rollback:
+            self.checkpoint('COMPLETE_BUILD_PROOF_REJECTED_INDEX_RETAINED')
+            raise RuntimeError('complete guarded index exceeds its reviewed cap or terminal WAL envelope; retain and reconcile it')
+
+    def reconcile(self, *, allow_overcap_for_rollback=False):
         current = catalog(self.db)
         current['default_collation_oid'] = self.manifest['original']['default_collation_oid']
         additions = delta(self.manifest['original'], current, self.state['intents'],
                           self.state.get('accepted_compact_pins', ()))
+        for phase, (row, ready) in additions.items():
+            if ready:
+                # Lost acknowledgements may be reconciled, but a valid index
+                # that overshot the construction cap is never promoted later.
+                self.complete_build_proof(phase, row,
+                    allow_overcap_for_rollback=allow_overcap_for_rollback)
         compact = next(r for r in current['contract'] if r['oid'] ==
                        next(c['oid'] for c in current['cores'] if c['name'] == TABLES[1]))
         if compact['pin'] != compact['actual']:
@@ -537,9 +619,15 @@ class Workflow:
         writer_gate(self.db, self.session.identity['pid'])
         start = admission(self.config, self.db, phase, drop)
         text = ddl(phase, drop)
+        guarded = not drop and estimate_mode(self.config, phase) == 'guarded_complete_build'
         self.session.statement("SET statement_timeout=" + P.literal(str(bounds(self.config, phase, drop)['seconds']) + 's') +
             ';SET maintenance_work_mem=' + P.literal(str(max(1, bounds(self.config, phase, drop)['ram_bytes'] // 1024)) + 'kB') +
             ';SET max_parallel_maintenance_workers=0')
+        if guarded:
+            # Serial build/validation and a backend-enforced sort-file limit
+            # complement the reactive global physical-capacity observation.
+            self.session.statement('SET max_parallel_workers_per_gather=0;SET temp_file_limit=' +
+                P.literal(str(max(1, bounds(self.config, phase)['temp_bytes'] // 1024)) + 'kB'))
         if not drop:
             if str(phase) in self.state['intents']:
                 raise RuntimeError('an earlier phase intent has no index acknowledgement; reconcile without retry')
@@ -552,24 +640,33 @@ class Workflow:
                 'ddl_sha256': digest(text), 'backend': self.session.identity, 'before': start}
         self.checkpoint('DROP_PENDING' if drop else 'DDL_PENDING')
         started = time.monotonic()
+        next_observation = started
         try:
             self.session.begin(text)
             while True:
                 done, _ = self.session.poll(.2)
                 if done:
                     break
-                monitor_budget(self.config, self.db, phase, start, started, drop)
-                runtime_gate(self.config, self.manifest['package_sha256'])
-                writer_gate(self.db, self.session.identity['pid'])
-                time.sleep(1)
-            monitor_budget(self.config, self.db, phase, start, started, drop)
+                if not guarded or time.monotonic() >= next_observation:
+                    monitor_budget(self.config, self.db, phase, start, started, drop)
+                    runtime_gate(self.config, self.manifest['package_sha256'])
+                    writer_gate(self.db, self.session.identity['pid'])
+                    next_observation = time.monotonic() + GUARDED_POLL_SECONDS
+                if not guarded:
+                    time.sleep(1)
+            final = monitor_budget(self.config, self.db, phase, start, started, drop)
+            self.state.setdefault('phase_final_observations', {})[str(phase)] = final
+            self.checkpoint('DROP_ACK_BUDGET_VERIFIED' if drop else 'DDL_ACK_BUDGET_VERIFIED')
         except Exception:
             try:
                 self.state['cancelled_exact_owned_backend'] = cancel_owned(self.db, self.session.identity, text + ';')
             finally:
                 self.checkpoint('OUTCOME_UNKNOWN_RECONCILE_REQUIRED')
             raise
-        self.reconcile()
+        if drop:
+            self.reconcile(allow_overcap_for_rollback=True)
+        else:
+            self.reconcile()
 
     def build(self):
         additions = self.reconcile()
@@ -588,14 +685,14 @@ class Workflow:
         self.checkpoint('COMPLETE_TWO_EXACT_INDEXES_READY')
 
     def rollback(self):
-        additions = self.reconcile()
+        additions = self.reconcile(allow_overcap_for_rollback=True)
         # No helper drop: the installed159 readers depend on all three helpers and
         # their fallback is precisely what makes a two-index rollback safe.
         self.state['helpers_retained_for_installed_reader'] = list(SIGNATURES[:3])
         for phase in (1, 0):
             if phase in additions:
                 self.run_phase(phase, drop=True)
-                additions = self.reconcile()
+                additions = self.reconcile(allow_overcap_for_rollback=True)
         current = catalog(self.db)
         if current['contract'] != self.manifest['original']['contract']:
             raise RuntimeError('rollback did not restore the original compact catalog contract')
@@ -703,7 +800,8 @@ def main():
         try:
             getattr(workflow, args.action)()
         except Exception:
-            if state['status'] not in ('INVALID_INDEX_RETAINED', 'OUTCOME_UNKNOWN_RECONCILE_REQUIRED'):
+            if state['status'] not in ('INVALID_INDEX_RETAINED', 'OUTCOME_UNKNOWN_RECONCILE_REQUIRED',
+                                      'COMPLETE_BUILD_PROOF_REJECTED_INDEX_RETAINED'):
                 workflow.checkpoint('STOPPED_RECONCILE_REQUIRED')
             raise
         print(json.dumps({'status': state['status'], 'operation_id': state['operation_id']}))

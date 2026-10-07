@@ -1203,10 +1203,40 @@ and an unexpected definition is an error, not evidence of readiness.
 The migration does not build indexes or rewrite source bodies, vectors or
 posting dictionaries. `exact-lexeme-indexes.py` is the separate local operator
 for sequential concurrent index creation and guarded removal. It requires an
-exact protected manifest, conservative index/temp/WAL reservations and current
+exact protected manifest, reviewed index/temp/WAL reservations and current
 writer, catalog and physical capacity admission. The ordinary pool ceiling
 applies; a source-specific build exception does not authorize index creation.
-Unknown index size or inadequate WAL room blocks the operation.
+The default `conservative` estimate mode requires a complete-cache conservative
+size estimate; unknown size or inadequate WAL room blocks that mode.
+
+An explicitly reviewed `guarded_complete_build` mode can instead make one
+bounded construction attempt over the entire existing cache, without a separate
+full lexeme census. Each phase must acknowledge `unknown_final_index_size`,
+`reactive_monitor_may_overshoot`, `retain_incomplete_index` and
+`one_attempt_no_automatic_retry` as true, with
+`complete_existing_cache_arrays` false. These acknowledgements do not establish
+a predicted final index size. `overshoot_reserve_bytes` must reserve at least
+another complete index/temp/WAL phase allocation under the ordinary physical
+capacity limits. The monitored phase ceilings remain unchanged by this extra
+headroom.
+
+This mode requires PostgreSQL 18 with 8 KiB relation pages and 16 MiB WAL
+segments. A GIN build logs its completed index pages at the end; admission
+reserves `ceil(index_bytes / 8192) * 9216 + 64 MiB` for that terminal image burst,
+without crediting compression or concurrent archival. The guarded index cap is
+at most 3.5 GiB so that this envelope fits the existing 4 GiB phase WAL policy.
+The backend enforces the reviewed temporary-file limit and disables parallel
+maintenance and gathering workers. Resource observations target two-second
+intervals; observation and cancellation can overshoot, so these are not strict
+instantaneous allocation guarantees.
+
+Success requires the actual whole-relation index to be valid and ready, with
+its measured allocation and terminal WAL envelope inside the reviewed caps.
+Reconciliation after a lost acknowledgement requires this same actual-size
+proof. An incomplete or oversized index is retained and never promoted to a
+successful build or automatically rebuilt. Explicit rollback can remove only
+the exact owned additions after catalog reconciliation, including an oversized
+valid index, while retaining the installed reader helpers and fallback.
 
 WAL admission distinguishes queued archive bytes from allocated WAL files.
 The 24/28 GiB low/high thresholds apply to
