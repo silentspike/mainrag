@@ -82,6 +82,10 @@ pub struct BuildProgress {
     pub generation_id: Option<i64>,
     pub db_staging_round_trips: u64,
     pub db_staging_ms: f64,
+    #[serde(default)]
+    pub staging_sql_await_ms: f64,
+    #[serde(default)]
+    pub lexical_preparation_ms: f64,
     pub elapsed_seconds: f64,
     pub observed_at_unix_ms: u128,
     pub transaction_committed: bool,
@@ -153,6 +157,8 @@ impl BuildProgressRecorder {
             generation_id: None,
             db_staging_round_trips: 0,
             db_staging_ms: 0.0,
+            staging_sql_await_ms: 0.0,
+            lexical_preparation_ms: 0.0,
             elapsed_seconds: 0.0,
             observed_at_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
             transaction_committed: false,
@@ -251,6 +257,8 @@ impl BuildProgressRecorder {
         inner.value.staged_items = staged_items;
         inner.value.db_staging_round_trips = measurements.db_staging_round_trips;
         inner.value.db_staging_ms = measurements.database_staging_ms();
+        inner.value.staging_sql_await_ms = measurements.staging_sql_await_ms();
+        inner.value.lexical_preparation_ms = measurements.lexical_preparation_ms();
         if force
             || staged_items.saturating_sub(inner.persisted_items) >= 32
             || inner.persisted_at.elapsed() >= Duration::from_secs(30)
