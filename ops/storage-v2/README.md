@@ -1208,6 +1208,14 @@ writer, catalog and physical capacity admission. The ordinary pool ceiling
 applies; a source-specific build exception does not authorize index creation.
 Unknown index size or inadequate WAL room blocks the operation.
 
+WAL admission distinguishes queued archive bytes from allocated WAL files.
+The 24/28 GiB low/high thresholds apply to
+`storage_v2_local_wal_ready_bytes()`, matching the ingest API. Recycled or
+preallocated files remain part of physical capacity accounting and the 32 GiB
+stock limit; they do not represent an archive backlog. Each phase retains its
+reviewed WAL stock-growth ceiling. This ceiling measures additional allocated
+space, not total WAL emitted while archival and recycling continue.
+
 Keep the original relation/index catalog and operation identity through every
 phase. A disconnect or an invalid concurrent index requires reconciliation of
 that same named operation. Do not create another index as a retry. Only the two
