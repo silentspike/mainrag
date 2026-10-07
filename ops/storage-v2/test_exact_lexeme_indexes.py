@@ -51,6 +51,23 @@ def intent(phase):
     return {str(phase): {'ddl_sha256': O.digest(O.ddl(phase))}}
 
 
+def guarded_config():
+    phase = {'index_bytes': O.GUARDED_INDEX_CAP, 'temp_bytes': O.GIB,
+             'wal_bytes': 4 * O.GIB, 'ram_bytes': O.GIB, 'seconds': 60}
+    estimate = {'input_relation_bytes': O.GIB, 'estimate_mode': 'guarded_complete_build',
+                'complete_existing_cache_arrays': False,
+                'guarded_complete_build': {'unknown_final_index_size': True,
+                    'reactive_monitor_may_overshoot': True, 'retain_incomplete_index': True,
+                    'one_attempt_no_automatic_retry': True,
+                    'overshoot_reserve_bytes': phase['index_bytes'] + phase['temp_bytes'] + phase['wal_bytes']}}
+    return {'bounds': {str(i): copy.deepcopy(phase) for i in (0, 1)},
+            'estimates': {str(i): copy.deepcopy(estimate) for i in (0, 1)}}
+
+
+def guarded_profile():
+    return {'version': 180004, 'block_bytes': 8192, 'segment_bytes': 16 * 1024 ** 2}
+
+
 class ExactLexemeOwnershipTests(unittest.TestCase):
     def test_ci_transport_is_fixture_only_and_does_not_copy_private_environment(self):
         fixture = {'STORAGE_V2_TEST_SOCKET': '127.0.0.1', 'PGUSER': 'fixture',
@@ -352,6 +369,147 @@ class ExactLexemeOwnershipTests(unittest.TestCase):
             resource.update(wal_ready=0, wal=32 * O.GIB + 1)
             with self.assertRaisesRegex(RuntimeError, 'reviewed physical/WAL'):
                 O.monitor_budget(config, db, 0, start, O.time.monotonic())
+
+    def test_guarded_construction_is_explicit_and_covers_terminal_page_wal(self):
+        config = guarded_config()
+        self.assertEqual(O.bounds(config, 0), config['bounds']['0'])
+        self.assertEqual(O.terminal_page_wal_bound(O.GUARDED_INDEX_CAP), 4 * O.GIB)
+        self.assertGreater(O.terminal_page_wal_bound(O.GUARDED_INDEX_CAP + 1), 4 * O.GIB)
+        variants = []
+        for field in ('unknown_final_index_size', 'reactive_monitor_may_overshoot',
+                      'retain_incomplete_index', 'one_attempt_no_automatic_retry'):
+            changed = copy.deepcopy(config)
+            changed['estimates']['0']['guarded_complete_build'][field] = False
+            variants.append(changed)
+        for key, value in (('estimate_mode', 'silent-size-assumption'),
+                           ('complete_existing_cache_arrays', True)):
+            changed = copy.deepcopy(config)
+            changed['estimates']['0'][key] = value
+            variants.append(changed)
+        for field, value in (('index_bytes', O.GUARDED_INDEX_CAP + 1),
+                             ('wal_bytes', 4 * O.GIB - 1)):
+            changed = copy.deepcopy(config)
+            changed['bounds']['0'][field] = value
+            variants.append(changed)
+        changed = copy.deepcopy(config)
+        changed['estimates']['0']['guarded_complete_build']['overshoot_reserve_bytes'] -= 1
+        variants.append(changed)
+        for changed in variants:
+            with self.subTest(estimate=changed['estimates']['0']), self.assertRaises(RuntimeError):
+                O.bounds(changed, 0)
+        # The default prediction contract remains closed on unknown arrays.
+        changed = copy.deepcopy(config)
+        del changed['estimates']['0']['estimate_mode']
+        with self.assertRaisesRegex(RuntimeError, 'complete-cache conservative'):
+            O.bounds(changed, 0)
+
+    def test_guarded_admission_reserves_overshoot_and_pins_page_architecture(self):
+        config = guarded_config()
+        db = Mock()
+        db.query.return_value = [guarded_profile()]
+        seen = []
+        def observation(config, db, growth):
+            seen.append(growth)
+            return {'used': 100, 'free': 100 * O.GIB, 'wal': 2 * O.GIB,
+                    'wal_ready': 0, 'ram': 8 * O.GIB, 'temp_free': 100 * O.GIB}
+        with patch.object(O, 'resource_observation', side_effect=observation):
+            start = O.admission(config, db, 0)
+            allocation = O.GUARDED_INDEX_CAP + 5 * O.GIB
+            self.assertEqual(seen, [2 * allocation])
+            self.assertEqual(start['pool_absolute_ceiling'], 100 + allocation)
+            self.assertEqual(start['overshoot_reserve_bytes'], allocation)
+            self.assertEqual(start['wal_absolute_ceiling'], 6 * O.GIB)
+            for field, value in (('version', 170009), ('block_bytes', 16384),
+                                 ('segment_bytes', 64 * 1024 ** 2)):
+                db.query.return_value = [dict(guarded_profile(), **{field: value})]
+                with self.subTest(field=field), self.assertRaisesRegex(RuntimeError, 'PostgreSQL18'):
+                    O.admission(config, db, 0)
+
+    def test_guarded_cap_cancels_owned_attempt_and_never_implicitly_restarts_it(self):
+        config = guarded_config()
+        db = Mock()
+        session = Mock()
+        session.identity = {'pid': 123, 'start': 'fixture-time', 'app': 'exact-owned-fixture',
+                            'db': 'fixture', 'role': 'postgres'}
+        session.poll.return_value = (False, None)
+        state = {'intents': {}}
+        flow = O.Workflow(db, session, {'package_sha256': 'a' * 64}, state, lambda s: None, config)
+        flow.reconcile = Mock()
+        with patch.object(O, 'runtime_gate'), patch.object(O, 'writer_gate'), \
+                patch.object(O, 'admission', return_value={'guarded_runtime_profile': guarded_profile()}), \
+                patch.object(O, 'monitor_budget', side_effect=RuntimeError('terminal-page WAL envelope')), \
+                patch.object(O, 'cancel_owned', return_value=True) as cancelled:
+            with self.assertRaisesRegex(RuntimeError, 'terminal-page WAL'):
+                flow.run_phase(0)
+            cancelled.assert_called_once_with(db, session.identity, O.ddl(0) + ';')
+            self.assertEqual(state['status'], 'OUTCOME_UNKNOWN_RECONCILE_REQUIRED')
+            self.assertTrue(state['cancelled_exact_owned_backend'])
+            self.assertEqual(state['intents']['0']['ddl_sha256'], O.digest(O.ddl(0)))
+            with self.assertRaisesRegex(RuntimeError, 'earlier phase intent'):
+                flow.run_phase(0)
+        session.begin.assert_called_once_with(O.ddl(0))
+        flow.reconcile.assert_not_called()
+        statements = ' '.join(c.args[0] for c in session.statement.call_args_list)
+        self.assertIn('temp_file_limit=', statements)
+        self.assertIn('max_parallel_workers_per_gather=0', statements)
+
+    def test_valid_lost_ack_guarded_index_requires_actual_complete_size_proof(self):
+        config = guarded_config()
+        old = original_catalog()
+        now = copy.deepcopy(old)
+        add_index(now, 0)
+        state = {'intents': {'0': dict(intent(0)['0'], before={
+                    'guarded_runtime_profile': guarded_profile()})}}
+        db = Mock()
+        db.query.return_value = [{'bytes': O.GUARDED_INDEX_CAP + 8192}]
+        session = SimpleNamespace(statement=Mock(), scalar=Mock(return_value=True))
+        flow = O.Workflow(db, session, {'original': old}, state, lambda s: None, config)
+        with patch.object(O, 'catalog', return_value=now), self.assertRaisesRegex(RuntimeError, 'retain and reconcile'):
+            flow.build()
+        self.assertEqual(state['status'], 'COMPLETE_BUILD_PROOF_REJECTED_INDEX_RETAINED')
+        self.assertFalse(state['complete_build_proofs']['0']['admitted'])
+        session.statement.assert_not_called()
+        # A same-operation valid acknowledgement below the cap proves complete
+        # construction; it does not turn the original unknown size into a guess.
+        add_index(now, 1)
+        now['contract'][0]['pin'] = now['contract'][0]['actual']
+        state['accepted_compact_pins'] = [now['contract'][0]['actual']]
+        state['intents']['1'] = dict(intent(1)['1'], before={'guarded_runtime_profile': guarded_profile()})
+        db.query.return_value = [{'bytes': O.GIB}]
+        with patch.object(O, 'catalog', return_value=now):
+            flow.build()
+        self.assertEqual(state['status'], 'COMPLETE_TWO_EXACT_INDEXES_READY')
+        self.assertEqual(set(state['complete_build_proofs']), {'0', '1'})
+        for proof in state['complete_build_proofs'].values():
+            self.assertTrue(proof['admitted'])
+            self.assertTrue(proof['whole_relation_unfiltered'])
+            self.assertFalse(proof['predicted_complete_array_size_claimed'])
+
+    def test_guarded_monitor_rejects_known_terminal_wal_overshoot_before_promotion(self):
+        config = guarded_config()
+        db = Mock()
+        db.query.return_value = [{'bytes': O.GUARDED_INDEX_CAP + 8192}]
+        with patch.object(O, 'resource_observation', return_value={}):
+            with self.assertRaisesRegex(RuntimeError, 'terminal-page WAL envelope'):
+                O.monitor_budget(config, db, 0, {}, O.time.monotonic())
+
+    def test_owned_overcap_index_can_be_explicitly_rolled_back_without_promotion(self):
+        config = guarded_config()
+        old = original_catalog()
+        now = copy.deepcopy(old)
+        add_index(now, 0)
+        state = {'intents': {'0': dict(intent(0)['0'], before={
+                    'guarded_runtime_profile': guarded_profile()})}}
+        db = Mock()
+        db.query.return_value = [{'bytes': O.GUARDED_INDEX_CAP + 8192}]
+        session = SimpleNamespace(statement=Mock(), scalar=Mock(return_value=False))
+        flow = O.Workflow(db, session, {'original': old}, state, lambda s: None, config)
+        flow.run_phase = Mock()
+        with patch.object(O, 'catalog', side_effect=[now, old, old]):
+            flow.rollback()
+        flow.run_phase.assert_called_once_with(0, drop=True)
+        self.assertFalse(state['complete_build_proofs']['0']['admitted'])
+        self.assertEqual(state['status'], 'ROLLED_BACK_ORIGINAL_CATALOG_HELPERS_RETAINED')
 
 
 def exercise_disposable_catalog_protocol(database, socket, user_id):
