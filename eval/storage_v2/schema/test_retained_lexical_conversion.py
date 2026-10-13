@@ -8,6 +8,7 @@ import unittest
 import uuid
 
 from eval.storage_v2.schema import test_document_cache_conversion as previous
+from eval.storage_v2.schema.local_operator_fixture import command as local_command
 
 ROOT = previous.ROOT
 MIGRATION = ROOT / 'migrations/163_storage_v2_convert_retained_lexical_blocks.sql'
@@ -18,7 +19,7 @@ LEDGER = 'storage_v2_lexical_conversion_receipt'
 class RetainedLexicalConversionTests(unittest.TestCase):
     base = previous.DocumentCacheConversionTests.base
     schema = base.schema
-    command = classmethod(base.command.__func__)
+    command = classmethod(local_command)
     sql = classmethod(base.sql.__func__)
     file = classmethod(base.file.__func__)
     actor = staticmethod(base.actor)
@@ -46,6 +47,8 @@ class RetainedLexicalConversionTests(unittest.TestCase):
     def setUpClass(cls):
         try:
             previous.DocumentCacheConversionTests.setUpClass.__func__(cls)
+            if cls.sql('SELECT inet_client_addr() IS NULL') != 't':
+                raise AssertionError('Retained operator fixture requires its actual local Unix socket')
             cls.file(next(MIGRATION.parent.glob('162_*.sql')))
             cls.before = cls.functions()
             cls.sql(f"SET app.user_id='{cls.schema.ADMIN_ID}';" + MIGRATION.read_text())
