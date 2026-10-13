@@ -469,6 +469,10 @@ jobs:
         env:
           POSTGRES_USER: fixture
           POSTGRES_PASSWORD: fixture_only
+          # These owned fixtures deliberately require an idle maintenance
+          # boundary. Keep automatic background writers out of that boundary;
+          # explicit competing-writer tests and production guards stay active.
+          POSTGRES_INITDB_ARGS: "--set=autovacuum=off"
         ports:
           - 5432:5432
         options: >-
@@ -490,7 +494,13 @@ jobs:
         run: |
           python3 - <<'PY'
           import os
+          import subprocess
           import unittest
+          automatic_writer = subprocess.check_output([
+              'psql', '-X', '--no-psqlrc', '-At', '--host', '127.0.0.1',
+              '--dbname', 'postgres', '--command', 'SHOW autovacuum',
+          ], text=True).strip()
+          assert automatic_writer == 'off', 'owned maintenance fixture must disable automatic writers'
           test_names = [
               'eval.storage_v2.schema.test_empty_search_branches',
               'eval.storage_v2.schema.test_empty_search_branch_benchmark',
@@ -547,6 +557,8 @@ jobs:
               'eval.storage_v2.schema.test_retained_posting_tokenizer_parity.RetainedPostingTokenizerParityTests',
               'eval.storage_v2.schema.test_retained_document_cache_admission.RetainedDocumentCacheAdmissionTests',
               'eval.storage_v2.schema.test_cost_aware_posting_selection.CostAwarePostingSelectionTests',
+              'eval.storage_v2.schema.test_retained_cache_preflight_cost.RetainedCachePreflightCostTests',
+              'eval.storage_v2.schema.test_retained_cache_no_fingerprints.RetainedCacheNoFingerprintsTests',
           ]
           shard = int(os.environ['SCHEMA_SHARD'])
           assert shard in (0, 1), 'Expected one of the two declared schema shards'
