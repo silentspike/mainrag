@@ -484,6 +484,7 @@ jobs:
         env:
           SCHEMA_SHARD: ${{ matrix.shard }}
           STORAGE_V2_TEST_SOCKET: '127.0.0.1'
+          STORAGE_V2_TEST_LOCAL_CONTAINER: ${{ job.services.postgres.id }}
           PGUSER: fixture
           PGPASSWORD: fixture_only
         run: |
