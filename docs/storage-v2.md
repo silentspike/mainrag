@@ -1806,6 +1806,23 @@ receipts bind the original and current cache payloads; replay checks the actual
 destination. An unchanged payload without a receipt cannot prove that a skipped
 operation ran after an acknowledgement was lost.
 
+The converter evaluates the existing fingerprint index cost model before an
+indexed full-text update. If that charge alone exceeds the complete original
+cache cost, full-text conversion cannot pass the existing net-cost gate. That
+path validates the original canonical vector and considers identifier removal
+directly, preserving the original full-text cache. This prevents a rejected
+full-text update from doing index work before an identifier-only fallback.
+Actual index maintenance and physical reclamation remain separately measured;
+neither an unchanged lexeme set nor a smaller datum proves a smaller database.
+
+An explicit local administrative cache-format function can retain a nonnull
+stripped vector without also storing its fingerprint array. The existing GIN
+over that vector serves plain term predicates; phrase and negation readers
+retain their canonical positional fallback. Derived documents whose vector is
+null still need their existing fingerprints. This separate format preserves the
+original converter's default representation, requires the exact canonical
+mutation guard, and uses the same immutable cache receipts and replay checks.
+
 Document size alone does not establish a useful posting format. BYTE retains
 short terms and adds two locator arrays, which can increase costs for short
 or compressible dictionaries. New documents choose between the existing
