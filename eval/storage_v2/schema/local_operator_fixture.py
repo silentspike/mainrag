@@ -7,6 +7,17 @@ import re
 import subprocess
 
 
+def sql_file(path: Path, root: Path, parents=()) -> str:
+    """Resolve psql includes on the host before sending fixture SQL over stdin."""
+    path = path.resolve()
+    if path in parents or len(parents) >= 8:
+        raise AssertionError('Recursive fixture SQL include')
+    def include(match):
+        directory = path.parent if match.group(1) == 'ir' else root
+        return sql_file(directory / match.group(2), root, (*parents, path))
+    return re.sub(r'(?m)^\\(ir|i)\s+([^\s]+)[ \t]*$', include, path.read_text())
+
+
 def command(cls, *arguments: str, check: bool = True):
     container = os.environ.get('STORAGE_V2_TEST_LOCAL_CONTAINER')
     if not container:
@@ -19,7 +30,7 @@ def command(cls, *arguments: str, check: bool = True):
         if option in arguments:
             index = arguments.index(option)
             value = arguments[index + 1]
-            statement = Path(value).read_text() if option == '--file' else value
+            statement = sql_file(Path(value), cls.schema.ROOT) if option == '--file' else value
             del arguments[index:index + 2]
             break
     argv = ['docker', 'exec', '-i', container, 'psql', '-X', '--no-psqlrc', '-qAt',
