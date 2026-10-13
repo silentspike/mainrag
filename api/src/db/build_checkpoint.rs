@@ -109,6 +109,10 @@ impl BuildCheckpointSession {
         self
     }
 
+    pub fn expected_run_id(&self) -> Option<i64> {
+        self.expected_run_id
+    }
+
     pub fn validate_source(&self, source_id: i64) -> Result<()> {
         ensure!(
             source_id == self.source_id,
