@@ -17,6 +17,22 @@ use crate::services::source_read::{AccountedReader, ReadAccounting};
 const STORAGE_V2_FRAGMENT_BYTES: u64 = 1024 * 1024;
 const STORAGE_V2_NEWLINE_WINDOW_BYTES: u64 = 64 * 1024;
 
+/// Preserve the original cut rejection policy's case-sensitive extension.
+/// NUL allowance separately uses the normalized adapter language.
+pub(crate) fn cut_conversation_path(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension == "jsonl" || extension == "json")
+}
+
+#[derive(Debug)]
+struct InvalidTextFragmentBoundary;
+impl std::fmt::Display for InvalidTextFragmentBoundary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("large text file has no valid UTF-8 fragment boundary")
+    }
+}
+impl std::error::Error for InvalidTextFragmentBoundary {}
+
 /// Maximum file size for the legacy eager/streaming sync path, configurable via
 /// MAX_FILE_SIZE_MB. Storage v2 applies its separate bounded fragmentation
 /// contract instead of dropping oversized text. Default: 50 MB.
@@ -253,6 +269,47 @@ impl SourcePlugin for FilesystemPlugin {
 }
 
 impl FilesystemPlugin {
+    /// Header/selection discovery for the canonical source pass. That caller
+    /// validates every byte before admitting an item; ordinary plugin callers
+    /// retain the complete text-classification contract below.
+    #[cfg(feature = "storage-v2-shadow-ingest")]
+    pub async fn sync_for_canonical_hash_observed(
+        &self,
+        source_path: &str,
+    ) -> anyhow::Result<ObservedSyncResult> {
+        self.observe_with_validation(source_path, false, true).await
+    }
+
+    #[cfg(feature = "storage-v2-shadow-ingest")]
+    pub async fn selected_cut(
+        &self,
+        source_path: &str,
+    ) -> anyhow::Result<Option<super::fs_cut::CutProof>> {
+        self.read_root(Path::new(source_path)).await?;
+        Ok(self.filesystem_cut())
+    }
+
+    #[cfg(feature = "storage-v2-shadow-ingest")]
+    pub async fn revalidate_current_cut(
+        &self,
+        source_path: &str,
+        expected: &super::fs_cut::CutProof,
+    ) -> anyhow::Result<()> {
+        let cut = self
+            .cut
+            .lock()
+            .map_err(|_| anyhow::anyhow!("source-cut lock poisoned"))?
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("immutable source cut was not selected"))?;
+        anyhow::ensure!(
+            &cut.proof == expected,
+            "selected source cut differs from the observed manifest"
+        );
+        let root = PathBuf::from(source_path);
+        tokio::task::spawn_blocking(move || cut.validate_current(&root)).await??;
+        Ok(())
+    }
+
     async fn read_root(&self, registered: &Path) -> anyhow::Result<PathBuf> {
         if !self.scope.cut_consistency {
             return Ok(registered.to_path_buf());
@@ -297,6 +354,16 @@ impl FilesystemPlugin {
         source_path: &str,
         load_content: bool,
     ) -> anyhow::Result<ObservedSyncResult> {
+        self.observe_with_validation(source_path, load_content, false)
+            .await
+    }
+
+    async fn observe_with_validation(
+        &self,
+        source_path: &str,
+        load_content: bool,
+        defer_text_validation: bool,
+    ) -> anyhow::Result<ObservedSyncResult> {
         anyhow::ensure!(
             !load_content || !self.scope.cut_consistency,
             "immutable filesystem cuts require the storage-v2 source path"
@@ -307,13 +374,14 @@ impl FilesystemPlugin {
         let accounting = ReadAccounting::filesystem_adapter();
         let mut files = Vec::new();
         let mut errors = Vec::new();
-        self.collect_files(
+        self.collect_files_with_validation(
             path,
             path,
             &mut files,
             &mut errors,
             load_content,
             Some(&accounting),
+            defer_text_validation,
         )
         .await?;
         Ok(ObservedSyncResult {
@@ -336,6 +404,33 @@ impl FilesystemPlugin {
         load_content: bool,
         accounting: Option<&ReadAccounting>,
     ) -> anyhow::Result<()> {
+        self.collect_files_with_validation(
+            root_path,
+            _current_path,
+            files,
+            errors,
+            load_content,
+            accounting,
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn collect_files_with_validation(
+        &self,
+        root_path: &Path,
+        _current_path: &Path,
+        files: &mut Vec<RawFile>,
+        errors: &mut Vec<String>,
+        load_content: bool,
+        accounting: Option<&ReadAccounting>,
+        defer_text_validation: bool,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !defer_text_validation || !load_content,
+            "deferred text validation requires canonical storage-v2 hashing"
+        );
         const INDEXABLE_EXTENSIONS: &[&str] = &[
             "rs", "py", "js", "ts", "tsx", "go", "java", "c", "cpp", "h", "hpp", "md", "txt",
             "json", "jsonl", "yaml", "yml", "toml", "sql", "sh", "bash", "html", "css", "scss",
@@ -418,13 +513,16 @@ impl FilesystemPlugin {
             let allow_conversation_nul = !load_content
                 && self.scope.conversation_nul_projection
                 && matches!(ext.as_str(), "jsonl" | "json");
-            match check_if_binary(&path, !load_content, accounting, allow_conversation_nul).await {
+            match check_if_binary(
+                &path,
+                !load_content && !defer_text_validation,
+                accounting,
+                allow_conversation_nul,
+            )
+            .await
+            {
                 Ok(true) => {
-                    if self.scope.cut_consistency
-                        && path
-                            .extension()
-                            .is_some_and(|extension| extension == "jsonl" || extension == "json")
-                    {
+                    if self.scope.cut_consistency && cut_conversation_path(&path) {
                         anyhow::bail!("selected conversation cut contains a nontext source item");
                     }
                     continue;
@@ -460,7 +558,24 @@ impl FilesystemPlugin {
 
             if !load_content {
                 if file_size > STORAGE_V2_FRAGMENT_BYTES {
-                    for source_range in storage_v2_fragment_ranges(&path, file_size, accounting)? {
+                    let ranges = match storage_v2_fragment_ranges(&path, file_size, accounting) {
+                        Ok(ranges) => ranges,
+                        Err(error)
+                            if defer_text_validation
+                                && error
+                                    .downcast_ref::<InvalidTextFragmentBoundary>()
+                                    .is_some() =>
+                        {
+                            if self.scope.cut_consistency && cut_conversation_path(&path) {
+                                anyhow::bail!(
+                                    "selected conversation cut contains a nontext source item"
+                                );
+                            }
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    for source_range in ranges {
                         files.push(RawFile {
                             path: relative_path.clone(),
                             content: String::new(),
@@ -590,9 +705,7 @@ fn storage_v2_fragment_ranges(
                 let offset = boundary[..read]
                     .iter()
                     .position(|byte| byte & 0b1100_0000 != 0b1000_0000)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("large text file has no valid UTF-8 fragment boundary")
-                    })?;
+                    .ok_or(InvalidTextFragmentBoundary)?;
                 target + u64::try_from(offset)?
             }
         };
@@ -782,6 +895,50 @@ mod tests {
         assert!(result.errors.is_empty());
         assert_eq!(result.files.len(), 1);
         assert_eq!(result.files[0].path, "included.rs");
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "storage-v2-shadow-ingest")]
+    async fn canonical_discovery_preserves_binary_headers_and_invalid_fragment_exclusion() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("good.txt"), b"accepted fixture\n").unwrap();
+        std::fs::write(
+            directory.path().join("signature.txt"),
+            b"\x89PNGignored fixture",
+        )
+        .unwrap();
+        let mut invalid = vec![b'a'; STORAGE_V2_FRAGMENT_BYTES as usize + 16];
+        invalid[STORAGE_V2_FRAGMENT_BYTES as usize..STORAGE_V2_FRAGMENT_BYTES as usize + 4]
+            .fill(0x80);
+        std::fs::write(directory.path().join("bad.txt"), invalid).unwrap();
+        let plugin = FilesystemPlugin::new();
+        let old = plugin
+            .sync_for_storage_v2_observed(directory.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let deferred = plugin
+            .sync_for_canonical_hash_observed(directory.path().to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(old.result.errors.is_empty());
+        assert!(deferred.result.errors.is_empty());
+        assert_eq!(
+            old.result
+                .files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["good.txt"]
+        );
+        assert_eq!(
+            deferred
+                .result
+                .files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["good.txt"]
+        );
     }
 
     #[tokio::test]
