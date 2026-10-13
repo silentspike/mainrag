@@ -1788,3 +1788,33 @@ retired. The original producer identity remains attached to retained generations
 Codec equivalence, measured allocation, actual named reads and production
 qualification are separate gates; fixture success does not activate or clean
 up any source.
+
+### Retained cache costs and posting format selection
+
+The named retained-document cache surface preserves the strict original cache
+converter and admits an explicitly frozen, idle building run through a separate
+local administrative function. Complete run and generation metadata, named
+materializations, original cache payloads and the writer boundary must match.
+It can remove reconstructible positional vectors and identifier arrays without
+changing canonical text, explicit identifiers, source or generation identities.
+Phrase, negation, exact-identifier and authorization semantics remain intact.
+
+Conversions compare the actual stored cache datums and their new audit datums
+inside a reversible transaction block. Unsupported or nonbeneficial changes
+retain the original state and create no permanent skip record. Successful
+receipts bind the original and current cache payloads; replay checks the actual
+destination. An unchanged payload without a receipt cannot prove that a skipped
+operation ran after an acknowledgement was lost.
+
+Document size alone does not establish a useful posting format. BYTE retains
+short terms and adds two locator arrays, which can increase costs for short
+or compressible dictionaries. New documents choose between the existing
+COMPACT and BYTE representations from the already computed token arrays using
+a conservative complete array-cost comparison. There is no additional canonical
+tokenization or temporary staging table per document. Existing retained
+representations and materialization identities are preserved.
+
+Stored-datum and format-model comparisons do not establish total physical
+savings. Final accounting still includes heap, TOAST, all indexes, receipts,
+compatibility data and packs for the same retained population. Physical
+reclamation, activation and legacy retirement retain their separate gates.
