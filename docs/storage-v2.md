@@ -1737,6 +1737,43 @@ index reclamation require separately admitted maintenance and measured physical
 before/after accounting. This migration neither rewrites relations nor authorizes
 legacy cleanup or activation.
 
+The transaction-scoped lexical writer shares the expansion of dense weighted
+segment vectors within each 64-segment block when deriving masks, block
+fingerprints and the first-term cache. Sparse vectors and oversized projection
+groups retain the previous algorithm. Its bounded group keeps the existing
+vector grammar, A/B/C weights, byte and
+character anchors, first-term ordering and replay checks. The source-backed
+validation still precedes any projection write. This change creates no new
+persistent representation and changes no candidate, materialization or reader
+identity. The focused fixture compares the original and shared projections,
+including block boundaries and collision rejection. Its disposable timing
+comparison measures this writer operation only; it does not establish target
+ingest throughput or production acceptance.
+
+Retained search projections can also change representation under an exact
+maintenance manifest. A lexical conversion replaces one cached block of at
+most 64 segments with byte anchors, masks and the existing first-term cache
+after checking the original weighted vectors against the canonical document.
+A posting conversion replaces all FLAT or COMPACT postings of one named
+document with the existing BYTE representation after checking every term and
+frequency. Readers see each switch atomically. Source, materialization,
+generation, membership and posting-seal identities remain unchanged.
+
+Both converters require the local administrative operator, prearmed statement
+and lock deadlines, bounded input and an idle writer boundary. An explicitly
+named inert building run may remain only when its run and generation metadata
+match the frozen owner state; another building run or a live writer rejects
+the operation. Conversion receipts record original and destination identities
+without adding native-GC roots. Replay requires the actual destination and
+original manifest and avoids another canonical parse. GC recognizes each new
+immutable delete guard only on its exact named relation.
+
+Conversion changes logical representation, while physical release remains a
+separate measured step. Partial deletion alone does not establish reclaimed
+heap, TOAST or index space. The physical accounting must cover the complete
+retained population and all auxiliary representations, and distinguish datum
+changes, filesystem allocation, temporary WAL and total permanent savings.
+
 Candidate verification selects generation-backed native query seeds when a
 source has no bootstrap chunk inputs, including after legacy tables have been
 retired. The original producer identity remains attached to retained generations.

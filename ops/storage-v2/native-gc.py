@@ -52,6 +52,23 @@ IMMUTABILITY_GUARDS = (
     'storage_v2_reject_artifact_mutation',
 )
 
+# Conversion guards remain immutable outside their named maintenance operation.
+# GC suspends them only on the exact relation already included in its locked
+# retention manifest; the same function on any other relation stays enabled.
+SCOPED_IMMUTABILITY_GUARDS = {
+    'storage_v2_compact_lexical_block': ('storage_v2_guard_converted_lexical_delete',),
+    'storage_v2_compact_posting_block': ('storage_v2_retained_posting_delete_guard',),
+    'storage_v2_search_posting': ('storage_v2_retained_posting_delete_guard',),
+}
+
+
+def immutable_guard_predicate():
+    ordinary = 'p.proname IN (' + ','.join(A.literal(name) for name in IMMUTABILITY_GUARDS) + ')'
+    scoped = ['(c.relname=' + A.literal(table) + ' AND p.proname IN (' +
+              ','.join(A.literal(name) for name in names) + '))'
+              for table, names in SCOPED_IMMUTABILITY_GUARDS.items()]
+    return '(' + ' OR '.join((ordinary, *scoped)) + ')'
+
 
 def digest(value):
     return A.digest(value)
@@ -375,12 +392,12 @@ BEGIN
    FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_class c ON c.oid=t.tgrelid
    WHERE c.relnamespace='public'::regnamespace
      AND c.relname IN ({','.join(A.literal(n) for n in (*TARGETS,*LINKS))})
-     AND p.proname IN ({','.join(A.literal(name) for name in IMMUTABILITY_GUARDS)});
+     AND {immutable_guard_predicate()};
  FOR trigger IN SELECT t.tgname,t.tgrelid FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
    JOIN pg_class c ON c.oid=t.tgrelid
    WHERE c.relnamespace='public'::regnamespace
      AND c.relname IN ({','.join(A.literal(n) for n in (*TARGETS,*LINKS))})
-     AND p.proname IN ({','.join(A.literal(name) for name in IMMUTABILITY_GUARDS)}) LOOP
+     AND {immutable_guard_predicate()} LOOP
   EXECUTE format('ALTER TABLE %s DISABLE TRIGGER %I',trigger.tgrelid::regclass,trigger.tgname);
  END LOOP;
  {deletes}
