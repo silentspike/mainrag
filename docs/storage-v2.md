@@ -1759,6 +1759,14 @@ document with the existing BYTE representation after checking every term and
 frequency. Readers see each switch atomically. Source, materialization,
 generation, membership and posting-seal identities remain unchanged.
 
+Posting conversion preserves both established tokenizer epochs. Original
+SQL034 postings included punctuation-only tokens delimited by whitespace;
+later constructors omitted those tokens. The verified retained pairs select
+the complete original or modern grammar. Every term, frequency, token count
+and UTF-8 locator must still match the canonical document. This does not
+permit arbitrary retained extras or alter the ordinary constructor's grammar.
+The tokenization passes are reused without another canonical parse.
+
 Both converters require the local administrative operator, prearmed statement
 and lock deadlines, bounded input and an idle writer boundary. An explicitly
 named inert building run may remain only when its run and generation metadata

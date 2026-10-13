@@ -544,6 +544,7 @@ jobs:
               'eval.storage_v2.schema.test_native_gc.NativeGcTests',
               'eval.storage_v2.schema.test_active_source_metrics.ActiveSourceMetricsTests',
               'eval.storage_v2.schema.test_active_explore.ActiveExploreTests',
+              'eval.storage_v2.schema.test_retained_posting_tokenizer_parity.RetainedPostingTokenizerParityTests',
           ]
           shard = int(os.environ['SCHEMA_SHARD'])
           assert shard in (0, 1), 'Expected one of the two declared schema shards'
