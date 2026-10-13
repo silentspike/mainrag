@@ -181,7 +181,9 @@ async fn check_if_binary(
     if !valid_utf8_stream_chunk(&mut trailing, header) {
         return Ok(true);
     }
-    let mut chunk = [0_u8; 64 * 1024];
+    // This buffer survives read().await. Keep it off the adapter future's inline
+    // state so concrete canonical callers do not enlarge every parent future.
+    let mut chunk = vec![0_u8; 64 * 1024];
     loop {
         let read = file.read(&mut chunk).await?;
         if read == 0 {
@@ -1075,5 +1077,16 @@ mod tests {
             std::str::from_utf8(&content[range.start as usize..range.end as usize])
                 .expect("each range is valid UTF-8");
         }
+    }
+    #[test]
+    fn filesystem_validation_future_has_bounded_inline_state() {
+        let plugin = FilesystemPlugin::new();
+        // Construct only: this does not open the fixture path or poll any I/O.
+        let future = plugin.observe_with_validation("/fixture-not-opened", false, true);
+        let bytes = std::mem::size_of_val(&future);
+        assert!(
+            bytes < 16 * 1024,
+            "filesystem observation future has {bytes} inline bytes"
+        );
     }
 }

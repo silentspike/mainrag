@@ -1046,7 +1046,7 @@ pub async fn run_public_shadow_slice<C>(
 where
     C: GenericClient + Sync,
 {
-    run_storage_v2_slice(
+    Box::pin(run_storage_v2_slice(
         client,
         source_id,
         source_type,
@@ -1060,7 +1060,7 @@ where
         None,
         None,
         None,
-    )
+    ))
     .await
 }
 
@@ -1079,7 +1079,7 @@ pub async fn run_release_candidate_build<C>(
 where
     C: GenericClient + Sync,
 {
-    run_storage_v2_slice(
+    Box::pin(run_storage_v2_slice(
         client,
         source_id,
         source_type,
@@ -1093,7 +1093,7 @@ where
         None,
         None,
         None,
-    )
+    ))
     .await
 }
 
@@ -1110,7 +1110,7 @@ pub async fn run_active_source_build_checkpointed(
     commit_sha: &str,
     progress: Option<&super::build_progress::BuildProgressRecorder>,
 ) -> Result<ShadowSliceResult> {
-    run_storage_v2_slice(
+    Box::pin(run_storage_v2_slice(
         session.client(),
         source_id,
         source_type,
@@ -1124,7 +1124,7 @@ pub async fn run_active_source_build_checkpointed(
         None,
         progress,
         Some(session),
-    )
+    ))
     .await
 }
 
@@ -1173,7 +1173,7 @@ pub async fn run_release_candidate_build_with_progress_pinned<C>(
 where
     C: GenericClient + Sync,
 {
-    run_storage_v2_slice(
+    Box::pin(run_storage_v2_slice(
         client,
         source_id,
         source_type,
@@ -1187,7 +1187,7 @@ where
         expected_source_watermark_sha256,
         progress,
         None,
-    )
+    ))
     .await
 }
 
@@ -1204,7 +1204,7 @@ pub async fn run_release_candidate_build_checkpointed(
     expected_source_watermark_sha256: Option<&str>,
     progress: Option<&super::build_progress::BuildProgressRecorder>,
 ) -> Result<ShadowSliceResult> {
-    run_storage_v2_slice(
+    Box::pin(run_storage_v2_slice(
         session.client(),
         source_id,
         source_type,
@@ -1218,7 +1218,7 @@ pub async fn run_release_candidate_build_checkpointed(
         expected_source_watermark_sha256,
         progress,
         Some(session),
-    )
+    ))
     .await
 }
 
@@ -5479,5 +5479,65 @@ mod tests {
             storage_v2: vec![],
         };
         assert!(canonical_query_set_hash(&[mismatch]).is_err());
+    }
+    #[test]
+    fn source_build_futures_keep_large_state_off_caller_stacks() {
+        // Infer each returned future's type without constructing a Client,
+        // session, runtime or database connection and without polling a build.
+        fn future_bytes<T, F>(_: impl FnOnce(T) -> F) -> usize {
+            std::mem::size_of::<F>()
+        }
+        const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let root = Path::new("/fixture-not-opened");
+        let public = future_bytes(|client: &'static tokio_postgres::Client| {
+            run_public_shadow_slice(client, 7, "fs", root, root, 4096, COMMIT)
+        });
+        let release = future_bytes(|client: &'static tokio_postgres::Client| {
+            run_release_candidate_build(client, 7, "managed_append", root, root, 4096, COMMIT)
+        });
+        let progress = future_bytes(|client: &'static tokio_postgres::Client| {
+            run_release_candidate_build_with_progress(
+                client, 7, "fs", root, root, 4096, COMMIT, None,
+            )
+        });
+        let pinned = future_bytes(|client: &'static tokio_postgres::Client| {
+            run_release_candidate_build_with_progress_pinned(
+                client, 7, "fs", root, root, 4096, COMMIT, None, None, None,
+            )
+        });
+        let active = future_bytes(
+            |session: &'static crate::db::build_checkpoint::BuildCheckpointSession| {
+                run_active_source_build_checkpointed(
+                    session, 7, "fs", root, root, 4096, COMMIT, None,
+                )
+            },
+        );
+        let checkpointed = future_bytes(
+            |session: &'static crate::db::build_checkpoint::BuildCheckpointSession| {
+                run_release_candidate_build_checkpointed(
+                    session, 7, "fs", root, root, 4096, COMMIT, None, None, None,
+                )
+            },
+        );
+        for (name, bytes) in [
+            ("public", public),
+            ("release", release),
+            ("progress", progress),
+            ("pinned", pinned),
+            ("active", active),
+            ("checkpointed", checkpointed),
+        ] {
+            assert!(
+                bytes < 16 * 1024,
+                "{name} wrapper future has {bytes} inline bytes"
+            );
+        }
+        let mut files = Vec::new();
+        let canonical = canonical_fixture_hash_validated(&mut files, None, None);
+        let bytes = std::mem::size_of_val(&canonical);
+        assert!(
+            bytes < 16 * 1024,
+            "canonical hash future has {bytes} inline bytes"
+        );
     }
 }
