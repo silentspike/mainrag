@@ -331,11 +331,13 @@ impl ReadCut {
 
     /// Same kernel-read-only cut and the same protected current selection.
     /// A later current descriptor must not silently redirect a resumed build.
+    #[cfg(feature = "storage-v2-shadow-ingest")]
     pub fn validate_current(&self, registered: &Path) -> Result<()> {
         let current = Self::select(registered)?;
         self.require_same_selection(&current)
     }
 
+    #[cfg(any(feature = "storage-v2-shadow-ingest", test))]
     fn require_same_selection(&self, current: &Self) -> Result<()> {
         ensure!(
             self.proof == current.proof
