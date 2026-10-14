@@ -3,11 +3,13 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -78,6 +80,14 @@ pub struct BuildProgress {
     pub status: String,
     pub staged_items: usize,
     pub planned_items: Option<usize>,
+    /// Scanned source candidates, including later exclusions; never staged/committed.
+    #[serde(default)]
+    pub observed_items: usize,
+    #[serde(default)]
+    pub observed_bytes: u64,
+    /// Durable rows observed before this attempt, not additive to committed_items.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_committed_items: Option<usize>,
     pub run_id: Option<i64>,
     pub generation_id: Option<i64>,
     pub db_staging_round_trips: u64,
@@ -87,7 +97,11 @@ pub struct BuildProgress {
     #[serde(default)]
     pub lexical_preparation_ms: f64,
     pub elapsed_seconds: f64,
+    /// Last persisted work observation; reading a clock does not refresh work.
     pub observed_at_unix_ms: u128,
+    /// Read time of the exact live recorder's monotonic clock, never a worker heartbeat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_elapsed_observed_at_unix_ms: Option<u128>,
     pub transaction_committed: bool,
     #[serde(default)]
     pub committed_items: usize,
@@ -103,8 +117,25 @@ struct Inner {
 
 pub struct BuildProgressRecorder {
     path: PathBuf,
-    started: Instant,
+    clock: Arc<AttemptClock>,
     inner: Mutex<Inner>,
+}
+
+struct AttemptClock {
+    started: Instant,
+    source_id: i64,
+    commit_sha: String,
+    attempt_id: Uuid,
+    server_instance_id: Uuid,
+    active: AtomicBool,
+}
+
+// A file from another server/boot has no live clock. Weak entries cannot keep
+// abandoned attempts alive or infer that an unresolved writer has stopped.
+static LIVE_CLOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<AttemptClock>>>> = OnceLock::new();
+
+fn live_clocks() -> &'static Mutex<HashMap<PathBuf, Weak<AttemptClock>>> {
+    LIVE_CLOCKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn directory(root: &Path, create: bool) -> Result<PathBuf> {
@@ -142,6 +173,7 @@ impl BuildProgressRecorder {
             bail!("exact build progress identity required");
         }
         let path = directory(root, true)?.join(format!("{attempt}.json"));
+        let started = Instant::now();
         let value = BuildProgress {
             schema_version: "mainrag.storage-v2.build-progress.v1".into(),
             attempt_id: attempt,
@@ -153,6 +185,9 @@ impl BuildProgressRecorder {
             status: "running".into(),
             staged_items: 0,
             planned_items: None,
+            observed_items: 0,
+            observed_bytes: 0,
+            retained_committed_items: None,
             run_id: None,
             generation_id: None,
             db_staging_round_trips: 0,
@@ -161,6 +196,7 @@ impl BuildProgressRecorder {
             lexical_preparation_ms: 0.0,
             elapsed_seconds: 0.0,
             observed_at_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+            live_elapsed_observed_at_unix_ms: None,
             transaction_committed: false,
             committed_items: 0,
             failure: None,
@@ -176,20 +212,31 @@ impl BuildProgressRecorder {
         output.write_all(b"\n")?;
         output.sync_all()?;
         File::open(path.parent().context("progress parent missing")?)?.sync_all()?;
-        let now = Instant::now();
+        let clock = Arc::new(AttemptClock {
+            started,
+            source_id,
+            commit_sha: commit.into(),
+            attempt_id: attempt,
+            server_instance_id: instance,
+            active: AtomicBool::new(true),
+        });
+        live_clocks()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("live progress clock lock poisoned"))?
+            .insert(path.clone(), Arc::downgrade(&clock));
         Ok(Self {
             path,
-            started: now,
+            clock,
             inner: Mutex::new(Inner {
                 value,
-                persisted_at: now,
+                persisted_at: Instant::now(),
                 persisted_items: 0,
             }),
         })
     }
 
     fn persist(&self, inner: &mut Inner) -> Result<()> {
-        inner.value.elapsed_seconds = self.started.elapsed().as_secs_f64();
+        inner.value.elapsed_seconds = self.clock.started.elapsed().as_secs_f64();
         inner.value.observed_at_unix_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
         let temporary = self.path.with_extension(format!("{}.tmp", Uuid::new_v4()));
         let result = (|| -> Result<()> {
@@ -234,6 +281,69 @@ impl BuildProgressRecorder {
             inner.value.generation_id = Some(generation);
         }
         self.persist(&mut inner)
+    }
+
+    /// Call only after the caller validates the retained run's exact witness and
+    /// reads its durable rows. This is a baseline, not work by the new attempt.
+    pub fn observation_baseline(
+        &self,
+        run_id: i64,
+        generation_id: i64,
+        committed_items: usize,
+        planned_items: Option<usize>,
+    ) -> Result<()> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("progress lock poisoned"))?;
+        if inner.value.status != "running"
+            || inner.value.phase != "source_observation"
+            || run_id <= 0
+            || generation_id <= 0
+            || planned_items.is_some_and(|planned| committed_items > planned)
+            || inner.value.run_id.is_some_and(|run| run != run_id)
+            || inner
+                .value
+                .generation_id
+                .is_some_and(|generation| generation != generation_id)
+            || inner
+                .value
+                .retained_committed_items
+                .is_some_and(|retained| retained != committed_items)
+            || inner
+                .value
+                .planned_items
+                .is_some_and(|planned| Some(planned) != planned_items)
+        {
+            bail!("retained observation baseline conflicts with the exact attempt");
+        }
+        inner.value.run_id = Some(run_id);
+        inner.value.generation_id = Some(generation_id);
+        inner.value.retained_committed_items = Some(committed_items);
+        inner.value.planned_items = planned_items;
+        self.persist(&mut inner)
+    }
+
+    /// Actual scanned candidates, independent of the accepted plan/stage/commit counts.
+    pub fn observation_progress(&self, observed_items: usize, observed_bytes: u64) -> Result<()> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("progress lock poisoned"))?;
+        if inner.value.status != "running"
+            || inner.value.phase != "source_observation"
+            || observed_items < inner.value.observed_items
+            || observed_bytes < inner.value.observed_bytes
+        {
+            bail!("source observation counters reverse or no longer belong to running observation");
+        }
+        let first = inner.value.observed_items == 0 && observed_items > 0;
+        inner.value.observed_items = observed_items;
+        inner.value.observed_bytes = observed_bytes;
+        if first || inner.persisted_at.elapsed() >= Duration::from_secs(30) {
+            self.persist(&mut inner)?;
+        }
+        Ok(())
     }
 
     pub fn advance(
@@ -297,6 +407,7 @@ impl BuildProgressRecorder {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("progress lock poisoned"))?;
+        self.clock.active.store(false, Ordering::Release);
         inner.value.transaction_committed = committed;
         if committed {
             inner.value.committed_items = inner.value.staged_items;
@@ -319,10 +430,19 @@ impl BuildProgressRecorder {
 
 impl Drop for BuildProgressRecorder {
     fn drop(&mut self) {
+        self.clock.active.store(false, Ordering::Release);
         if let Ok(mut inner) = self.inner.lock() {
             if inner.value.status == "running" {
                 inner.value.status = "interrupted_requires_reconciliation".into();
                 let _ = self.persist(&mut inner);
+            }
+        }
+        if let Ok(mut clocks) = live_clocks().lock() {
+            if clocks
+                .get(&self.path)
+                .is_some_and(|clock| Weak::ptr_eq(clock, &Arc::downgrade(&self.clock)))
+            {
+                clocks.remove(&self.path);
             }
         }
     }
@@ -333,12 +453,12 @@ pub fn read(root: &Path, source_id: i64, commit: &str, attempt: Uuid) -> Result<
     let input = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
+        .open(&path)?;
     let metadata = input.metadata()?;
     if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 || metadata.len() > 16384 {
         bail!("private bounded progress record required");
     }
-    let value: BuildProgress = serde_json::from_reader(input)?;
+    let mut value: BuildProgress = serde_json::from_reader(input)?;
     if value.schema_version != "mainrag.storage-v2.build-progress.v1"
         || value.source_id != source_id
         || value.commit_sha != commit
@@ -346,12 +466,137 @@ pub fn read(root: &Path, source_id: i64, commit: &str, attempt: Uuid) -> Result<
     {
         bail!("build progress identity differs");
     }
+    // Refresh only an exact running recorder in THIS process. Terminal records,
+    // legacy files, failed work and records from another server remain frozen.
+    if value.status == "running" && !value.transaction_committed && value.failure.is_none() {
+        let clock = live_clocks()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("live progress clock lock poisoned"))?
+            .get(&path)
+            .and_then(Weak::upgrade);
+        if let Some(clock) = clock.filter(|clock| {
+            clock.active.load(Ordering::Acquire)
+                && clock.source_id == value.source_id
+                && clock.commit_sha == value.commit_sha
+                && clock.attempt_id == value.attempt_id
+                && clock.server_instance_id == value.server_instance_id
+                && value.pid == std::process::id()
+        }) {
+            value.elapsed_seconds = value
+                .elapsed_seconds
+                .max(clock.started.elapsed().as_secs_f64());
+            value.live_elapsed_observed_at_unix_ms =
+                Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis());
+        }
+    }
     Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_elapsed_read_preserves_persisted_work_and_terminal_records() -> Result<()> {
+        for committed in [false, true] {
+            let temporary = tempfile::tempdir()?;
+            let root = temporary.path();
+            let attempt = Uuid::new_v4();
+            let commit = "a".repeat(40);
+            let progress =
+                BuildProgressRecorder::create(root, 7, &commit, Uuid::new_v4(), attempt)?;
+            let stored = fs::read(&progress.path)?;
+            let original: BuildProgress = serde_json::from_slice(&stored)?;
+            let live = read(root, 7, &commit, attempt)?;
+            assert!(live.elapsed_seconds > original.elapsed_seconds);
+            assert!(live.live_elapsed_observed_at_unix_ms.is_some());
+            assert_eq!(live.observed_at_unix_ms, original.observed_at_unix_ms);
+            assert_eq!(live.phase, "source_observation");
+            assert_eq!(live.staged_items, 0);
+            assert_eq!(live.committed_items, 0);
+            assert_eq!(live.planned_items, None);
+            assert!(!live.transaction_committed);
+            assert_eq!(fs::read(&progress.path)?, stored);
+            progress.finish(committed)?;
+            let finished = fs::read(&progress.path)?;
+            let terminal = read(root, 7, &commit, attempt)?;
+            assert!(terminal.live_elapsed_observed_at_unix_ms.is_none());
+            let reopened = read(root, 7, &commit, attempt)?;
+            assert_eq!(terminal.elapsed_seconds, reopened.elapsed_seconds);
+            assert_eq!(terminal.observed_at_unix_ms, reopened.observed_at_unix_ms);
+            assert_eq!(fs::read(&progress.path)?, finished);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn other_server_and_legacy_records_do_not_borrow_a_live_clock() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path();
+        let attempt = Uuid::new_v4();
+        let commit = "a".repeat(40);
+        let progress = BuildProgressRecorder::create(root, 7, &commit, Uuid::new_v4(), attempt)?;
+        let mut value = read(root, 7, &commit, attempt)?;
+        value.server_instance_id = Uuid::new_v4();
+        value.elapsed_seconds = 123.0;
+        value.live_elapsed_observed_at_unix_ms = None;
+        let mut legacy = serde_json::to_value(value)?;
+        for name in [
+            "live_elapsed_observed_at_unix_ms",
+            "observed_items",
+            "observed_bytes",
+            "retained_committed_items",
+        ] {
+            legacy.as_object_mut().unwrap().remove(name);
+        }
+        fs::write(&progress.path, serde_json::to_vec(&legacy)?)?;
+        let reopened = read(root, 7, &commit, attempt)?;
+        assert_eq!(reopened.elapsed_seconds, 123.0);
+        assert!(reopened.live_elapsed_observed_at_unix_ms.is_none());
+        assert_eq!(reopened.observed_items, 0);
+        assert_eq!(reopened.observed_bytes, 0);
+        assert_eq!(reopened.retained_committed_items, None);
+        Ok(())
+    }
+
+    #[test]
+    fn source_observation_keeps_retained_and_new_work_separate() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path();
+        let attempt = Uuid::new_v4();
+        let commit = "a".repeat(40);
+        let progress = BuildProgressRecorder::create(root, 7, &commit, Uuid::new_v4(), attempt)?;
+        progress.observation_baseline(11, 12, 64, Some(100))?;
+        progress.observation_progress(8, 4096)?;
+        let value = read(root, 7, &commit, attempt)?;
+        assert_eq!(value.run_id, Some(11));
+        assert_eq!(value.generation_id, Some(12));
+        assert_eq!(value.retained_committed_items, Some(64));
+        assert_eq!(value.observed_items, 8);
+        assert_eq!(value.observed_bytes, 4096);
+        assert_eq!(value.staged_items, 0);
+        assert_eq!(value.committed_items, 0);
+        assert!(!value.transaction_committed);
+        assert!(progress
+            .observation_baseline(11, 12, 65, Some(100))
+            .is_err());
+        assert!(progress
+            .observation_baseline(11, 13, 64, Some(100))
+            .is_err());
+        assert!(progress.observation_baseline(11, 12, 64, Some(63)).is_err());
+        assert!(progress.observation_progress(7, 4096).is_err());
+        assert!(progress.observation_progress(9, 4095).is_err());
+        // Scanned candidates can include excluded input and exceed the accepted plan.
+        progress.observation_progress(101, 8192)?;
+        progress.phase("content_store", Some(100), None)?;
+        let complete = read(root, 7, &commit, attempt)?;
+        assert_eq!(complete.observed_items, 101);
+        assert_eq!(complete.staged_items, 0);
+        assert_eq!(complete.committed_items, 0);
+        progress.finish(false)?;
+        assert!(progress.observation_progress(101, 8192).is_err());
+        Ok(())
+    }
+
     #[test]
     fn attempt_progress_survives_reopen_without_claiming_commit() -> Result<()> {
         let temporary = tempfile::tempdir()?;

@@ -28,6 +28,19 @@ def validate_observation(value: dict, source_id: int, commit: str, attempt: str)
     if type(committed) is not int or not 0 <= committed <= staged \
             or (value["transaction_committed"] and committed != staged):
         raise ValueError("committed progress is inconsistent")
+    observed = value.get("observed_items", 0)
+    observed_bytes = value.get("observed_bytes", 0)
+    retained = value.get("retained_committed_items")
+    if type(observed) is not int or observed < 0 \
+            or type(observed_bytes) is not int or observed_bytes < 0 \
+            or (retained is not None and (type(retained) is not int or retained < 0
+                or (planned is not None and retained > planned))):
+        raise ValueError("source observation or retained baseline is invalid")
+    live_observed = value.get("live_elapsed_observed_at_unix_ms")
+    if live_observed is not None and (type(live_observed) is not int or live_observed < 0
+            or value.get("status") != "running" or value["transaction_committed"]
+            or value.get("failure") is not None):
+        raise ValueError("live elapsed clock cannot refresh terminal or failed work")
     for key in ("elapsed_seconds", "db_staging_ms"):
         number = value.get(key)
         if type(number) not in (int, float) or not math.isfinite(number) or number < 0:
@@ -39,10 +52,12 @@ def monitored_build(arguments, token: str, request, write, *, interval: float = 
     if path.exists() or path.is_symlink():
         raise RuntimeError("build progress attempt exists; reconcile before another write")
     attempt = str(uuid.uuid4())
+    started = time.monotonic()
     state = {"schema_version": "mainrag.storage-v2.build-monitor.v1",
              "attempt_id": attempt, "source_id": arguments.source_id,
              "commit_sha": arguments.commit_sha, "status": "starting",
-             "observed_at_unix": int(time.time()), "progress": None}
+             "observed_at_unix": int(time.time()), "request_elapsed_seconds": 0.0,
+             "progress": None}
     write(path, state, replace=False)
     endpoint = f"/api/v1/admin/sources/{arguments.source_id}/storage-v2-release-candidate"
     body = {"commit_sha": arguments.commit_sha, "progress_id": attempt}
@@ -66,7 +81,8 @@ def monitored_build(arguments, token: str, request, write, *, interval: float = 
             state["progress"] = observation
         except (OSError, RuntimeError, ValueError):
             pass
-        state.update(status="request_failed_requires_reconciliation", observed_at_unix=int(time.time()))
+        state.update(status="request_failed_requires_reconciliation", observed_at_unix=int(time.time()),
+                     request_elapsed_seconds=time.monotonic() - started)
         write(path, state)
 
     invalid = False
@@ -96,7 +112,14 @@ def monitored_build(arguments, token: str, request, write, *, interval: float = 
                     state.update(status="observed", progress=observation)
                     print(json.dumps({"phase": observation["phase"],
                         "staged_items": observation["staged_items"], "planned_items": observation["planned_items"],
+                        "observed_items": observation.get("observed_items", 0),
+                        "observed_bytes": observation.get("observed_bytes", 0),
+                        "retained_committed_items": observation.get("retained_committed_items"),
+                        "committed_items": observation.get("committed_items", 0),
                         "elapsed_seconds": observation["elapsed_seconds"],
+                        "request_elapsed_seconds": time.monotonic() - started,
+                        "live_elapsed_observed_at_unix_ms": observation.get("live_elapsed_observed_at_unix_ms"),
+                        "observed_at_unix_ms": observation.get("observed_at_unix_ms"),
                         "transaction_committed": observation["transaction_committed"]}), flush=True)
                 except ValueError:
                     invalid = True
@@ -104,12 +127,14 @@ def monitored_build(arguments, token: str, request, write, *, interval: float = 
                 except (OSError, RuntimeError):
                     state["status"] = "progress_unavailable_writer_unresolved"
                 state["observed_at_unix"] = int(time.time())
+                state["request_elapsed_seconds"] = time.monotonic() - started
                 write(path, state)
             except BaseException:
                 record_request_failure()
                 raise
     state.update(status="response_received" if not invalid else "identity_error_requires_reconciliation",
                  observed_at_unix=int(time.time()), generation_id=result.get("generation_id"),
+                 request_elapsed_seconds=time.monotonic() - started,
                  committed_items=result.get("item_count"), transaction_committed=True)
     write(path, state)
     if invalid:
