@@ -135,7 +135,7 @@ impl From<plugins::RawFile> for SliceFile {
             source_path: file.source_path,
             source_range: file.source_range,
             content_sha256: None,
-            logical_length: 0,
+            logical_length: file.size as u64,
             source_reads: ReadAccounting::default(),
         }
     }
@@ -1561,6 +1561,7 @@ where
         .transpose()?;
     let mut retained_checkpoint_items = None;
     let mut retained_cut_observation = None;
+    let mut retained_cut_items = BTreeMap::new();
     if let (Some(session), Some(filesystem)) = (checkpoints, &filesystem_hash_plugin) {
         if let Some(expected_run) = session.expected_run_id() {
             let retained = client
@@ -1604,6 +1605,17 @@ where
                         rows.len(),
                         Some(observation.item_count),
                     )?;
+                }
+                for row in &rows {
+                    let key: String = row.get("item_key");
+                    let digest: Vec<u8> = row.get("content_identity_sha256");
+                    let digest: [u8; 32] = digest.try_into().map_err(|_| {
+                        anyhow::anyhow!("retained source item has an invalid content digest")
+                    })?;
+                    let length = u64::try_from(row.get::<_, i64>("byte_length"))?;
+                    if retained_cut_items.insert(key, (digest, length)).is_some() {
+                        bail!("retained source checkpoint contains duplicate item identities");
+                    }
                 }
                 retained_checkpoint_items = Some(rows);
                 retained_cut_observation = Some(observation);
@@ -1663,8 +1675,23 @@ where
     }
     let mut discarded_source_read_bytes = 0_u64;
     let (fixture_sha256, input_bytes) = if let Some(scope) = &filesystem_hash_scope {
-        let (digest, bytes, discarded) =
-            canonical_filesystem_fixture_hash(&mut files, scope, progress).await?;
+        let (digest, bytes, discarded) = if let Some(retained) = &retained_cut_observation {
+            filesystem_hash_plugin
+                .as_ref()
+                .context("retained filesystem observation omitted its adapter")?
+                .revalidate_current_cut(source_path, &retained.cut)
+                .await?;
+            reuse_immutable_cut_observation(
+                &mut files,
+                scope,
+                retained,
+                &retained_cut_items,
+                progress,
+            )
+            .await?
+        } else {
+            canonical_filesystem_fixture_hash(&mut files, scope, progress).await?
+        };
         discarded_source_read_bytes = discarded;
         (digest, bytes)
     } else if managed_identity.is_some() {
@@ -3214,6 +3241,78 @@ async fn canonical_fixture_hash_validated(
     Ok((hex::encode(digest.finalize()), input_bytes, excluded))
 }
 
+/// Resume only after the protected selection and kernel read-only identity have
+/// been revalidated. The original complete ordered-byte digest remains the
+/// source witness; checkpoint digests are not composed into a replacement hash.
+/// Uncommitted items still undergo the ordinary UTF-8/NUL validation and hashing.
+async fn reuse_immutable_cut_observation(
+    files: &mut Vec<SliceFile>,
+    scope: &plugins::fs_scope::FilesystemScope,
+    retained: &plugins::fs_cut::CutObservation,
+    checkpoint: &BTreeMap<String, ([u8; 32], u64)>,
+    progress: Option<&super::build_progress::BuildProgressRecorder>,
+) -> Result<(String, u64, u64)> {
+    let mut completed = Vec::with_capacity(checkpoint.len());
+    let mut pending = Vec::new();
+    let mut completed_keys = BTreeSet::new();
+    for mut file in files.drain(..) {
+        if let Some(&(digest, length)) = checkpoint.get(&file.item_key) {
+            if file.logical_length != length || !completed_keys.insert(file.item_key.clone()) {
+                bail!("retained immutable source item layout differs from its checkpoint");
+            }
+            file.content_sha256 = Some(digest);
+            completed.push(file);
+        } else {
+            pending.push(file);
+        }
+    }
+    if completed_keys.len() != checkpoint.len() {
+        bail!("retained immutable source checkpoint item is absent from discovery");
+    }
+    // The digest of this subset has no whole-source meaning and is discarded.
+    // Do not validate partial fragment coverage until completed and pending
+    // items have been combined again.
+    let (_, _, excluded) =
+        canonical_fixture_hash_validated(&mut pending, Some(scope), None).await?;
+    if completed.iter().any(|file| {
+        file.source_path
+            .as_ref()
+            .is_some_and(|path| excluded.contains(path))
+    }) {
+        bail!("retained immutable file now contains a rejected source fragment");
+    }
+    let discarded = pending
+        .iter()
+        .filter(|file| {
+            file.source_path
+                .as_ref()
+                .is_some_and(|path| excluded.contains(path))
+        })
+        .try_fold(0_u64, |sum, file| {
+            sum.checked_add(file.source_reads.bytes())
+                .context("excluded source read counter overflow")
+        })?;
+    pending.retain(|file| {
+        !file
+            .source_path
+            .as_ref()
+            .is_some_and(|path| excluded.contains(path))
+    });
+    completed.extend(pending);
+    completed.sort_by(|left, right| left.item_key.cmp(&right.item_key));
+    validate_slice_layout(&completed)?;
+    let bytes = completed.iter().try_fold(0_u64, |sum, file| {
+        sum.checked_add(file.logical_length)
+            .context("source byte count overflow")
+    })?;
+    validate_retained_cut_manifest(retained, &retained.fixture_sha256, completed.len(), bytes)?;
+    if let Some(progress) = progress {
+        progress.observation_progress(completed.len(), bytes)?;
+    }
+    *files = completed;
+    Ok((retained.fixture_sha256.clone(), bytes, discarded))
+}
+
 fn validate_retained_cut_observation(
     witness: &serde_json::Value,
     adapter_profile: &str,
@@ -4508,6 +4607,189 @@ mod tests {
             &witness, profile, &commit, &changed, &watermark
         )
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn filesystem_cut_resume_reads_only_pending_items_and_keeps_the_original_digest() {
+        let directory = tempfile::tempdir().unwrap();
+        let whole = "retained é🙂\n".repeat(100);
+        let parts = ["first é🙂\n", "pending 甲\n"];
+        std::fs::write(directory.path().join("whole.txt"), &whole).unwrap();
+        std::fs::write(directory.path().join("parts.txt"), parts.concat()).unwrap();
+        std::fs::write(directory.path().join("bad.txt"), b"header\n\xff").unwrap();
+        let raw = |name: &str, size: usize, range| plugins::RawFile {
+            path: name.into(),
+            content: String::new(),
+            size,
+            language: Some("txt".into()),
+            last_modified: None,
+            source_path: Some(directory.path().join(name)),
+            source_range: range,
+        };
+        let boundary = parts[0].len() as u64;
+        let inputs = vec![
+            raw("whole.txt", whole.len(), None),
+            raw(
+                "parts.txt",
+                parts[0].len(),
+                Some(plugins::RawFileRange {
+                    start: 0,
+                    end: boundary,
+                }),
+            ),
+            raw(
+                "parts.txt",
+                parts[1].len(),
+                Some(plugins::RawFileRange {
+                    start: boundary,
+                    end: boundary + parts[1].len() as u64,
+                }),
+            ),
+            raw("bad.txt", 8, None),
+        ];
+        let scope =
+            plugins::fs_scope::FilesystemScope::from_config(&serde_json::Value::Null).unwrap();
+        let mut original = inputs
+            .clone()
+            .into_iter()
+            .map(SliceFile::from)
+            .collect::<Vec<_>>();
+        original.sort_by(|a, b| a.item_key.cmp(&b.item_key));
+        let (digest, bytes, _) = canonical_filesystem_fixture_hash(&mut original, &scope, None)
+            .await
+            .unwrap();
+        let retained = plugins::fs_cut::CutObservation {
+            cut: plugins::fs_cut::CutProof {
+                format: plugins::fs_cut::KIND.into(),
+                cut_id: Uuid::new_v4(),
+                source_root_sha256: "1".repeat(64),
+                descriptor_sha256: "2".repeat(64),
+                snapshot_uuid: Uuid::new_v4(),
+                origin_uuid: Uuid::new_v4(),
+                captured_at_unix: 1,
+            },
+            fixture_sha256: digest.clone(),
+            item_count: original.len(),
+            input_bytes: bytes,
+        };
+        let checkpoint = original
+            .iter()
+            .filter(|file| file.path == "whole.txt" || file.byte_start() == 0)
+            .map(|file| {
+                (
+                    file.item_key.clone(),
+                    (file.content_sha256.unwrap(), file.logical_length),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(checkpoint.len(), 2);
+        let mut resumed = inputs.into_iter().map(SliceFile::from).collect::<Vec<_>>();
+        let result =
+            reuse_immutable_cut_observation(&mut resumed, &scope, &retained, &checkpoint, None)
+                .await
+                .unwrap();
+        assert_eq!(result, (digest, bytes, 8));
+        assert_eq!(source_read_bytes(&resumed).unwrap(), parts[1].len() as u64);
+        for file in &resumed {
+            if checkpoint.contains_key(&file.item_key) {
+                assert_eq!(file.source_reads.bytes(), 0);
+            }
+        }
+        assert_eq!(
+            resumed
+                .iter()
+                .map(|file| (&file.item_key, file.content_sha256, file.logical_length))
+                .collect::<Vec<_>>(),
+            original
+                .iter()
+                .map(|file| (&file.item_key, file.content_sha256, file.logical_length))
+                .collect::<Vec<_>>()
+        );
+        let mut missing = checkpoint.clone();
+        missing.insert("absent.txt".into(), ([0; 32], 1));
+        let mut files = original
+            .iter()
+            .map(|file| {
+                SliceFile::from(raw(
+                    &file.path,
+                    file.logical_length as usize,
+                    file.source_range,
+                ))
+            })
+            .collect();
+        assert!(
+            reuse_immutable_cut_observation(&mut files, &scope, &retained, &missing, None)
+                .await
+                .is_err()
+        );
+        let mut changed = checkpoint;
+        changed.get_mut("whole.txt").unwrap().1 += 1;
+        let mut files = vec![SliceFile::from(raw("whole.txt", whole.len(), None))];
+        assert!(
+            reuse_immutable_cut_observation(&mut files, &scope, &retained, &changed, None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_cut_resume_rejects_invalid_pending_fragments_and_manifest_drift() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("parts.txt");
+        std::fs::write(&path, b"valid\n\xffbad").unwrap();
+        let raw = |start, end| plugins::RawFile {
+            path: "parts.txt".into(),
+            content: String::new(),
+            size: (end - start) as usize,
+            language: Some("txt".into()),
+            last_modified: None,
+            source_path: Some(path.clone()),
+            source_range: Some(plugins::RawFileRange { start, end }),
+        };
+        let first = SliceFile::from(raw(0, 6));
+        let checkpoint = BTreeMap::from([(
+            first.item_key.clone(),
+            (Sha256::digest(b"valid\n").into(), 6),
+        )]);
+        let retained = plugins::fs_cut::CutObservation {
+            cut: plugins::fs_cut::CutProof {
+                format: plugins::fs_cut::KIND.into(),
+                cut_id: Uuid::new_v4(),
+                source_root_sha256: "1".repeat(64),
+                descriptor_sha256: "2".repeat(64),
+                snapshot_uuid: Uuid::new_v4(),
+                origin_uuid: Uuid::new_v4(),
+                captured_at_unix: 1,
+            },
+            fixture_sha256: "3".repeat(64),
+            item_count: 2,
+            input_bytes: 10,
+        };
+        let scope =
+            plugins::fs_scope::FilesystemScope::from_config(&serde_json::Value::Null).unwrap();
+        let mut files = vec![first, SliceFile::from(raw(6, 10))];
+        assert!(
+            reuse_immutable_cut_observation(&mut files, &scope, &retained, &checkpoint, None)
+                .await
+                .is_err()
+        );
+        std::fs::write(&path, b"valid\ngood").unwrap();
+        let mut changed = retained.clone();
+        changed.item_count = 3;
+        let mut files = vec![SliceFile::from(raw(0, 6)), SliceFile::from(raw(6, 10))];
+        assert!(
+            reuse_immutable_cut_observation(&mut files, &scope, &changed, &checkpoint, None)
+                .await
+                .is_err()
+        );
+        let mut changed = retained;
+        changed.input_bytes = 11;
+        let mut files = vec![SliceFile::from(raw(0, 6)), SliceFile::from(raw(6, 10))];
+        assert!(
+            reuse_immutable_cut_observation(&mut files, &scope, &changed, &checkpoint, None)
+                .await
+                .is_err()
+        );
     }
 
     fn lexical_test_chunks(patterns: &[String]) -> Vec<Chunk> {

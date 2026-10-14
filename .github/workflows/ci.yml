@@ -183,6 +183,8 @@ jobs:
           python3 -c 'from pathlib import Path; assert "1 passed; 0 failed; 0 ignored;" in Path("source-file-tests.log").read_text(), "Expected complete fragment proof regression to execute"'
           cargo test -p mainrag-api --features storage-v2-retrieval --bin mainrag-api api::handlers::admin::fs_cut -- --nocapture | tee cut-config-tests.log
           python3 -c 'from pathlib import Path; assert "2 passed; 0 failed; 0 ignored;" in Path("cut-config-tests.log").read_text(), "Expected configuration CAS and retained-cut writer regressions to execute"'
+          cargo test -p mainrag-api --features storage-v2-retrieval --lib -- filesystem_cut_resume retained_cut_observation_requires_exact_source_and_producer_identity --nocapture | tee cut-resume-tests.log
+          python3 -c 'from pathlib import Path; assert "3 passed; 0 failed; 0 ignored;" in Path("cut-resume-tests.log").read_text(), "Expected retained producer/cut identity, pending-only byte reads and resume rejection regressions"'
       - name: Verify bounded filesystem and source build future state
         shell: bash
         run: |
