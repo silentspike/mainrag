@@ -328,6 +328,26 @@ impl ReadCut {
         );
         Ok(())
     }
+
+    /// Same kernel-read-only cut and the same protected current selection.
+    /// A later current descriptor must not silently redirect a resumed build.
+    #[cfg(feature = "storage-v2-shadow-ingest")]
+    pub fn validate_current(&self, registered: &Path) -> Result<()> {
+        let current = Self::select(registered)?;
+        self.require_same_selection(&current)
+    }
+
+    #[cfg(any(feature = "storage-v2-shadow-ingest", test))]
+    fn require_same_selection(&self, current: &Self) -> Result<()> {
+        ensure!(
+            self.proof == current.proof
+                && self.descriptor == current.descriptor
+                && self.snapshot_root == current.snapshot_root
+                && self.read_root == current.read_root,
+            "current filesystem cut differs from the pinned source observation"
+        );
+        Ok(())
+    }
 }
 
 /// Capture is a fixed root-owned helper, constrained by its reviewed policy.
@@ -442,6 +462,32 @@ mod tests {
                 uuid::Uuid::parse_str(value["origin_uuid"].as_str().unwrap()).unwrap(),
             ))
         })
+    }
+
+    #[test]
+    fn immutable_revalidation_requires_current_descriptor_and_all_cut_identities() {
+        let (_directory, root, registry, value) = fixture();
+        let pinned = select(&root, &registry, &value).unwrap();
+        let current = select(&root, &registry, &value).unwrap();
+        pinned.require_same_selection(&current).unwrap();
+        for field in ["cut", "descriptor", "snapshot", "origin", "read_root"] {
+            let mut changed = current.clone();
+            match field {
+                "cut" => changed.proof.cut_id = uuid::Uuid::new_v4(),
+                "descriptor" => changed.proof.descriptor_sha256 = "a".repeat(64),
+                "snapshot" => changed.proof.snapshot_uuid = uuid::Uuid::new_v4(),
+                "origin" => changed.proof.origin_uuid = uuid::Uuid::new_v4(),
+                "read_root" => changed.read_root = root.clone(),
+                _ => unreachable!(),
+            }
+            assert!(pinned.require_same_selection(&changed).is_err(), "{field}");
+        }
+        fs::write(
+            registry.join(format!("current-{}.json", pinned.proof.source_root_sha256)),
+            b"changed descriptor",
+        )
+        .unwrap();
+        assert!(select(&root, &registry, &value).is_err());
     }
 
     #[test]

@@ -1046,7 +1046,7 @@ pub async fn run_public_shadow_slice<C>(
 where
     C: GenericClient + Sync,
 {
-    run_storage_v2_slice(
+    Box::pin(run_storage_v2_slice(
         client,
         source_id,
         source_type,
@@ -1060,7 +1060,7 @@ where
         None,
         None,
         None,
-    )
+    ))
     .await
 }
 
@@ -1079,7 +1079,7 @@ pub async fn run_release_candidate_build<C>(
 where
     C: GenericClient + Sync,
 {
-    run_storage_v2_slice(
+    Box::pin(run_storage_v2_slice(
         client,
         source_id,
         source_type,
@@ -1093,7 +1093,7 @@ where
         None,
         None,
         None,
-    )
+    ))
     .await
 }
 
@@ -1110,7 +1110,7 @@ pub async fn run_active_source_build_checkpointed(
     commit_sha: &str,
     progress: Option<&super::build_progress::BuildProgressRecorder>,
 ) -> Result<ShadowSliceResult> {
-    run_storage_v2_slice(
+    Box::pin(run_storage_v2_slice(
         session.client(),
         source_id,
         source_type,
@@ -1124,7 +1124,7 @@ pub async fn run_active_source_build_checkpointed(
         None,
         progress,
         Some(session),
-    )
+    ))
     .await
 }
 
@@ -1173,7 +1173,7 @@ pub async fn run_release_candidate_build_with_progress_pinned<C>(
 where
     C: GenericClient + Sync,
 {
-    run_storage_v2_slice(
+    Box::pin(run_storage_v2_slice(
         client,
         source_id,
         source_type,
@@ -1187,7 +1187,7 @@ where
         expected_source_watermark_sha256,
         progress,
         None,
-    )
+    ))
     .await
 }
 
@@ -1204,7 +1204,7 @@ pub async fn run_release_candidate_build_checkpointed(
     expected_source_watermark_sha256: Option<&str>,
     progress: Option<&super::build_progress::BuildProgressRecorder>,
 ) -> Result<ShadowSliceResult> {
-    run_storage_v2_slice(
+    Box::pin(run_storage_v2_slice(
         session.client(),
         source_id,
         source_type,
@@ -1218,7 +1218,7 @@ pub async fn run_release_candidate_build_checkpointed(
         expected_source_watermark_sha256,
         progress,
         Some(session),
-    )
+    ))
     .await
 }
 
@@ -1548,6 +1548,68 @@ where
     });
     let plugin = plugins::get_configured_plugin(source_type, &source_config)?
         .ok_or_else(|| anyhow::anyhow!("source adapter is unavailable"))?;
+    // Keep the concrete FS adapter so the full canonical pass can validate its
+    // deferred text bytes, and the final boundary can inspect its exact cut.
+    let filesystem_hash_plugin = if mode == SliceMode::ReleaseCandidate && source_type == "fs" {
+        Some(plugins::fs::FilesystemPlugin::with_config(&source_config)?)
+    } else {
+        None
+    };
+    let filesystem_hash_scope = filesystem_hash_plugin
+        .as_ref()
+        .map(|_| plugins::fs_scope::FilesystemScope::from_config(&source_config))
+        .transpose()?;
+    let mut retained_checkpoint_items = None;
+    let mut retained_cut_observation = None;
+    if let (Some(session), Some(filesystem)) = (checkpoints, &filesystem_hash_plugin) {
+        if let Some(expected_run) = session.expected_run_id() {
+            let retained = client
+                .query_one(
+                    "SELECT run.source_id,run.generation_id,run.adapter_profile_id,run.status, \
+                        run.semantic_manifest_sha256,generation.witness \
+                 FROM storage_v2_ingest_run run \
+                 JOIN source_generation generation ON generation.id=run.generation_id \
+                 WHERE run.id=$1 AND generation.source_id=run.source_id",
+                    &[&expected_run],
+                )
+                .await?;
+            if retained.get::<_, i64>("source_id") != source_id
+                || retained.get::<_, String>("adapter_profile_id") != adapter_profile
+                || !matches!(
+                    retained.get::<_, String>("status").as_str(),
+                    "building" | "sealed"
+                )
+            {
+                bail!("retained run differs from the requested source and adapter");
+            }
+            let current_cut = filesystem.selected_cut(source_path).await?;
+            if let Some(current_cut) = current_cut {
+                let witness: serde_json::Value = retained.get("witness");
+                let observation = validate_retained_cut_observation(
+                    &witness,
+                    &adapter_profile,
+                    commit_sha,
+                    &current_cut,
+                    &retained.get::<_, String>("semantic_manifest_sha256"),
+                )?;
+                let rows = client.query(
+                    "SELECT source_item.item_key,item.content_identity_sha256,item.byte_length \
+                     FROM storage_v2_ingest_run_item item \
+                     JOIN source_item ON source_item.id=item.source_item_id WHERE item.run_id=$1",
+                    &[&expected_run]).await?;
+                if let Some(progress) = progress {
+                    progress.observation_baseline(
+                        expected_run,
+                        retained.get("generation_id"),
+                        rows.len(),
+                        Some(observation.item_count),
+                    )?;
+                }
+                retained_checkpoint_items = Some(rows);
+                retained_cut_observation = Some(observation);
+            }
+        }
+    }
     let (observed_sync, managed_identity) = if source_type == "managed_append" {
         let snapshot = plugins::managed_append::read_snapshot(
             source_path,
@@ -1560,12 +1622,18 @@ where
             Some((snapshot.epoch, snapshot.chain, snapshot.identities)),
         )
     } else {
-        let observed = match mode {
-            SliceMode::PublicFixture => plugin.sync_observed(source_path).await?,
-            SliceMode::ReleaseCandidate => {
-                plugin
-                    .sync_for_storage_v2_snapshot_observed(source_path, git_snapshot_commit_sha)
-                    .await?
+        let observed = if let Some(filesystem) = &filesystem_hash_plugin {
+            filesystem
+                .sync_for_canonical_hash_observed(source_path)
+                .await?
+        } else {
+            match mode {
+                SliceMode::PublicFixture => plugin.sync_observed(source_path).await?,
+                SliceMode::ReleaseCandidate => {
+                    plugin
+                        .sync_for_storage_v2_snapshot_observed(source_path, git_snapshot_commit_sha)
+                        .await?
+                }
             }
         };
         (observed, None)
@@ -1590,12 +1658,23 @@ where
         }
     }
     files.sort_by(|left, right| left.item_key.cmp(&right.item_key));
-    validate_slice_layout(&files)?;
-    let (fixture_sha256, input_bytes) = if managed_identity.is_some() {
+    if filesystem_hash_scope.is_none() {
+        validate_slice_layout(&files)?;
+    }
+    let mut discarded_source_read_bytes = 0_u64;
+    let (fixture_sha256, input_bytes) = if let Some(scope) = &filesystem_hash_scope {
+        let (digest, bytes, discarded) =
+            canonical_filesystem_fixture_hash(&mut files, scope, progress).await?;
+        discarded_source_read_bytes = discarded;
+        (digest, bytes)
+    } else if managed_identity.is_some() {
         managed_fixture_hash(&files)?
     } else {
         canonical_fixture_hash(&mut files).await?
     };
+    if let Some(retained) = &retained_cut_observation {
+        validate_retained_cut_manifest(retained, &fixture_sha256, files.len(), input_bytes)?;
+    }
     if let Some(progress) = progress {
         progress.phase("content_store", Some(files.len()), None)?;
     }
@@ -1626,8 +1705,10 @@ where
         SliceMode::PublicFixture => "public-fixture",
         SliceMode::ReleaseCandidate => "release-candidate-build",
     };
-    let filesystem_cut = plugin
-        .filesystem_cut()
+    let filesystem_cut = filesystem_hash_plugin
+        .as_ref()
+        .and_then(|filesystem| plugins::SourcePlugin::filesystem_cut(filesystem))
+        .or_else(|| plugin.filesystem_cut())
         .map(|cut| plugins::fs_cut::CutObservation {
             cut,
             fixture_sha256: fixture_sha256.clone(),
@@ -1777,7 +1858,9 @@ where
         measurements.reused_views = reused_items;
         measurements.reused_analysis = reused_items;
         measurements.reused_generation = 1;
-        measurements.deferred_source_read_bytes = source_read_bytes(&files)?;
+        measurements.deferred_source_read_bytes = source_read_bytes(&files)?
+            .checked_add(discarded_source_read_bytes)
+            .context("source read counter overflow")?;
         measurements.record_stage(
             ShadowIngestStage::DatabaseStage,
             reuse_lookup_started.elapsed(),
@@ -1830,15 +1913,19 @@ where
             .iter()
             .map(|file| (file.item_key.as_str(), file))
             .collect::<BTreeMap<_, _>>();
-        for row in client
-            .query(
-                "SELECT source_item.item_key,item.content_identity_sha256,item.byte_length \
+        let checkpoint_rows = if let Some(rows) = retained_checkpoint_items {
+            rows
+        } else {
+            client
+                .query(
+                    "SELECT source_item.item_key,item.content_identity_sha256,item.byte_length \
              FROM storage_v2_ingest_run_item item \
              JOIN source_item ON source_item.id=item.source_item_id WHERE item.run_id=$1",
-                &[&run.id],
-            )
-            .await?
-        {
+                    &[&run.id],
+                )
+                .await?
+        };
+        for row in checkpoint_rows {
             let key: String = row.get("item_key");
             let file = observed
                 .get(key.as_str())
@@ -2559,63 +2646,94 @@ where
             bail!("registered source scope changed before sealing");
         }
     }
-    let (final_observed_sync, final_managed_identities) = if source_type == "managed_append" {
-        let snapshot = plugins::managed_append::read_snapshot(
-            source_path,
-            trusted_prefix.as_ref(),
-            managed_full_comparison,
-        )
-        .await?;
-        if managed_identity
-            .as_ref()
-            .is_none_or(|(epoch, chain, _)| epoch != &snapshot.epoch || chain != &snapshot.chain)
-        {
-            bail!("managed append manifest changed before sealing");
-        }
-        (snapshot.observed, Some(snapshot.identities))
-    } else {
-        let observed = match mode {
-            SliceMode::PublicFixture => plugin.sync_observed(source_path).await?,
-            SliceMode::ReleaseCandidate => {
-                plugin
-                    .sync_for_storage_v2_snapshot_observed(source_path, git_snapshot_commit_sha)
-                    .await?
-            }
-        };
-        (observed, None)
-    };
-    let final_adapter_read_bytes = final_observed_sync.application_read_bytes;
-    let final_sync = final_observed_sync.result;
-    if !final_sync.errors.is_empty() {
-        bail!("source adapter returned errors during the final watermark check");
-    }
-    let mut final_files = final_sync
-        .files
-        .into_iter()
-        .map(SliceFile::from)
-        .collect::<Vec<_>>();
-    if let Some(identities) = &final_managed_identities {
-        if final_files.len() != identities.len() {
-            bail!("managed append segment count changed before sealing");
-        }
-        for (file, identity) in final_files.iter_mut().zip(identities) {
-            file.content_sha256 = Some(identity.sha256);
-            file.logical_length = identity.bytes;
-        }
-    }
-    final_files.sort_by(|left, right| left.item_key.cmp(&right.item_key));
-    validate_slice_layout(&final_files)?;
-    let (final_fixture_sha256, final_input_bytes) = if final_managed_identities.is_some() {
-        managed_fixture_hash(&final_files)?
-    } else {
-        canonical_fixture_hash(&mut final_files).await?
-    };
-    if final_fixture_sha256 != fixture_sha256
-        || final_input_bytes != measurements.input_bytes
-        || final_files.len() != files.len()
+    let (final_files, final_adapter_read_bytes) = if let (Some(filesystem), Some(cut)) =
+        (&filesystem_hash_plugin, &filesystem_cut)
     {
-        bail!("source drifted before the candidate generation could be sealed");
-    }
+        // The initial complete ordered-byte hash already covered this exact
+        // read-only snapshot. Recheck both its current protected selection and
+        // kernel identity; changed cut selection is a failure, not a new gold.
+        filesystem
+            .revalidate_current_cut(source_path, &cut.cut)
+            .await?;
+        (Vec::new(), Some(0_u64))
+    } else {
+        let (final_observed_sync, final_managed_identities) = if source_type == "managed_append" {
+            let snapshot = plugins::managed_append::read_snapshot(
+                source_path,
+                trusted_prefix.as_ref(),
+                managed_full_comparison,
+            )
+            .await?;
+            if managed_identity.as_ref().is_none_or(|(epoch, chain, _)| {
+                epoch != &snapshot.epoch || chain != &snapshot.chain
+            }) {
+                bail!("managed append manifest changed before sealing");
+            }
+            (snapshot.observed, Some(snapshot.identities))
+        } else {
+            let observed = if let Some(filesystem) = &filesystem_hash_plugin {
+                filesystem
+                    .sync_for_canonical_hash_observed(source_path)
+                    .await?
+            } else {
+                match mode {
+                    SliceMode::PublicFixture => plugin.sync_observed(source_path).await?,
+                    SliceMode::ReleaseCandidate => {
+                        plugin
+                            .sync_for_storage_v2_snapshot_observed(
+                                source_path,
+                                git_snapshot_commit_sha,
+                            )
+                            .await?
+                    }
+                }
+            };
+            (observed, None)
+        };
+        let final_adapter_read_bytes = final_observed_sync.application_read_bytes;
+        let final_sync = final_observed_sync.result;
+        if !final_sync.errors.is_empty() {
+            bail!("source adapter returned errors during the final watermark check");
+        }
+        let mut final_files = final_sync
+            .files
+            .into_iter()
+            .map(SliceFile::from)
+            .collect::<Vec<_>>();
+        if let Some(identities) = &final_managed_identities {
+            if final_files.len() != identities.len() {
+                bail!("managed append segment count changed before sealing");
+            }
+            for (file, identity) in final_files.iter_mut().zip(identities) {
+                file.content_sha256 = Some(identity.sha256);
+                file.logical_length = identity.bytes;
+            }
+        }
+        final_files.sort_by(|left, right| left.item_key.cmp(&right.item_key));
+        if filesystem_hash_scope.is_none() {
+            validate_slice_layout(&final_files)?;
+        }
+        let (final_fixture_sha256, final_input_bytes) = if let Some(scope) = &filesystem_hash_scope
+        {
+            let (digest, bytes, discarded) =
+                canonical_filesystem_fixture_hash(&mut final_files, scope, None).await?;
+            discarded_source_read_bytes = discarded_source_read_bytes
+                .checked_add(discarded)
+                .context("excluded source read counter overflow")?;
+            (digest, bytes)
+        } else if final_managed_identities.is_some() {
+            managed_fixture_hash(&final_files)?
+        } else {
+            canonical_fixture_hash(&mut final_files).await?
+        };
+        if final_fixture_sha256 != fixture_sha256
+            || final_input_bytes != measurements.input_bytes
+            || final_files.len() != files.len()
+        {
+            bail!("source drifted before the candidate generation could be sealed");
+        }
+        (final_files, final_adapter_read_bytes)
+    };
     measurements.record_stage(
         ShadowIngestStage::ReadAndHash,
         stabilization_started.elapsed(),
@@ -2768,6 +2886,10 @@ where
         &files,
         &final_files,
     )?;
+    measurements.deferred_source_read_bytes = measurements
+        .deferred_source_read_bytes
+        .checked_add(discarded_source_read_bytes)
+        .context("source read counter overflow")?;
     measurements.record_total(total_started.elapsed());
     let symbol_count = usize::try_from(
         client
@@ -2988,8 +3110,62 @@ fn record_final_source_reads(
 }
 
 async fn canonical_fixture_hash(files: &mut [SliceFile]) -> Result<(String, u64)> {
+    let (digest, bytes, _) = canonical_fixture_hash_validated(files, None, None).await?;
+    Ok((digest, bytes))
+}
+
+/// The normal path validates and hashes the same bounded item bytes. If a
+/// physical file has invalid text in a later fragment, exclude every fragment
+/// of that file and recompute the original ordered-byte digest. This uncommon
+/// fallback preserves the adapter's whole-file exclusion semantics.
+async fn canonical_filesystem_fixture_hash(
+    files: &mut Vec<SliceFile>,
+    scope: &plugins::fs_scope::FilesystemScope,
+    progress: Option<&super::build_progress::BuildProgressRecorder>,
+) -> Result<(String, u64, u64)> {
+    let (digest, bytes, excluded) =
+        canonical_fixture_hash_validated(files, Some(scope), progress).await?;
+    if excluded.is_empty() {
+        validate_slice_layout(files)?;
+        return Ok((digest, bytes, 0));
+    }
+    let discarded_reads = files
+        .iter()
+        .filter(|file| {
+            file.source_path
+                .as_ref()
+                .is_some_and(|path| excluded.contains(path))
+        })
+        .try_fold(0_u64, |sum, file| {
+            sum.checked_add(file.source_reads.bytes())
+                .context("excluded source read counter overflow")
+        })?;
+    files.retain(|file| {
+        !file
+            .source_path
+            .as_ref()
+            .is_some_and(|path| excluded.contains(path))
+    });
+    // The retry only handles rejected text; it must not reset observation
+    // counters for a running attempt.
+    let (digest, bytes, changed) =
+        canonical_fixture_hash_validated(files, Some(scope), None).await?;
+    if !changed.is_empty() {
+        bail!("filesystem acceptance changed during canonical source observation");
+    }
+    validate_slice_layout(files)?;
+    Ok((digest, bytes, discarded_reads))
+}
+
+async fn canonical_fixture_hash_validated(
+    files: &mut [SliceFile],
+    filesystem_scope: Option<&plugins::fs_scope::FilesystemScope>,
+    progress: Option<&super::build_progress::BuildProgressRecorder>,
+) -> Result<(String, u64, BTreeSet<PathBuf>)> {
     let mut digest = Sha256::new();
     let mut input_bytes = 0_u64;
+    let mut excluded = BTreeSet::new();
+    let mut observed_items = 0_usize;
     // Keep the canonical manifest order while overlapping small-file reads.
     // The batch bounds retained content regardless of total source size.
     for batch in files.chunks_mut(8) {
@@ -2999,6 +3175,22 @@ async fn canonical_fixture_hash(files: &mut [SliceFile]) -> Result<(String, u64)
             }))
             .await?;
         for (file, bytes) in batch.iter_mut().zip(bytes) {
+            if let Some(scope) = filesystem_scope {
+                let conversation = matches!(file.language.as_deref(), Some("json" | "jsonl"));
+                let allow_nul = scope.conversation_nul_projection && conversation;
+                if std::str::from_utf8(&bytes).is_err() || (!allow_nul && bytes.contains(&0)) {
+                    if scope.cut_consistency
+                        && plugins::fs::cut_conversation_path(Path::new(&file.path))
+                    {
+                        bail!("selected conversation cut contains a nontext source item");
+                    }
+                    excluded.insert(
+                        file.source_path
+                            .clone()
+                            .context("deferred FS text validation omitted its physical file")?,
+                    );
+                }
+            }
             let logical_length = bytes.len() as u64;
             if file.source_range.is_some() {
                 digest.update((file.item_key.len() as u64).to_be_bytes());
@@ -3013,9 +3205,54 @@ async fn canonical_fixture_hash(files: &mut [SliceFile]) -> Result<(String, u64)
             input_bytes = input_bytes
                 .checked_add(logical_length)
                 .context("source byte count overflow")?;
+            observed_items += 1;
+        }
+        if let Some(progress) = progress {
+            progress.observation_progress(observed_items, input_bytes)?;
         }
     }
-    Ok((hex::encode(digest.finalize()), input_bytes))
+    Ok((hex::encode(digest.finalize()), input_bytes, excluded))
+}
+
+fn validate_retained_cut_observation(
+    witness: &serde_json::Value,
+    adapter_profile: &str,
+    commit_sha: &str,
+    current_cut: &plugins::fs_cut::CutProof,
+    watermark: &str,
+) -> Result<plugins::fs_cut::CutObservation> {
+    let observation: plugins::fs_cut::CutObservation = serde_json::from_value(
+        witness
+            .get("filesystem_cut")
+            .cloned()
+            .context("retained run omitted its complete source cut")?,
+    )?;
+    if witness["checkpoint_protocol"] != "complete-items-v1"
+        || witness["adapter_profile_id"] != adapter_profile
+        || witness["commit_sha"] != commit_sha
+        || witness["source_watermark_sha256"] != watermark
+        || witness["fixture_sha256"] != observation.fixture_sha256
+        || !is_sha256(&observation.fixture_sha256)
+        || &observation.cut != current_cut
+    {
+        bail!("retained complete source observation differs from the exact pinned cut or build identity");
+    }
+    Ok(observation)
+}
+
+fn validate_retained_cut_manifest(
+    retained: &plugins::fs_cut::CutObservation,
+    fixture_sha256: &str,
+    item_count: usize,
+    input_bytes: u64,
+) -> Result<()> {
+    if retained.fixture_sha256 != fixture_sha256
+        || retained.item_count != item_count
+        || retained.input_bytes != input_bytes
+    {
+        bail!("accepted source manifest differs from the retained immutable cut");
+    }
+    Ok(())
 }
 
 fn group_body_indices(files: &[SliceFile]) -> Result<Vec<Vec<usize>>> {
@@ -4019,6 +4256,260 @@ mod tests {
     }
     use super::*;
 
+    #[tokio::test]
+    async fn filesystem_canonical_pass_fuses_validation_and_preserves_ordered_bytes() {
+        use crate::plugins::SourcePlugin;
+        let directory = tempfile::tempdir().unwrap();
+        let first = "é🙂alpha\n".repeat(200);
+        let second = "second immutable fixture\n".repeat(100);
+        tokio::fs::write(directory.path().join("a.txt"), first.as_bytes())
+            .await
+            .unwrap();
+        tokio::fs::write(directory.path().join("b.txt"), second.as_bytes())
+            .await
+            .unwrap();
+        let path = directory.path().to_str().unwrap();
+        let plugin = plugins::fs::FilesystemPlugin::new();
+        let old = plugin.sync_for_storage_v2_observed(path).await.unwrap();
+        let mut old_files = old
+            .result
+            .files
+            .into_iter()
+            .map(SliceFile::from)
+            .collect::<Vec<_>>();
+        old_files.sort_by(|a, b| a.item_key.cmp(&b.item_key));
+        let expected = canonical_fixture_hash(&mut old_files).await.unwrap();
+        let discovery = plugin.sync_for_canonical_hash_observed(path).await.unwrap();
+        assert!(discovery.result.errors.is_empty());
+        assert_eq!(discovery.application_read_bytes, Some(1024));
+        let mut files = discovery
+            .result
+            .files
+            .into_iter()
+            .map(SliceFile::from)
+            .collect::<Vec<_>>();
+        files.sort_by(|a, b| a.item_key.cmp(&b.item_key));
+        let scope =
+            plugins::fs_scope::FilesystemScope::from_config(&serde_json::Value::Null).unwrap();
+        let (digest, bytes, rejected_reads) =
+            canonical_filesystem_fixture_hash(&mut files, &scope, None)
+                .await
+                .unwrap();
+        assert_eq!((digest, bytes), expected);
+        assert_eq!(rejected_reads, 0);
+        assert_eq!(
+            source_read_bytes(&files).unwrap(),
+            first.len() as u64 + second.len() as u64
+        );
+        assert_eq!(old.application_read_bytes, Some(bytes));
+        assert_eq!(
+            files
+                .iter()
+                .map(|f| (f.item_key.as_str(), f.content_sha256, f.logical_length))
+                .collect::<Vec<_>>(),
+            old_files
+                .iter()
+                .map(|f| (f.item_key.as_str(), f.content_sha256, f.logical_length))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_canonical_pass_excludes_every_late_invalid_fragment() {
+        use crate::plugins::SourcePlugin;
+        use std::os::unix::ffi::OsStrExt;
+        let directory = tempfile::tempdir().unwrap();
+        // A late invalid fragment must also remove the earlier valid fragment;
+        // another fragmented file interleaves in item-key order.
+        let mut invalid = vec![b'a'; 1024 * 1024 + 700];
+        invalid[1024 * 1024 + 600] = 0xff;
+        let valid = "éalpha\n".repeat(200_000);
+        tokio::fs::write(directory.path().join("badx.txt"), &invalid)
+            .await
+            .unwrap();
+        tokio::fs::write(directory.path().join("good.txt"), valid.as_bytes())
+            .await
+            .unwrap();
+        tokio::fs::write(directory.path().join("empty.txt"), [])
+            .await
+            .unwrap();
+        // Lossy display identities can collide; exclude the invalid physical
+        // file, not a different valid path with the same displayed item key.
+        let alias_good = b"accepted alias\n";
+        let alias_bad = b"invalid\xfftext";
+        tokio::fs::write(
+            directory
+                .path()
+                .join(std::ffi::OsStr::from_bytes(b"alias-\xfe.txt")),
+            alias_good,
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            directory
+                .path()
+                .join(std::ffi::OsStr::from_bytes(b"alias-\xff.txt")),
+            alias_bad,
+        )
+        .await
+        .unwrap();
+        let path = directory.path().to_str().unwrap();
+        let plugin = plugins::fs::FilesystemPlugin::new();
+        let old = plugin.sync_for_storage_v2_observed(path).await.unwrap();
+        assert!(old.result.errors.is_empty());
+        let mut old_files = old
+            .result
+            .files
+            .into_iter()
+            .map(SliceFile::from)
+            .collect::<Vec<_>>();
+        old_files.sort_by(|a, b| a.item_key.cmp(&b.item_key));
+        let expected = canonical_fixture_hash(&mut old_files).await.unwrap();
+        let discovery = plugin.sync_for_canonical_hash_observed(path).await.unwrap();
+        let mut files = discovery
+            .result
+            .files
+            .into_iter()
+            .map(SliceFile::from)
+            .collect::<Vec<_>>();
+        files.sort_by(|a, b| a.item_key.cmp(&b.item_key));
+        assert!(files
+            .iter()
+            .any(|file| file.path == "badx.txt" && file.source_range.is_some()));
+        let scope =
+            plugins::fs_scope::FilesystemScope::from_config(&serde_json::Value::Null).unwrap();
+        let (digest, bytes, discarded) =
+            canonical_filesystem_fixture_hash(&mut files, &scope, None)
+                .await
+                .unwrap();
+        assert_eq!((digest, bytes), expected);
+        assert!(files.iter().all(|file| file.path != "badx.txt"));
+        assert_eq!(discarded, (invalid.len() + alias_bad.len()) as u64);
+        assert_eq!(
+            source_read_bytes(&files).unwrap(),
+            2 * (valid.len() + alias_good.len()) as u64
+        );
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.item_key.as_str())
+                .collect::<Vec<_>>(),
+            old_files
+                .iter()
+                .map(|file| file.item_key.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_canonical_validation_retains_declared_nul_and_rejects_nontext_cut() {
+        let directory = tempfile::tempdir().unwrap();
+        let bytes = b"{\"text\":\"original\"}\n\0retained\n";
+        for name in ["fixture.jsonl", "fixture.JSONL", "fixture.JSON"] {
+            let path = directory.path().join(name);
+            tokio::fs::write(&path, bytes).await.unwrap();
+            let raw = || plugins::RawFile {
+                path: name.into(),
+                content: String::new(),
+                size: bytes.len(),
+                language: Some(path.extension().unwrap().to_str().unwrap().to_lowercase()),
+                last_modified: None,
+                source_path: Some(path.clone()),
+                source_range: None,
+            };
+            let mut scope =
+                plugins::fs_scope::FilesystemScope::from_config(&serde_json::Value::Null).unwrap();
+            scope.cut_consistency = true;
+            scope.conversation_nul_projection = true;
+            let mut files = vec![SliceFile::from(raw())];
+            let (_, size, discarded) = canonical_filesystem_fixture_hash(&mut files, &scope, None)
+                .await
+                .unwrap();
+            assert_eq!(size, bytes.len() as u64);
+            assert_eq!(discarded, 0);
+            scope.conversation_nul_projection = false;
+            let mut files = vec![SliceFile::from(raw())];
+            let result = canonical_filesystem_fixture_hash(&mut files, &scope, None).await;
+            if name == "fixture.jsonl" {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap().1, 0);
+                assert!(files.is_empty());
+            }
+            tokio::fs::write(&path, b"valid header\n\xffinvalid")
+                .await
+                .unwrap();
+            scope.conversation_nul_projection = true;
+            let mut files = vec![SliceFile::from(raw())];
+            let result = canonical_filesystem_fixture_hash(&mut files, &scope, None).await;
+            if name == "fixture.jsonl" {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap().1, 0);
+                assert!(files.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn retained_cut_observation_requires_exact_source_and_producer_identity() {
+        let cut = plugins::fs_cut::CutProof {
+            format: plugins::fs_cut::KIND.into(),
+            cut_id: Uuid::new_v4(),
+            source_root_sha256: "1".repeat(64),
+            descriptor_sha256: "2".repeat(64),
+            snapshot_uuid: Uuid::new_v4(),
+            origin_uuid: Uuid::new_v4(),
+            captured_at_unix: 1,
+        };
+        let observation = plugins::fs_cut::CutObservation {
+            cut: cut.clone(),
+            fixture_sha256: "3".repeat(64),
+            item_count: 7,
+            input_bytes: 19,
+        };
+        let profile = "fixture-profile";
+        let commit = "4".repeat(40);
+        let watermark = "5".repeat(64);
+        let witness = json!({"checkpoint_protocol":"complete-items-v1","adapter_profile_id":profile,
+            "commit_sha":commit,"source_watermark_sha256":watermark,"fixture_sha256":observation.fixture_sha256,
+            "filesystem_cut":observation});
+        assert!(
+            validate_retained_cut_observation(&witness, profile, &commit, &cut, &watermark).is_ok()
+        );
+        let retained =
+            validate_retained_cut_observation(&witness, profile, &commit, &cut, &watermark)
+                .unwrap();
+        validate_retained_cut_manifest(&retained, &"3".repeat(64), 7, 19).unwrap();
+        for (count, bytes) in [(0, 0), (6, 19), (7, 18)] {
+            assert!(
+                validate_retained_cut_manifest(&retained, &"3".repeat(64), count, bytes).is_err()
+            );
+        }
+        assert!(validate_retained_cut_manifest(&retained, &"9".repeat(64), 7, 19).is_err());
+        for field in [
+            "checkpoint_protocol",
+            "adapter_profile_id",
+            "commit_sha",
+            "source_watermark_sha256",
+            "fixture_sha256",
+        ] {
+            let mut changed = witness.clone();
+            changed[field] = json!("changed");
+            assert!(
+                validate_retained_cut_observation(&changed, profile, &commit, &cut, &watermark)
+                    .is_err(),
+                "{field}"
+            );
+        }
+        let mut changed = cut.clone();
+        changed.snapshot_uuid = Uuid::new_v4();
+        assert!(validate_retained_cut_observation(
+            &witness, profile, &commit, &changed, &watermark
+        )
+        .is_err());
+    }
+
     fn lexical_test_chunks(patterns: &[String]) -> Vec<Chunk> {
         let base = CharacterChunker::default()
             .chunk("fixture", None)
@@ -4988,5 +5479,65 @@ mod tests {
             storage_v2: vec![],
         };
         assert!(canonical_query_set_hash(&[mismatch]).is_err());
+    }
+    #[test]
+    fn source_build_futures_keep_large_state_off_caller_stacks() {
+        // Infer each returned future's type without constructing a Client,
+        // session, runtime or database connection and without polling a build.
+        fn future_bytes<T, F>(_: impl FnOnce(T) -> F) -> usize {
+            std::mem::size_of::<F>()
+        }
+        const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let root = Path::new("/fixture-not-opened");
+        let public = future_bytes(|client: &'static tokio_postgres::Client| {
+            run_public_shadow_slice(client, 7, "fs", root, root, 4096, COMMIT)
+        });
+        let release = future_bytes(|client: &'static tokio_postgres::Client| {
+            run_release_candidate_build(client, 7, "managed_append", root, root, 4096, COMMIT)
+        });
+        let progress = future_bytes(|client: &'static tokio_postgres::Client| {
+            run_release_candidate_build_with_progress(
+                client, 7, "fs", root, root, 4096, COMMIT, None,
+            )
+        });
+        let pinned = future_bytes(|client: &'static tokio_postgres::Client| {
+            run_release_candidate_build_with_progress_pinned(
+                client, 7, "fs", root, root, 4096, COMMIT, None, None, None,
+            )
+        });
+        let active = future_bytes(
+            |session: &'static crate::db::build_checkpoint::BuildCheckpointSession| {
+                run_active_source_build_checkpointed(
+                    session, 7, "fs", root, root, 4096, COMMIT, None,
+                )
+            },
+        );
+        let checkpointed = future_bytes(
+            |session: &'static crate::db::build_checkpoint::BuildCheckpointSession| {
+                run_release_candidate_build_checkpointed(
+                    session, 7, "fs", root, root, 4096, COMMIT, None, None, None,
+                )
+            },
+        );
+        for (name, bytes) in [
+            ("public", public),
+            ("release", release),
+            ("progress", progress),
+            ("pinned", pinned),
+            ("active", active),
+            ("checkpointed", checkpointed),
+        ] {
+            assert!(
+                bytes < 16 * 1024,
+                "{name} wrapper future has {bytes} inline bytes"
+            );
+        }
+        let mut files = Vec::new();
+        let canonical = canonical_fixture_hash_validated(&mut files, None, None);
+        let bytes = std::mem::size_of_val(&canonical);
+        assert!(
+            bytes < 16 * 1024,
+            "canonical hash future has {bytes} inline bytes"
+        );
     }
 }

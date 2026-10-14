@@ -344,7 +344,10 @@ pub async fn admin_release_candidate_progress(
                     query.attempt_id,
                 )
                 .map_err(|_| AppError::NotFound("progress attempt not available".into()))?;
-                if value.server_instance_id != instance && !value.transaction_committed {
+                if value.server_instance_id != instance
+                    && value.status == "running"
+                    && !value.transaction_committed
+                {
                     value.status = "interrupted_requires_reconciliation".into();
                 }
                 Ok(Json(value))
