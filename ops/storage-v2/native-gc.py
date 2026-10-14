@@ -37,6 +37,7 @@ LINKS = {
     'storage_v2_lexical_segment': [('occurrence_id', 'occurrence')],
     'storage_v2_compact_lexical_block': [('occurrence_id', 'occurrence')],
     'storage_v2_derived_lexical_block': [('occurrence_id', 'occurrence')],
+    'storage_v2_encoded_lexical_block': [('occurrence_id', 'occurrence')],
     'storage_v2_legacy_lexical_segment': [('occurrence_id', 'occurrence')],
     'storage_v2_legacy_rank_binding': [('occurrence_id', 'occurrence')],
     'storage_v2_search_posting': [('document_id', 'storage_v2_search_document')],
@@ -57,6 +58,7 @@ IMMUTABILITY_GUARDS = (
 # retention manifest; the same function on any other relation stays enabled.
 SCOPED_IMMUTABILITY_GUARDS = {
     'storage_v2_compact_lexical_block': ('storage_v2_guard_converted_lexical_delete',),
+    'storage_v2_encoded_lexical_block': ('storage_v2_guard_encoded_lexical_mutation',),
     'storage_v2_compact_posting_block': ('storage_v2_retained_posting_delete_guard',),
     'storage_v2_search_posting': ('storage_v2_retained_posting_delete_guard',),
 }
@@ -79,6 +81,8 @@ def operator_digest():
     return digest({name: hashlib.sha256((directory/name).read_bytes()).hexdigest()
                    for name in ('native-gc.py', 'cleanup-apply.py', 'cleanup-manifest.py', 'cleanup-plan.py',
                      '../../migrations/136_storage_v2_gc_body_identity.sql',
+                     '../../migrations/171_storage_v2_compact_lexical_vector_codec.sql',
+                     '../../migrations/172_storage_v2_encoded_lexical_blocks.sql',
                      '../../api/src/services/pack_maintenance.rs', '../../api/src/bin/mainrag-pack-maintenance.rs')})
 
 
