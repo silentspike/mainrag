@@ -571,6 +571,7 @@ jobs:
               'eval.storage_v2.schema.test_lazy_posting_cost_guards.LazyPostingCostGuardsTests',
               'eval.storage_v2.schema.test_capture_free_posting_tokenizer.CaptureFreePostingTokenizerTests',
               'eval.storage_v2.schema.test_bounded_posting_token_keys.BoundedPostingTokenKeysTests',
+              'eval.storage_v2.schema.test_linear_posting_run_classifier.LinearPostingRunClassifierTests',
           ]
           shard = int(os.environ['SCHEMA_SHARD'])
           assert shard in (0, 1), 'Expected one of the two declared schema shards'
