@@ -640,6 +640,32 @@ backup, or cumulative budgets passed. Refresh those issue #66 gates before each
 source. The estimates do not authorize a build when any live reserve is below
 its minimum.
 
+`MAINRAG_V2_BUILD_WRITE_PROFILE` selects one bounded PostgreSQL write profile
+for a detached checkpointed source session:
+
+| Value | GIN pending-list target | Maintenance work memory |
+| --- | --- | --- |
+| Unset or `default` | 16 MiB | 128 MiB |
+| `bulk` | 64 MiB | 256 MiB |
+
+The session captures its profile before opening a transaction and reapplies it
+with `SET LOCAL` after every durable checkpoint. Invalid values fail before
+acquiring a database connection. Pooled reader settings remain unchanged.
+
+The bulk profile aims to merge repeated GIN keys in larger groups before
+updating the main index. It does not change document contents, term frequencies,
+authorization, search readers, or database index options. Pending-list targets
+and maintenance settings are PostgreSQL thresholds, not hard total memory or
+disk limits. Larger lists can produce longer cleanup bursts and more pending
+entries for readers to inspect.
+
+Admit the profile only for an owned writer with reviewed memory, index, WAL and
+filesystem reserves. Record the exact package and profile with the operation;
+keep its original cumulative budgets and stop rules. Compare actual staging
+time, committed input, index reads and generated WAL before claiming a gain.
+An increased buffer setting alone proves neither faster ingest nor storage
+savings.
+
 For a Git source that advances during an independently reviewed source scan,
 `build` accepts `--git-snapshot-commit-sha` and
 `--expected-source-watermark-sha256` together with the protected
