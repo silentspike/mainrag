@@ -25,6 +25,17 @@ async fn connect(config: &tokio_postgres::Config) -> Result<Client> {
     Ok(client)
 }
 
+async fn physical_write_settings(client: &Client) -> Result<(String, String, String)> {
+    let row = client
+        .query_one(
+            "SELECT current_setting('maintenance_work_mem'), \
+             current_setting('gin_pending_list_limit'), current_setting('client_min_messages')",
+            &[],
+        )
+        .await?;
+    Ok((row.get(0), row.get(1), row.get(2)))
+}
+
 fn producer(script: &Path, operation: &str, root: &Path, input: Option<&Path>) -> Result<()> {
     let mut command = Command::new("python3");
     command.arg(script).arg(operation).arg(root);
@@ -300,22 +311,44 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         drop(waiting_session);
         client.execute("UPDATE sources SET path=$1 WHERE id=165",&[&resume_root.to_str().unwrap()]).await?;
         println!("local WAL checkpoint: durable progress, no open transaction, exclusive writer, identity revalidation");
-        let session = crate::db::build_checkpoint::BuildCheckpointSession::open(
-            &pool, principal, 165, &packs).await?;
+        let reader = pool.get().await?;
+        let reader_physical = physical_write_settings(&reader).await?;
+        drop(reader);
+        let default_session = crate::db::build_checkpoint::BuildCheckpointSession::open_with_write_profile(
+            &pool, principal, 165, &packs, crate::db::build_checkpoint::BuildWriteProfile::Default).await?;
+        let default_physical = ("128MB".to_string(), "16MB".to_string(), "warning".to_string());
+        let default_open = physical_write_settings(default_session.client()).await?;
+        ensure!(default_open == default_physical,
+            "default writer profile differs at open");
+        default_session.checkpoint().await?;
+        let default_reapplied = physical_write_settings(default_session.client()).await?;
+        ensure!(default_reapplied == default_physical,
+            "default writer profile was lost at COMMIT");
+        default_session.finish().await?;
+        drop(default_session);
+        let reader = pool.get().await?;
+        ensure!(physical_write_settings(&reader).await? == reader_physical,
+            "completed default writer profile leaked to an ordinary reader");
+        drop(reader);
+        let session = crate::db::build_checkpoint::BuildCheckpointSession::open_with_write_profile(
+            &pool, principal, 165, &packs, crate::db::build_checkpoint::BuildWriteProfile::Bulk).await?;
+        let bulk_physical = ("256MB".to_string(), "64MB".to_string(), "warning".to_string());
+        let bulk_open = physical_write_settings(session.client()).await?;
+        ensure!(bulk_open == bulk_physical,
+            "bulk writer profile differs at open");
         ensure!(session.client().query_one("SHOW statement_timeout", &[]).await?
             .get::<_, String>(0)=="10min", "writer inherited the short reader deadline");
         session.checkpoint().await?;
         ensure!(session.client().query_one("SHOW statement_timeout", &[]).await?
             .get::<_, String>(0)=="10min", "writer deadline was lost at COMMIT");
-        let physical = session.client().query_one(
-            "SELECT current_setting('maintenance_work_mem'), \
-             current_setting('gin_pending_list_limit'), current_setting('client_min_messages')", &[]).await?;
-        ensure!(physical.get::<_, String>(0)=="128MB"
-            && physical.get::<_, String>(1)=="16MB"
-            && physical.get::<_, String>(2)=="warning", "writer physical settings were lost at COMMIT");
+        let bulk_reapplied = physical_write_settings(session.client()).await?;
+        ensure!(bulk_reapplied == bulk_physical,
+            "bulk writer profile was lost at COMMIT");
         let reader = pool.get().await?;
         ensure!(reader.query_one("SHOW statement_timeout", &[]).await?
             .get::<_, String>(0)=="30s", "writer deadline leaked to an ordinary reader");
+        ensure!(physical_write_settings(&reader).await? == reader_physical,
+            "live bulk writer profile leaked to an ordinary reader");
         drop(reader);
         session.fail_after_checkpoints(2);
         ensure!(crate::db::build_checkpoint::BuildCheckpointSession::open(
@@ -331,7 +364,18 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         let reader = pool.get().await?;
         ensure!(reader.query_one("SHOW statement_timeout", &[]).await?
             .get::<_, String>(0)=="30s", "cancelled writer returned a modified connection");
+        ensure!(physical_write_settings(&reader).await? == reader_physical,
+            "cancelled bulk writer returned modified physical settings");
         drop(reader);
+        println!("{}", json!({
+            "fixture": "bounded-writer-profile-checkpoints",
+            "default_open": default_open,
+            "default_after_checkpoint": default_reapplied,
+            "bulk_open": bulk_open,
+            "bulk_after_checkpoint": bulk_reapplied,
+            "ordinary_reader_baseline": reader_physical,
+            "reader_isolation_after_finish_and_while_live_and_after_cancel": true,
+        }));
         let saved = client.query_one("SELECT r.id,r.generation_id, \
             (SELECT count(*) FROM storage_v2_ingest_run_item WHERE run_id=r.id) AS items \
             FROM storage_v2_ingest_run r WHERE source_id=165 AND status='building'", &[]).await?;
@@ -341,8 +385,8 @@ async fn managed_append_producer_to_verified_delta_and_periodic_full() -> Result
         let resumed_progress_id = Uuid::new_v4();
         let resumed_progress = crate::services::build_progress::BuildProgressRecorder::create(
             &packs,165,COMMIT,Uuid::new_v4(),resumed_progress_id)?;
-        let session = crate::db::build_checkpoint::BuildCheckpointSession::open(
-            &pool, principal, 165, &packs).await?;
+        let session = crate::db::build_checkpoint::BuildCheckpointSession::open_with_write_profile(
+            &pool, principal, 165, &packs, crate::db::build_checkpoint::BuildWriteProfile::Bulk).await?;
         let session = session.expect_run(Some(saved_run));
         let resumed = Box::pin(run_release_candidate_build_checkpointed(
             &session,165,"fs",&resume_root,&packs,4096,COMMIT,None,None,Some(&resumed_progress))).await?;

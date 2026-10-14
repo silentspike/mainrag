@@ -5,6 +5,7 @@
 use anyhow::{ensure, Context, Result};
 use deadpool_postgres::{Client, ClientWrapper, Pool};
 use serde_json::Value;
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -13,10 +14,45 @@ use uuid::Uuid;
 // Physical write settings belong to the detached writer. GIN consolidation can
 // outlive a reader deadline; its memory and pending entries remain bounded.
 // SET LOCAL is reapplied after every durable boundary and never reaches readers.
-const WRITE_SETTINGS: &str = "SET LOCAL statement_timeout='10min'; \
+const DEFAULT_WRITE_SETTINGS: &str = "SET LOCAL statement_timeout='10min'; \
     SET LOCAL maintenance_work_mem='128MB'; \
     SET LOCAL gin_pending_list_limit='16MB'; \
     SET LOCAL client_min_messages='warning'";
+
+const BULK_WRITE_SETTINGS: &str = "SET LOCAL statement_timeout='10min'; \
+    SET LOCAL maintenance_work_mem='256MB'; \
+    SET LOCAL gin_pending_list_limit='64MB'; \
+    SET LOCAL client_min_messages='warning'";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BuildWriteProfile {
+    Default,
+    Bulk,
+}
+
+impl BuildWriteProfile {
+    fn parse(value: Option<&OsStr>) -> Result<Self> {
+        let value = value
+            .map(|value| value.to_str().context("build write profile must be UTF-8"))
+            .transpose()?;
+        match value {
+            None | Some("default") => Ok(Self::Default),
+            Some("bulk") => Ok(Self::Bulk),
+            Some(_) => anyhow::bail!("build write profile must be exactly default or bulk"),
+        }
+    }
+
+    fn from_env() -> Result<Self> {
+        Self::parse(std::env::var_os("MAINRAG_V2_BUILD_WRITE_PROFILE").as_deref())
+    }
+
+    fn settings(self) -> &'static str {
+        match self {
+            Self::Default => DEFAULT_WRITE_SETTINGS,
+            Self::Bulk => BULK_WRITE_SETTINGS,
+        }
+    }
+}
 
 pub struct BuildCheckpointSession {
     connection: ClientWrapper,
@@ -24,6 +60,7 @@ pub struct BuildCheckpointSession {
     source_id: i64,
     identity: Value,
     expected_run_id: Option<i64>,
+    write_profile: BuildWriteProfile,
     local_wal_budget: Option<super::local_wal_budget::LocalWalBudget>,
     _maintenance: File,
     #[cfg(test)]
@@ -32,6 +69,30 @@ pub struct BuildCheckpointSession {
 
 impl BuildCheckpointSession {
     pub async fn open(pool: &Pool, user_id: Uuid, source_id: i64, root: &Path) -> Result<Self> {
+        // Reject unknown/non-UTF-8 profiles before touching the pool. Freeze the
+        // selection for this detached session, including every later checkpoint.
+        let write_profile = BuildWriteProfile::from_env()?;
+        Self::open_configured(pool, user_id, source_id, root, write_profile).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn open_with_write_profile(
+        pool: &Pool,
+        user_id: Uuid,
+        source_id: i64,
+        root: &Path,
+        write_profile: BuildWriteProfile,
+    ) -> Result<Self> {
+        Self::open_configured(pool, user_id, source_id, root, write_profile).await
+    }
+
+    async fn open_configured(
+        pool: &Pool,
+        user_id: Uuid,
+        source_id: i64,
+        root: &Path,
+        write_profile: BuildWriteProfile,
+    ) -> Result<Self> {
         let local_wal_budget = super::local_wal_budget::LocalWalBudget::from_env()?;
         // A checkpointing connection never returns to the pool with session
         // state or an open transaction. ClientWrapper aborts its driver on drop.
@@ -64,7 +125,7 @@ impl BuildCheckpointSession {
                 "local WAL backpressure requires its controlled observation function"
             );
         }
-        connection.batch_execute(WRITE_SETTINGS).await?;
+        connection.batch_execute(write_profile.settings()).await?;
         let acquired: bool = connection
             .query_one(
                 "SELECT pg_try_advisory_lock(hashtextextended( \
@@ -97,6 +158,7 @@ impl BuildCheckpointSession {
             source_id,
             identity,
             expected_run_id: None,
+            write_profile,
             local_wal_budget,
             _maintenance: maintenance,
             #[cfg(test)]
@@ -200,7 +262,9 @@ impl BuildCheckpointSession {
             budget.wait(self.client(), waiting).await?;
         }
         self.connection.batch_execute("BEGIN").await?;
-        self.connection.batch_execute(WRITE_SETTINGS).await?;
+        self.connection
+            .batch_execute(self.write_profile.settings())
+            .await?;
         self.connection
             .execute(
                 "SELECT set_config('app.user_id',$1,true), \
@@ -231,5 +295,48 @@ impl BuildCheckpointSession {
         );
         self.connection.batch_execute("COMMIT").await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn build_write_profile_accepts_only_absent_default_or_bulk() {
+        assert_eq!(
+            BuildWriteProfile::parse(None).unwrap(),
+            BuildWriteProfile::Default
+        );
+        assert_eq!(
+            BuildWriteProfile::parse(Some(OsStr::new("default"))).unwrap(),
+            BuildWriteProfile::Default
+        );
+        assert_eq!(
+            BuildWriteProfile::parse(Some(OsStr::new("bulk"))).unwrap(),
+            BuildWriteProfile::Bulk
+        );
+    }
+
+    #[test]
+    fn build_write_profile_rejects_unbounded_or_ambiguous_values() {
+        for value in [
+            "",
+            "Bulk",
+            " bulk",
+            "bulk ",
+            "64",
+            "128MB",
+            "custom",
+            "bulk;RESET ALL",
+        ] {
+            assert!(BuildWriteProfile::parse(Some(OsStr::new(value))).is_err());
+        }
+    }
+
+    #[test]
+    fn build_write_profile_rejects_non_utf8_without_lossy_conversion() {
+        assert!(BuildWriteProfile::parse(Some(OsStr::from_bytes(b"bulk\xff"))).is_err());
     }
 }
