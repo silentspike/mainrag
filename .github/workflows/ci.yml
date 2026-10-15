@@ -157,6 +157,30 @@ jobs:
           export MAINRAG_LEGACY_HIT_FIXTURE_URL="postgresql://fixture:fixture_only@127.0.0.1:5432/$fixture_database"
           cargo test --locked -p mainrag-api --features storage-v2-retrieval --lib services::legacy_hit_producer -- --include-ignored --nocapture | tee legacy-hit-producer-tests.log
           python3 -c 'from pathlib import Path; assert "3 passed; 0 failed; 0 ignored;" in Path("legacy-hit-producer-tests.log").read_text(), "Expected the real producer and both byte matcher regressions to execute"'
+      - name: Verify complete native files and reads after legacy retirement
+        shell: bash
+        env:
+          STORAGE_V2_TEST_SOCKET: '127.0.0.1'
+          PGUSER: fixture
+          PGPASSWORD: fixture_only
+        run: |
+          cargo check --locked -p mainrag-api --features storage-v2-retrieval --bin mainrag-complete-file
+          fixture_metadata="$RUNNER_TEMP/complete-file-fixture.json"
+          boundary=migrations/178_storage_v2_native_complete_file_reader.sql
+          boundary_sha=$(sha256sum "$boundary" | cut -d ' ' -f 1)
+          python3 -m eval.storage_v2.schema.complete_file_fixture --output "$fixture_metadata" --read-boundary "$boundary" --read-boundary-sha256 "$boundary_sha" > complete-file-fixture.log 2>&1 &
+          fixture_pid=$!
+          trap 'kill "$fixture_pid" 2>/dev/null || true; wait "$fixture_pid" || true' EXIT
+          for attempt in $(seq 1 120); do
+            test -f "$fixture_metadata" && break
+            kill -0 "$fixture_pid" 2>/dev/null || { cat complete-file-fixture.log; exit 1; }
+            sleep 1
+          done
+          test -f "$fixture_metadata"
+          fixture_database=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["database"])' "$fixture_metadata")
+          export MAINRAG_COMPLETE_FILE_FIXTURE_URL="postgresql://fixture:fixture_only@127.0.0.1:5432/$fixture_database"
+          cargo test --locked -p mainrag-api --features storage-v2-retrieval --lib services::legacy_complete_file -- --include-ignored --nocapture | tee complete-file-tests.log
+          python3 -c 'from pathlib import Path; assert "6 passed; 0 failed; 0 ignored;" in Path("complete-file-tests.log").read_text(), "Expected all complete-file regressions including the native fixture"'
       - name: Verify final storage-v2 source read accounting
         shell: bash
         run: |
