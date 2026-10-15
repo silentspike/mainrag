@@ -177,3 +177,8 @@ harness = false
 # [profile.release] lives in the workspace root Cargo.toml — Cargo ignores
 # non-root profiles since 1.84 and emits a warning. Keep profile settings
 # centralized there.
+
+[[bin]]
+name = "mainrag-complete-file"
+path = "src/bin/mainrag-complete-file.rs"
+required-features = ["storage-v2-retrieval"]
