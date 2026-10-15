@@ -172,6 +172,50 @@ async fn native_zero_hit_preservation_authorized_read_after_legacy_drop_and_unkn
     client
         .batch_execute(&format!("SET ROLE mainrag;SET app.user_id='{ADMIN}'"))
         .await?;
+    // Exercise the application role's real public API, not the fixture owner's
+    // implicit execution rights. The unscoped scalar remains private.
+    let routines = [
+        "storage_v2_require_test_scope(bigint,boolean)",
+        "storage_v2_lock_legacy_hit_source(bigint,bigint,bytea)",
+        "storage_v2_legacy_hit_mapping_states(bigint,text[])",
+        "storage_v2_replace_legacy_hit_mappings(bigint,jsonb)",
+        "storage_v2_preserve_legacy_hit(bigint,text,bigint,jsonb,text)",
+        "storage_v2_resolve_legacy_hit(bigint,text,text)",
+        "storage_v2_complete_file_components(bigint,text,text,bigint,boolean)",
+        "storage_v2_begin_reader_epoch()",
+        "storage_v2_end_reader_epoch(uuid)",
+        "storage_v2_create_pack(uuid,text,uuid)",
+        "storage_v2_put_packed_body(uuid,bigint,bytea,bigint,bigint,bigint,storage_v2_body_codec,bytea)",
+        "storage_v2_verify_pack(uuid,bytea,bigint)",
+        "storage_v2_publish_pack(uuid)",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    let missing = client
+        .query(
+            "SELECT routine FROM unnest($1::TEXT[]) routine WHERE NOT has_function_privilege(current_user,routine,'EXECUTE')",
+            &[&routines],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect::<Vec<_>>();
+    ensure!(
+        missing.is_empty(),
+        "public complete-file routines not executable: {missing:?}"
+    );
+    let private_scalar: bool = client
+        .query_one(
+            "SELECT has_function_privilege(current_user,'storage_v2_legacy_hit_mapping_state(text)','EXECUTE')",
+            &[],
+        )
+        .await?
+        .get(0);
+    ensure!(
+        !private_scalar,
+        "unscoped mapping state must remain private"
+    );
     let raw = ("complete historical α🙂 東京\n".repeat(9000)).into_bytes();
     let mut id = identity(&raw);
     // The original metadata hash deliberately differs from complete raw bytes.
@@ -202,13 +246,7 @@ async fn native_zero_hit_preservation_authorized_read_after_legacy_drop_and_unkn
     id.revision = lock["file_revision"]
         .as_i64()
         .context("revision required")?;
-    let state: String = client
-        .query_one(
-            "SELECT storage_v2_legacy_hit_mapping_state($1)",
-            &[&id.mapping_id()?],
-        )
-        .await?
-        .get(0);
+    let state = maintenance_mapping_state(&client, id.source_id, &id.mapping_id()?).await?;
     let before:Value=client.query_one("SELECT jsonb_build_array((SELECT count(*) FROM source_generation),(SELECT count(*) FROM generation_item_version))",&[]).await?.get(0);
     let mut request = Registration {
         identity: id.clone(),
@@ -283,6 +321,22 @@ async fn native_zero_hit_preservation_authorized_read_after_legacy_drop_and_unkn
         "same body replay copied original payload"
     );
     tx.commit().await?;
+    client
+        .batch_execute(&format!("SET app.user_id='{WRITER}'"))
+        .await?;
+    let denied = registration_source(&client, &request).await;
+    ensure!(
+        denied
+            .as_ref()
+            .err()
+            .and_then(|error| error.downcast_ref::<tokio_postgres::Error>())
+            .and_then(|error| error.code())
+            == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE),
+        "nonadmin reader must not acquire the maintenance write boundary"
+    );
+    client
+        .batch_execute(&format!("SET app.user_id='{ADMIN}'"))
+        .await?;
     let after:Value=client.query_one("SELECT jsonb_build_array((SELECT count(*) FROM source_generation),(SELECT count(*) FROM generation_item_version))",&[]).await?.get(0);
     ensure!(before == after, "preservation changed generation state");
     let tx = client.transaction().await?;
@@ -327,13 +381,8 @@ async fn native_zero_hit_preservation_authorized_read_after_legacy_drop_and_unkn
     page_id.revision = page_lock["file_revision"]
         .as_i64()
         .context("page revision required")?;
-    let page_state: String = client
-        .query_one(
-            "SELECT storage_v2_legacy_hit_mapping_state($1)",
-            &[&page_id.mapping_id()?],
-        )
-        .await?
-        .get(0);
+    let page_state =
+        maintenance_mapping_state(&client, page_id.source_id, &page_id.mapping_id()?).await?;
     let page_request = Registration {
         identity: page_id.clone(),
         legacy_file_hash_sha256: page_id.sha256.clone(),
@@ -398,10 +447,10 @@ async fn native_zero_hit_preservation_authorized_read_after_legacy_drop_and_unkn
     ensure!(page2.len() == 1, "last native page differs");
     // Existing full-file service is the caller after legacy content is gone.
     client
-        .batch_execute("DROP TABLE chunks CASCADE;DROP TABLE files CASCADE")
+        .batch_execute("RESET ROLE;DROP TABLE chunks CASCADE;DROP TABLE files CASCADE")
         .await?;
     client
-        .batch_execute(&format!("SET app.user_id='{WRITER}'"))
+        .batch_execute(&format!("SET ROLE mainrag;SET app.user_id='{WRITER}'"))
         .await?;
     // Use the CLI's actual transaction path: the SQL reader epoch rejects
     // repeatable-read isolation even when service-only autocommit reads pass.
@@ -468,14 +517,13 @@ async fn native_zero_hit_preservation_authorized_read_after_legacy_drop_and_unkn
         .batch_execute(&format!("SET app.user_id='{ADMIN}'"))
         .await?;
     let tx = client.transaction().await?;
-    tx.query(
-        "SELECT * FROM storage_v2_replace_legacy_hit_mapping($1,$2,'exact',$3,$4)",
-        &[
-            &id.mapping_id()?,
-            &vec![occurrence],
-            &vec![raw.len() as i64],
-            &vec![1i64],
-        ],
+    let gap_state = maintenance_mapping_state(&tx, id.source_id, &id.mapping_id()?).await?;
+    let gap = json!([{"old_hit_id":id.mapping_id()?,"expected_mapping_sha256":gap_state,
+        "occurrence_ids":[occurrence],"relation_kind":"exact",
+        "byte_overlaps":[raw.len() as i64],"source_offsets":[1]}]);
+    tx.query_one(
+        "SELECT storage_v2_replace_legacy_hit_mappings($1,$2)",
+        &[&id.source_id, &gap],
     )
     .await?;
     ensure!(
@@ -491,14 +539,14 @@ async fn native_zero_hit_preservation_authorized_read_after_legacy_drop_and_unkn
     too_short.logical_bytes = 1;
     too_short.sha256 = hex::encode(Sha256::digest(b"x"));
     let tx = begin_complete_file_transaction(&mut client).await?;
-    tx.query(
-        "SELECT * FROM storage_v2_replace_legacy_hit_mapping($1,$2,'exact',$3,$4)",
-        &[
-            &too_short.mapping_id()?,
-            &vec![fragments[0].occurrence_id],
-            &vec![fragments[0].logical_bytes],
-            &vec![0i64],
-        ],
+    let short_state =
+        maintenance_mapping_state(&tx, too_short.source_id, &too_short.mapping_id()?).await?;
+    let oversized = json!([{"old_hit_id":too_short.mapping_id()?,"expected_mapping_sha256":short_state,
+        "occurrence_ids":[fragments[0].occurrence_id],"relation_kind":"exact",
+        "byte_overlaps":[fragments[0].logical_bytes],"source_offsets":[0]}]);
+    tx.query_one(
+        "SELECT storage_v2_replace_legacy_hit_mappings($1,$2)",
+        &[&too_short.source_id, &oversized],
     )
     .await?;
     let rejected = tx

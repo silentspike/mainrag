@@ -392,6 +392,41 @@ fn pack_allocation_bound(raw: u64) -> Result<(u64, u64)> {
     Ok((bound, scratch))
 }
 
+/// Maintenance-only CAS read through the existing source/write-authorized API.
+/// The unscoped scalar helper intentionally remains unavailable to mainrag.
+async fn maintenance_mapping_state<C: GenericClient + Sync>(
+    client: &C,
+    source: i64,
+    mapping_id: &str,
+) -> Result<String> {
+    let ids = vec![mapping_id.to_owned()];
+    let observed: Value = client
+        .query_one(
+            "SELECT storage_v2_legacy_hit_mapping_states($1,$2)",
+            &[&source, &ids],
+        )
+        .await?
+        .get(0);
+    let mappings = observed["mappings"]
+        .as_array()
+        .context("mapping states omitted")?;
+    ensure!(
+        observed["source_id"].as_i64() == Some(source)
+            && mappings.len() == 1
+            && mappings[0]["old_hit_id"].as_str() == Some(mapping_id),
+        "source-authorized mapping state identity differs"
+    );
+    let digest = mappings[0]["expected_mapping_sha256"]
+        .as_str()
+        .context("mapping state digest omitted")?;
+    let decoded = hex::decode(digest)?;
+    ensure!(
+        decoded.len() == 32 && hex::encode(decoded) == digest,
+        "canonical mapping state digest required"
+    );
+    Ok(digest.to_owned())
+}
+
 async fn registration_source<C: GenericClient + Sync>(
     client: &C,
     request: &Registration,
@@ -452,13 +487,12 @@ async fn registration_source<C: GenericClient + Sync>(
             &[&request.identity.mapping_id()?],
         )
         .await?;
-    let actual: String = client
-        .query_one(
-            "SELECT storage_v2_legacy_hit_mapping_state($1)",
-            &[&request.identity.mapping_id()?],
-        )
-        .await?
-        .get(0);
+    let actual = maintenance_mapping_state(
+        client,
+        request.identity.source_id,
+        &request.identity.mapping_id()?,
+    )
+    .await?;
     ensure!(
         actual == request.expected_mapping_sha256,
         "complete file mapping CAS changed"
@@ -503,13 +537,12 @@ pub async fn register_existing<C: GenericClient + Sync>(
         buffer,
     )
     .await?;
-    let mapping_sha256: String = client
-        .query_one(
-            "SELECT storage_v2_legacy_hit_mapping_state($1)",
-            &[&request.identity.mapping_id()?],
-        )
-        .await?
-        .get(0);
+    let mapping_sha256 = maintenance_mapping_state(
+        client,
+        request.identity.source_id,
+        &request.identity.mapping_id()?,
+    )
+    .await?;
     Ok(
         json!({"schema_version":"mainrag.storage-v2.native-complete-file-registration.v1",
         "identity":request.identity,"legacy_file_hash_sha256":request.legacy_file_hash_sha256,"read_proof":verified.proof,"mapping_sha256":mapping_sha256,
@@ -615,13 +648,12 @@ pub async fn register_payload<C: GenericClient + Sync, R: Read>(
         buffer,
     )
     .await?;
-    let mapping_sha256: String = client
-        .query_one(
-            "SELECT storage_v2_legacy_hit_mapping_state($1)",
-            &[&request.identity.mapping_id()?],
-        )
-        .await?
-        .get(0);
+    let mapping_sha256 = maintenance_mapping_state(
+        client,
+        request.identity.source_id,
+        &request.identity.mapping_id()?,
+    )
+    .await?;
     Ok(
         json!({"schema_version":"mainrag.storage-v2.native-complete-file-registration.v1",
         "identity":request.identity,"legacy_file_hash_sha256":request.legacy_file_hash_sha256,"read_proof":verified.proof,"mapping_sha256":mapping_sha256,
