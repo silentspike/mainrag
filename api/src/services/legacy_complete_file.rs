@@ -12,6 +12,33 @@ use std::path::Path;
 use tokio_postgres::GenericClient;
 use uuid::Uuid;
 
+/// Pack reader epochs require the existing read-committed commit fence.
+pub async fn begin_complete_file_transaction(
+    client: &mut tokio_postgres::Client,
+) -> Result<tokio_postgres::Transaction<'_>> {
+    client
+        .build_transaction()
+        .isolation_level(tokio_postgres::IsolationLevel::ReadCommitted)
+        .start()
+        .await
+        .context("begin complete-file transaction")
+}
+
+/// `hostaddr` overrides `host` when PostgreSQL selects the actual transport.
+pub fn local_complete_file_connection(config: &tokio_postgres::Config) -> bool {
+    !config.get_hosts().is_empty()
+        && config.get_hosts().iter().all(|host| match host {
+            tokio_postgres::config::Host::Unix(_) => true,
+            tokio_postgres::config::Host::Tcp(host) => host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback()),
+        })
+        && config
+            .get_hostaddrs()
+            .iter()
+            .all(std::net::IpAddr::is_loopback)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompleteFileIdentity {
@@ -77,13 +104,26 @@ pub fn registration_lease(root: &Path) -> Result<std::sync::Arc<std::fs::File>> 
     Ok(crate::services::content_store::build_recovery::writer_lease(root)?)
 }
 
-fn advance_range(next: u64, offset: u64, overlap: u64, length: u64, count: usize) -> Result<u64> {
+fn advance_range(
+    next: u64,
+    offset: u64,
+    overlap: u64,
+    length: u64,
+    count: usize,
+    total: u64,
+) -> Result<u64> {
     ensure!(
         offset == next && overlap == length && (length > 0 || count == 1),
         "complete native byte ranges contain a gap, overlap or mixed empty representation"
     );
-    next.checked_add(length)
-        .context("native byte range overflow")
+    let end = next
+        .checked_add(length)
+        .context("native byte range overflow")?;
+    ensure!(
+        end <= total,
+        "native component exceeds complete-file scratch admission"
+    );
+    Ok(end)
 }
 
 fn generation_selector(selector: &str) -> Result<()> {
@@ -289,7 +329,14 @@ pub async fn read_verified<C: GenericClient + Sync>(
                 let overlap = u64::try_from(row.get::<_, i64>("byte_overlap"))?;
                 let length = u64::try_from(row.get::<_, i64>("logical_length"))?;
                 let path: String = row.get("source_path");
-                let end = advance_range(next, offset, overlap, length, targets.len())?;
+                let end = advance_range(
+                    next,
+                    offset,
+                    overlap,
+                    length,
+                    targets.len(),
+                    identity.logical_bytes,
+                )?;
                 ensure!(
                     hex::encode(Sha256::digest(path.as_bytes())) == identity.path_sha256,
                     "complete native ranges or original source path differ"

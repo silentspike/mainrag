@@ -29,6 +29,34 @@ fn namespace_is_disjoint_canonical_and_revision_specific() -> Result<()> {
     Ok(())
 }
 #[test]
+fn local_transport_rejects_remote_hostaddr_overrides() -> Result<()> {
+    for connection in [
+        "host=/var/run/postgresql",
+        "host=127.0.0.1",
+        "host=::1",
+        "host=127.0.0.1 hostaddr=127.0.0.2",
+    ] {
+        ensure!(
+            local_complete_file_connection(&connection.parse()?),
+            "local complete-file transport rejected"
+        );
+    }
+    for connection in [
+        "host=localhost",
+        "host=203.0.113.1",
+        "host=127.0.0.1 hostaddr=203.0.113.1",
+        "host=/var/run/postgresql hostaddr=203.0.113.1",
+        "host=127.0.0.1,127.0.0.2 hostaddr=127.0.0.1,203.0.113.1",
+        "hostaddr=127.0.0.1",
+    ] {
+        ensure!(
+            !local_complete_file_connection(&connection.parse()?),
+            "nonlocal or ambiguous complete-file transport accepted"
+        );
+    }
+    Ok(())
+}
+#[test]
 fn source_offset_order_and_complete_bounds_are_required() -> Result<()> {
     let (pack, scratch) = pack_allocation_bound(65536)?;
     ensure!(
@@ -37,22 +65,26 @@ fn source_offset_order_and_complete_bounds_are_required() -> Result<()> {
     );
     let mut next = 0;
     for (offset, length) in [(0, 2), (2, 7), (9, 1)] {
-        next = advance_range(next, offset, length, length, 3)?;
+        next = advance_range(next, offset, length, length, 3, 10)?;
     }
     ensure!(next == 10, "ordered full file differs");
     for (offset, overlap, length, count) in [(1, 1, 1, 1), (0, 2, 1, 1), (0, 0, 0, 2)] {
         ensure!(
-            advance_range(0, offset, overlap, length, count).is_err(),
+            advance_range(0, offset, overlap, length, count, 10).is_err(),
             "invalid range accepted"
         );
     }
     ensure!(
-        advance_range(0, 0, 0, 0, 1)? == 0,
+        advance_range(0, 0, 0, 0, 1, 0)? == 0,
         "single empty file rejected"
     );
     ensure!(
-        advance_range(u64::MAX, u64::MAX, 1, 1, 1).is_err(),
+        advance_range(u64::MAX, u64::MAX, 1, 1, 1, u64::MAX).is_err(),
         "overflow accepted"
+    );
+    ensure!(
+        advance_range(0, 0, 1024 * 1024, 1024 * 1024, 1, 1).is_err(),
+        "oversized component must fail before any pack staging"
     );
     Ok(())
 }
@@ -191,7 +223,7 @@ async fn native_zero_hit_preservation_authorized_read_after_legacy_drop_and_unkn
     };
     let root = tempfile::tempdir()?;
     let _lease = registration_lease(root.path())?;
-    let tx = client.transaction().await?;
+    let tx = begin_complete_file_transaction(&mut client).await?;
     let created = register_payload(&tx, &request, Cursor::new(&raw), root.path(), 4096).await?;
     ensure!(
         created["read_proof"]["full_raw_integrity_verified"] == true
@@ -371,8 +403,11 @@ async fn native_zero_hit_preservation_authorized_read_after_legacy_drop_and_unkn
     client
         .batch_execute(&format!("SET app.user_id='{WRITER}'"))
         .await?;
+    // Use the CLI's actual transaction path: the SQL reader epoch rejects
+    // repeatable-read isolation even when service-only autocommit reads pass.
+    let read_tx = begin_complete_file_transaction(&mut client).await?;
     let mut verified = read_verified(
-        &client,
+        &read_tx,
         &id,
         "1",
         false,
@@ -387,6 +422,7 @@ async fn native_zero_hit_preservation_authorized_read_after_legacy_drop_and_unkn
         output == raw,
         "nonadmin authorized complete bytes differ after legacy drop"
     );
+    read_tx.commit().await?;
     let first: i64 = client
         .query_one(
             "SELECT count(*) FROM storage_v2_complete_file_components(3,'1',$1,-1,false)",
@@ -447,6 +483,38 @@ async fn native_zero_hit_preservation_authorized_read_after_legacy_drop_and_unkn
             .await
             .is_err(),
         "gap in native complete-file mapping escaped verification"
+    );
+    tx.rollback().await?;
+    // A genuine generation-member body cannot be returned under a complete
+    // identity smaller than that body, even before inline bytes are projected.
+    let mut too_short = page_id.clone();
+    too_short.logical_bytes = 1;
+    too_short.sha256 = hex::encode(Sha256::digest(b"x"));
+    let tx = begin_complete_file_transaction(&mut client).await?;
+    tx.query(
+        "SELECT * FROM storage_v2_replace_legacy_hit_mapping($1,$2,'exact',$3,$4)",
+        &[
+            &too_short.mapping_id()?,
+            &vec![fragments[0].occurrence_id],
+            &vec![fragments[0].logical_bytes],
+            &vec![0i64],
+        ],
+    )
+    .await?;
+    let rejected = tx
+        .query(
+            "SELECT * FROM storage_v2_complete_file_components(3,'1',$1,-1,false)",
+            &[&too_short.mapping_id()?],
+        )
+        .await;
+    ensure!(
+        rejected
+            .as_ref()
+            .err()
+            .and_then(|error| error.as_db_error())
+            .is_some_and(|error| error.message()
+                == "native component outside admitted complete-file byte range"),
+        "SQL must reject an oversized component before returning payload"
     );
     tx.rollback().await?;
     client
