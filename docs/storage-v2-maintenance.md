@@ -74,3 +74,22 @@ current kernel occupancy, response validation and bound calculations. Timing is
 not a production write-budget admission or a completion estimate for all-hit
 mapping. Mapping completeness, package binding, candidate watermarks, durable
 proofs, source content reconstruction and cleanup approval remain separate.
+
+## Concurrent immutable mask proofs
+
+Migration 179 permits distinct occurrence proofs to be checked concurrently
+under a shared advisory transaction lock for their source. Ordinary source
+writers still require the exclusive lock. The exact existing reconstruction,
+authorization, canonical identity and block-manifest checks remain in place.
+Each proof retains its own transaction and post-commit acknowledgement.
+
+Existing migration-177 proof keys and row bytes remain valid through a private
+immutable semantic binding. This records the original verifier definition and
+dependency digest separately from the approved current implementation hash.
+Changed code or semantic dependencies fail closed. The application cannot
+modify the binding. The migration changes one public function and its sealed
+contract hash; it does not rebuild generations or rewrite existing proofs.
+
+An operator must bound concurrency and memory, preserve ordered results and
+reconcile unknown commit outcomes before resuming. Concurrency alone does not
+establish source completeness, performance acceptance or activation readiness.
