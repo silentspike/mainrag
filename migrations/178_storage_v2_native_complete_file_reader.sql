@@ -13,7 +13,7 @@ CREATE FUNCTION storage_v2_complete_file_components(
     dictionary_id BIGINT,dictionary_digest BYTEA,dictionary_bytes BYTEA
 ) LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path=pg_catalog,public SET row_security=off AS $$
-DECLARE v_resolved JSONB;
+DECLARE v_resolved JSONB;v_logical_bytes BIGINT;
 BEGIN
     -- Check source authority before looking up any mapping or storage identity.
     IF p_source_id IS NULL OR p_source_id<=0
@@ -26,12 +26,30 @@ BEGIN
        OR p_include_test IS NULL OR p_after_source_offset IS NULL OR p_after_source_offset < -1 THEN
         RAISE EXCEPTION 'bounded canonical complete file selector required';
     END IF;
+    v_logical_bytes:=split_part(p_complete_file_id,':',5)::BIGINT;
     PERFORM storage_v2_require_test_scope(p_source_id,p_include_test);
     -- Existing generation policy, retained history and source isolation remain
     -- authoritative. Arbitrary occurrence/body IDs are never accepted as input.
     v_resolved:=storage_v2_resolve_legacy_hit(p_source_id,p_generation_selector,p_complete_file_id);
     IF jsonb_array_length(v_resolved->'targets') NOT BETWEEN 1 AND 2048 THEN
         RAISE EXCEPTION 'complete file mapping is unresolved or exceeds bounds';
+    END IF;
+    -- Validate metadata before projecting any inline payload or asking the
+    -- reader to materialize an entire packed component on disk.
+    IF EXISTS(
+        SELECT 1 FROM jsonb_array_elements(v_resolved->'targets') target
+        JOIN legacy_hit_mapping m ON m.occurrence_id=(target->>'occurrence_id')::BIGINT
+            AND m.old_hit_id=p_complete_file_id
+        JOIN occurrence o ON o.id=m.occurrence_id AND o.source_id=p_source_id
+        JOIN artifact_version a ON a.id=o.artifact_version_id AND a.source_id=p_source_id
+        LEFT JOIN content_node n ON n.id=a.content_root_node_id
+        LEFT JOIN content_body b ON b.id=coalesce(a.raw_body_id,n.body_id)
+        WHERE b.id IS NULL OR b.logical_length<0 OR m.source_offset<0
+            OR m.byte_overlap IS DISTINCT FROM b.logical_length
+            OR m.source_offset::NUMERIC+b.logical_length::NUMERIC>v_logical_bytes::NUMERIC
+            OR (b.logical_length=0 AND jsonb_array_length(v_resolved->'targets')<>1)
+    ) THEN
+        RAISE EXCEPTION 'native component outside admitted complete-file byte range';
     END IF;
     RETURN QUERY
     WITH allowed AS MATERIALIZED (

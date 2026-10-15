@@ -119,15 +119,6 @@ fn persist(path: &Path, value: &Value) -> Result<()> {
     fs::File::open(path.parent().context("output parent required")?)?.sync_all()?;
     Ok(())
 }
-fn local(config: &tokio_postgres::Config) -> bool {
-    !config.get_hosts().is_empty()
-        && config.get_hosts().iter().all(|host| match host {
-            tokio_postgres::config::Host::Unix(_) => true,
-            tokio_postgres::config::Host::Tcp(host) => host
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback()),
-        })
-}
 async fn run() -> Result<()> {
     let args = Args::parse();
     let request_raw = protected_bytes(&args.request_file, 4 * 1024 * 1024)?;
@@ -154,7 +145,7 @@ async fn run() -> Result<()> {
     let connection_raw = protected_bytes(&args.connection_file, 65536)?;
     let config: tokio_postgres::Config = std::str::from_utf8(&connection_raw)?.trim().parse()?;
     ensure!(
-        local(&config),
+        complete::local_complete_file_connection(&config),
         "local socket or loopback transport required"
     );
     ensure!(
@@ -185,11 +176,7 @@ async fn run() -> Result<()> {
     )?;
     let (mut client, connection) = config.connect(NoTls).await?;
     let connection_task = tokio::spawn(connection);
-    let transaction = client
-        .build_transaction()
-        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-        .start()
-        .await?;
+    let transaction = complete::begin_complete_file_transaction(&mut client).await?;
     transaction
         .execute(
             "SELECT set_config('app.user_id',$1,true)",

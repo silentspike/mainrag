@@ -180,7 +180,7 @@ jobs:
           fixture_database=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["database"])' "$fixture_metadata")
           export MAINRAG_COMPLETE_FILE_FIXTURE_URL="postgresql://fixture:fixture_only@127.0.0.1:5432/$fixture_database"
           cargo test --locked -p mainrag-api --features storage-v2-retrieval --lib services::legacy_complete_file -- --include-ignored --nocapture | tee complete-file-tests.log
-          python3 -c 'from pathlib import Path; assert "5 passed; 0 failed; 0 ignored;" in Path("complete-file-tests.log").read_text(), "Expected all complete-file regressions including the native fixture"'
+          python3 -c 'from pathlib import Path; assert "6 passed; 0 failed; 0 ignored;" in Path("complete-file-tests.log").read_text(), "Expected all complete-file regressions including the native fixture"'
       - name: Verify final storage-v2 source read accounting
         shell: bash
         run: |
