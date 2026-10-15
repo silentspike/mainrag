@@ -597,6 +597,7 @@ jobs:
               'eval.storage_v2.schema.test_bounded_posting_token_keys.BoundedPostingTokenKeysTests',
               'eval.storage_v2.schema.test_linear_posting_run_classifier.LinearPostingRunClassifierTests',
               'eval.storage_v2.schema.test_cached_derived_mask_verification.CachedDerivedMaskVerificationTests.test_exact_miss_hit_drift_corruption_authority_and_progress',
+              'eval.storage_v2.schema.test_shared_mask_verifier_lock.SharedMaskVerifierLockTests.test_parallel_proof_lock_and_exact_historical_identity',
           ]
           shard = int(os.environ['SCHEMA_SHARD'])
           assert shard in (0, 1), 'Expected one of the two declared schema shards'
