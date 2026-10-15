@@ -81,7 +81,8 @@ def collect(args: argparse.Namespace, policy: dict) -> dict:
     )
     units = preflight.collect_units(policy)
     backup = preflight.load_backup(
-        args.backup_evidence, int(policy["backup_max_age_seconds"]), int(time.time())
+        args.backup_evidence, int(policy["backup_max_age_seconds"]), int(time.time()),
+        snapshot["database_identity"],
     )
     commit, tracked_clean = preflight.git_state()
     return preflight.evaluate(
