@@ -458,6 +458,20 @@ async fn registration_source<C: GenericClient + Sync>(
             &[&Some(request.identity.source_id), &request.include_test],
         )
         .await?;
+    // Registration is a pre-retirement maintenance operation. Read and
+    // reconcile use durable native mappings and never enter this boundary.
+    let legacy_available: bool = client
+        .query_one(
+            "SELECT to_regclass('public.files') IS NOT NULL \
+             AND to_regclass('public.chunks') IS NOT NULL",
+            &[],
+        )
+        .await?
+        .get(0);
+    ensure!(
+        legacy_available,
+        "legacy complete-file registration is retired; native read and reconcile remain available"
+    );
     let locked: Value = client
         .query_one(
             "SELECT storage_v2_lock_legacy_hit_source($1,$2,$3)",

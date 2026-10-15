@@ -452,6 +452,38 @@ async fn native_zero_hit_preservation_authorized_read_after_legacy_drop_and_unkn
     client
         .batch_execute(&format!("SET ROLE mainrag;SET app.user_id='{WRITER}'"))
         .await?;
+    client
+        .batch_execute(&format!("SET app.user_id='{ADMIN}'"))
+        .await?;
+    for rejected in [
+        register_existing(
+            &client,
+            &request,
+            &[ExistingFragment {
+                occurrence_id: occurrence,
+                source_offset: 0,
+                logical_bytes: raw.len() as i64,
+            }],
+            root.path(),
+            4096,
+        )
+        .await,
+        register_payload(&client, &request, NeverRead, root.path(), 4096).await,
+    ] {
+        let error = rejected.err().context("retired registration accepted")?;
+        ensure!(
+            error.to_string().contains("registration is retired"),
+            "registration touched removed legacy objects or payload input: {error:#}"
+        );
+    }
+    client
+        .batch_execute(&format!("SET app.user_id='{WRITER}'"))
+        .await?;
+    let reconciliation = reconcile(&client, &id, "1", false).await?;
+    ensure!(
+        reconciliation["new_dispatches"] == 0 && reconciliation["committed_visible_targets"] == 1,
+        "native reconciliation changed after legacy retirement"
+    );
     // Use the CLI's actual transaction path: the SQL reader epoch rejects
     // repeatable-read isolation even when service-only autocommit reads pass.
     let read_tx = begin_complete_file_transaction(&mut client).await?;

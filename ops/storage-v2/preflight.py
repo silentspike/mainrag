@@ -28,6 +28,12 @@ BACKUP_SPEC = importlib.util.spec_from_file_location(
 assert BACKUP_SPEC and BACKUP_SPEC.loader
 BACKUP_OBSERVE = importlib.util.module_from_spec(BACKUP_SPEC)
 BACKUP_SPEC.loader.exec_module(BACKUP_OBSERVE)
+LOCAL_BACKUP_SPEC = importlib.util.spec_from_file_location(
+    "storage_v2_local_backup", HERE / "local-backup.py"
+)
+assert LOCAL_BACKUP_SPEC and LOCAL_BACKUP_SPEC.loader
+LOCAL_BACKUP = importlib.util.module_from_spec(LOCAL_BACKUP_SPEC)
+LOCAL_BACKUP_SPEC.loader.exec_module(LOCAL_BACKUP)
 
 
 DATABASE_SNAPSHOT_SQL = r"""
@@ -127,6 +133,8 @@ WITH settings AS (
       JOIN pg_am am ON am.oid = c.relam
 )
 SELECT jsonb_build_object(
+    'database_identity',jsonb_build_object('system_identifier',(SELECT system_identifier::TEXT FROM pg_control_system()),
+       'database',current_database(),'database_oid',(SELECT oid FROM pg_database WHERE datname=current_database())),
     'server_version', current_setting('server_version'),
     'server_version_num', current_setting('server_version_num')::integer,
     'settings', settings.value,
@@ -312,7 +320,8 @@ def collect_units(policy: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def load_backup(path: Path | None, max_age_seconds: int, now: int) -> dict[str, Any]:
+def load_backup(path: Path | None, max_age_seconds: int, now: int,
+                expected_identity: dict | None = None) -> dict[str, Any]:
     if path is None:
         return {
             "status": "BLOCKED",
@@ -344,6 +353,8 @@ def load_backup(path: Path | None, max_age_seconds: int, now: int) -> dict[str, 
         value = json.loads(evidence_raw, object_pairs_hook=BACKUP_OBSERVE.unique_keys)
     except (ValueError, UnicodeError) as error:
         raise RuntimeError("backup evidence is invalid JSON") from error
+    if isinstance(value, dict) and value.get("schema_version") == LOCAL_BACKUP.SCHEMA:
+        return LOCAL_BACKUP.validate_evidence(path, max_age_seconds, now, expected_identity)
     required = {"schema_version", "status", "stanza", "completed_at_unix",
                 "artifact_file", "artifact_sha256", "backup_type",
                 "backup_label_sha256", "restore_tested", "observed_at_unix"}
@@ -600,7 +611,8 @@ def main() -> int:
         ["sudo", "-n", "-u", "postgres"] if args.local_postgres else None,
     )
     units = collect_units(policy)
-    backup = load_backup(args.backup_evidence, int(policy["backup_max_age_seconds"]), now)
+    backup = load_backup(args.backup_evidence, int(policy["backup_max_age_seconds"]), now,
+                         snapshot["database_identity"])
     commit, tracked_clean = git_state()
     manifest = evaluate(
         snapshot, client_version, schema_sha256, units, backup, policy,
