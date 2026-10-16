@@ -137,6 +137,15 @@ fn generation_selector(selector: &str) -> Result<()> {
     Ok(())
 }
 
+fn database_generation_selector(selector: &str) -> Result<&str> {
+    generation_selector(selector)?;
+    Ok(if selector == "active" {
+        "current"
+    } else {
+        selector
+    })
+}
+
 pub struct BoundedEncoded<R> {
     input: R,
     remaining: u64,
@@ -213,7 +222,7 @@ async fn source_read<C: GenericClient + Sync>(
     include_test: bool,
 ) -> Result<Value> {
     identity.validate()?;
-    generation_selector(generation)?;
+    let selector = database_generation_selector(generation)?;
     client
         .execute(
             "SELECT storage_v2_require_test_scope($1,$2)",
@@ -223,7 +232,7 @@ async fn source_read<C: GenericClient + Sync>(
     let result: Value = client
         .query_one(
             "SELECT storage_v2_resolve_legacy_hit($1,$2,$3)",
-            &[&identity.source_id, &generation, &identity.mapping_id()?],
+            &[&identity.source_id, &selector, &identity.mapping_id()?],
         )
         .await?
         .get(0);
@@ -288,6 +297,7 @@ pub async fn read_verified<C: GenericClient + Sync>(
         maximum_logical_bytes > 0 && identity.logical_bytes <= maximum_logical_bytes,
         "bounded complete-file scratch admission required"
     );
+    let selector = database_generation_selector(generation)?;
     let resolved = source_read(client, identity, generation, include_test).await?;
     let targets = resolved["targets"]
         .as_array()
@@ -314,7 +324,7 @@ pub async fn read_verified<C: GenericClient + Sync>(
                     "SELECT * FROM storage_v2_complete_file_components($1,$2,$3,$4,$5)",
                     &[
                         &identity.source_id,
-                        &generation,
+                        &selector,
                         &identity.mapping_id()?,
                         &cursor,
                         &include_test,
