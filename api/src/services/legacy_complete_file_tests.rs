@@ -26,6 +26,39 @@ fn namespace_is_disjoint_canonical_and_revision_specific() -> Result<()> {
     first = identity(b"");
     first.source_id = 0;
     ensure!(first.mapping_id().is_err(), "invalid source accepted");
+    for selector in ["active", "1", "9223372036854775807"] {
+        ensure!(
+            generation_selector(selector).is_ok(),
+            "canonical generation selector rejected: {selector}"
+        );
+        ensure!(
+            database_generation_selector(selector)?
+                == if selector == "active" {
+                    "current"
+                } else {
+                    selector
+                },
+            "CLI selector was not translated at the database boundary: {selector}"
+        );
+    }
+    for selector in [
+        "",
+        "0",
+        "-1",
+        "+1",
+        "01",
+        " 1",
+        "1 ",
+        "current",
+        "ACTIVE",
+        "9223372036854775808",
+    ] {
+        ensure!(
+            generation_selector(selector).is_err()
+                && database_generation_selector(selector).is_err(),
+            "noncanonical CLI generation selector accepted: {selector}"
+        );
+    }
     Ok(())
 }
 #[test]
@@ -172,6 +205,17 @@ async fn native_zero_hit_preservation_authorized_read_after_legacy_drop_and_unkn
     client
         .batch_execute(&format!("SET ROLE mainrag;SET app.user_id='{ADMIN}'"))
         .await?;
+    let active_generation: i64 = client
+        .query_one(
+            "SELECT generation.id FROM logical_source source \
+             JOIN source_generation generation ON generation.id=source.active_generation_id \
+                 AND generation.source_id=source.id \
+             WHERE source.id=3 AND generation.generation_seq=1 \
+                 AND generation.status='active' AND generation.verified_at IS NOT NULL",
+            &[],
+        )
+        .await?
+        .get(0);
     // Exercise the application role's real public API, not the fixture owner's
     // implicit execution rights. The unscoped scalar remains private.
     let routines = [
@@ -479,6 +523,55 @@ async fn native_zero_hit_preservation_authorized_read_after_legacy_drop_and_unkn
     client
         .batch_execute(&format!("SET app.user_id='{WRITER}'"))
         .await?;
+    // The CLI's public "active" selector must resolve the real active pointer,
+    // including native component pagination after both legacy tables are gone.
+    // This also fails if only source_read normalizes the selector while the
+    // ordered component query still passes "active" to the SQL boundary.
+    let active_resolution = source_read(&client, &page_id, "active", false).await?;
+    ensure!(
+        active_resolution["generation_id"] == active_generation
+            && active_resolution["generation_seq"] == 1
+            && active_resolution["resolution_scope"] == "selected_generation"
+            && active_resolution["targets"]
+                .as_array()
+                .is_some_and(|targets| targets.len() == 33),
+        "active selector did not resolve the fixture's actual native generation"
+    );
+    ensure!(
+        active_resolution == source_read(&client, &page_id, "1", false).await?,
+        "active and numeric selectors resolved different native mappings"
+    );
+    let active_tx = begin_complete_file_transaction(&mut client).await?;
+    let mut active_file = read_verified(
+        &active_tx,
+        &page_id,
+        "active",
+        false,
+        page_raw.len() as u64,
+        root.path(),
+        4096,
+    )
+    .await?;
+    let mut active_output = Vec::new();
+    active_file.copy_to(&mut active_output)?;
+    ensure!(
+        active_output == page_raw
+            && active_file.proof["fragments"] == 33
+            && active_file.proof["full_raw_integrity_verified"] == true,
+        "active ordered native bytes or paged full-file proof differ"
+    );
+    active_tx.commit().await?;
+    for (identity, expected_targets) in [(&id, 1), (&page_id, 33)] {
+        let active_reconciliation = reconcile(&client, identity, "active", false).await?;
+        ensure!(
+            active_reconciliation["new_dispatches"] == 0
+                && active_reconciliation["committed_visible_targets"] == expected_targets
+                && active_reconciliation["resolution"]["generation_id"] == active_generation
+                && active_reconciliation["automatic_retry_allowed"] == false
+                && active_reconciliation["full_raw_integrity_verified"] == false,
+            "active reconciliation changed mapping visibility or fabricated byte acceptance"
+        );
+    }
     let reconciliation = reconcile(&client, &id, "1", false).await?;
     ensure!(
         reconciliation["new_dispatches"] == 0 && reconciliation["committed_visible_targets"] == 1,
@@ -665,6 +758,24 @@ async fn native_zero_hit_preservation_authorized_read_after_legacy_drop_and_unkn
             .await
             .is_err(),
         "direct metadata authorization bypass"
+    );
+    ensure!(
+        source_read(&client, &page_id, "active", false)
+            .await
+            .is_err()
+            && reconcile(&client, &page_id, "active", false).await.is_err()
+            && read_verified(
+                &client,
+                &page_id,
+                "active",
+                false,
+                page_raw.len() as u64,
+                root.path(),
+                4096,
+            )
+            .await
+            .is_err(),
+        "active selector bypassed source read authorization"
     );
     client
         .batch_execute(&format!("SET app.user_id='{WRITER}'"))
