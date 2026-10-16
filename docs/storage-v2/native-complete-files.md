@@ -34,6 +34,11 @@ selector, original legacy epoch and hash, expected mapping state, test scope,
 and finite logical, pack and scratch limits. Existing fragments name native
 occurrences with original byte offsets and lengths.
 
+The generation selector is `active` or a canonical positive generation sequence.
+The CLI translates `active` to the database resolver's `current` selector for
+both mapping resolution and component reads. The request and its receipts retain
+the original selector.
+
 The outer maintenance operator must reserve the entire simultaneous scratch
 and pack allocation before dispatch. Per-file limits do not renew the original
 global time, read, write, WAL or storage budget.
