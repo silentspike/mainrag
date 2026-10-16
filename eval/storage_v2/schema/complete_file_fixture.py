@@ -27,8 +27,29 @@ def main():
       f"{view},'/synthetic/full-page.txt',{case.quote(locator)}::JSONB)")
    case.sql(case.admin(statement));case.complete_analysis(digest);offset+=length
   case.commit(run,33)
+  generation=int(case.sql(f'SELECT generation_id FROM storage_v2_ingest_run WHERE id={run}'))
+  # Existing disposable-reader fixture setup: install a genuine pointer/state
+  # pair without claiming release qualification or production activation. Only
+  # the fixture owner touches its own newly created source3 generation here.
+  case.sql(f"""BEGIN;
+    ALTER TABLE source_generation DISABLE TRIGGER USER;
+    ALTER TABLE logical_source DISABLE TRIGGER USER;
+    UPDATE source_generation SET status='active',activated_at=now()
+      WHERE id={generation} AND source_id=3 AND generation_seq=1 AND status='verified';
+    UPDATE logical_source SET active_generation_id={generation}
+      WHERE id=3 AND active_generation_id IS NULL;
+    COMMIT;
+    ALTER TABLE source_generation ENABLE TRIGGER USER;
+    ALTER TABLE logical_source ENABLE TRIGGER USER;""")
+  active=case.sql(f"""SELECT count(*) FROM logical_source source
+    JOIN source_generation generation ON generation.id=source.active_generation_id
+      AND generation.source_id=source.id
+    WHERE source.id=3 AND generation.id={generation} AND generation.generation_seq=1
+      AND generation.status='active' AND generation.verified_at IS NOT NULL""")
+  if active!='1':raise RuntimeError('DISPOSABLE_NATIVE_ACTIVE_POINTER_SETUP_FAILED')
   metadata=dict(database=fixture.database,socket=str(fixture.socket),source_id=3,
     native_fragments=33,logical_bytes=offset,read_boundary_sha256=a.read_boundary_sha256,
+    active_generation_id=generation,active_generation_seq=1,activation_acceptance_claimed=False,
     production_data_imported=False)
   with a.output.open('x') as f:os.fchmod(f.fileno(),0o600);json.dump(metadata,f,sort_keys=True);f.flush();os.fsync(f.fileno())
   print('READY:33 verified public native windows; no tests executed',flush=True)
