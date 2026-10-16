@@ -38,9 +38,9 @@ def main():
       WHERE id={generation} AND source_id=3 AND generation_seq=1 AND status='verified';
     UPDATE logical_source SET active_generation_id={generation}
       WHERE id=3 AND active_generation_id IS NULL;
+    COMMIT;
     ALTER TABLE source_generation ENABLE TRIGGER USER;
-    ALTER TABLE logical_source ENABLE TRIGGER USER;
-    COMMIT;""")
+    ALTER TABLE logical_source ENABLE TRIGGER USER;""")
   active=case.sql(f"""SELECT count(*) FROM logical_source source
     JOIN source_generation generation ON generation.id=source.active_generation_id
       AND generation.source_id=source.id
