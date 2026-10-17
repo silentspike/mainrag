@@ -54,7 +54,16 @@ Registration creates no generation or generation membership. The reader checks
 source authorization, supports retained generation resolution, and keeps native
 reader epochs throughout pack access. Component pages are bounded to 32 rows.
 
+Both registration operations require the original legacy `files` and `chunks`
+tables to check the file revision, mutation epoch, original metadata hash and
+path. Finish registration before dropping those tables. After retirement, `read`
+and `reconcile` resolve durable native mappings without querying the legacy
+content tables; registration is rejected. Retain those mappings, their native
+roots and the reader's SQL dependencies in the cleanup manifest.
+
 This service provides a complete-file consumer after legacy content tables are
 retired. Its availability does not establish that all other legacy callers have
 been removed, authorize cleanup, or prove physical storage savings. Those gates
 remain bound to the exact cleanup manifest and accepted activation evidence.
+The [maintenance contract](../storage-v2-maintenance.md#legacy-retirement-and-retention)
+describes that boundary and the separate backup and pack-retention obligations.

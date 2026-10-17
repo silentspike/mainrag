@@ -666,6 +666,15 @@ file tables. They do not automatically construct mappings, prove source byte
 overlaps, or authorize legacy deletion; the compatibility inventory and its
 source-backed mapping producer must establish those before cleanup.
 
+Complete historical files use the same retained mapping namespace through the
+[`mainrag-complete-file` interface](storage-v2/native-complete-files.md), including
+files with no searchable hits. Its `legacy-file-v1:` identity binds the original
+source, file, revision, byte length and raw digest. Registration must finish
+before legacy content tables are removed; native reads and metadata reconciliation
+remain available afterwards. Registration does not create a generation or move
+an active pointer. See the [retirement and retention procedure](storage-v2-maintenance.md#legacy-retirement-and-retention)
+for the separate coverage, acknowledgement and deletion boundaries.
+
 ## Exact retrieval contract
 
 Storage v2 indexes unique content/search documents and relates their postings to
