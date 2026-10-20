@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 load_token = runpy.run_path(str(Path(__file__).with_name("operator_token.py")))["load_token"]
+IMMUTABLE = runpy.run_path(str(Path(__file__).with_name("immutable-watermark.py")))
 
 
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -282,7 +283,8 @@ def bind_live(candidate_set: list[dict], rows: list[dict]) -> list[dict]:
 
 
 def verify_current_api_watermarks(api_url: str, token: str,
-                                  candidate_set: list[dict]) -> list[dict]:
+                                  candidate_set: list[dict], *, immutable_bindings=None,
+                                  query=None, api_state=None) -> list[dict]:
     observed_rows = []
     parsed = urllib.parse.urlparse(api_url)
     if parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "::1") \
@@ -293,8 +295,8 @@ def verify_current_api_watermarks(api_url: str, token: str,
         def redirect_request(self, request, fp, code, msg, headers, newurl):
             return None
     opener = urllib.request.build_opener(NoRedirect)
-    for item in candidate_set:
-        source_id = item["source_id"]
+    http_times = {}
+    def http_observe(source_id: int) -> dict:
         request = urllib.request.Request(
             api_url.rstrip("/")
             + f"/api/v1/admin/sources/{source_id}/storage-v2-release-watermark",
@@ -305,17 +307,39 @@ def verify_current_api_watermarks(api_url: str, token: str,
                 observed = json.load(response)
         except (OSError, ValueError) as error:
             raise RuntimeError("current release source watermark readback failed") from error
+        http_times[source_id] = int(time.time())
+        return observed
+
+    observations = IMMUTABLE["observe"](candidate_set, http_observe,
+        bundle=immutable_bindings, read=read_private, query=query,
+        api_state=api_state or api_unit_state)
+    for item in candidate_set:
+        source_id = item["source_id"]
+        observed = observations[source_id]
         if not isinstance(observed, dict) or observed.get("source_id") != source_id \
                 or observed.get("source_watermark_sha256") != item["source_watermark_sha256"] \
                 or observed.get("adapter_profile_id") != item["adapter_profile_id"] \
                 or observed.get("item_count") != item["item_count"]:
             raise RuntimeError("final source watermark drifted before activation")
-        observed_rows.append({"source_id": source_id,
+        row = {"source_id": source_id,
                               "watermark_sha256": observed["source_watermark_sha256"],
                               "adapter_profile_id": observed["adapter_profile_id"],
                               "item_count": observed["item_count"],
-                              "observed_at_unix": int(time.time())})
+               "observed_at_unix": (observed["observation_origin"]["observed_at_unix"]
+                                    if IMMUTABLE["immutable"](item) else http_times[source_id])}
+        if IMMUTABLE["immutable"](item):
+            row["observation_origin"] = observed["observation_origin"]
+        observed_rows.append(row)
     return observed_rows
+
+
+def immutable_options(args: argparse.Namespace) -> dict:
+    path = getattr(args, "immutable_watermarks", None)
+    expected = getattr(args, "immutable_watermarks_sha256", None)
+    if (path is None) != (expected is None):
+        raise RuntimeError("immutable watermarks require exact bindings and digest")
+    return {"immutable_bindings": read_private(path, expected) if path is not None else None,
+            "query": lambda sql: psql(args.database, sql, args.local_postgres, readonly=True)}
 
 
 def api_unit_state() -> dict[str, str]:
@@ -367,7 +391,8 @@ def capture_watermarks_command(args: argparse.Namespace) -> None:
     binary_sha = sha256(args.installed_binary.read_bytes())
     if running_binary_sha256(before.get("MainPID", "")) != binary_sha:
         raise RuntimeError("running watermark reader differs from installed binary")
-    rows = verify_current_api_watermarks(args.api_url, args.api_token, candidates)
+    rows = verify_current_api_watermarks(args.api_url, args.api_token, candidates,
+                                         **immutable_options(args))
     now = int(time.time())
     if any(not 0 <= now - row["observed_at_unix"] <= 300 for row in rows):
         raise RuntimeError("watermark capture exceeded the freshness boundary")
@@ -380,6 +405,7 @@ def capture_watermarks_command(args: argparse.Namespace) -> None:
                "installed_binary_sha256": binary_sha,
                "reader_pid": int(before["MainPID"]), "source_count": len(rows),
                "watermarks": rows, "captured_at_unix": now,
+               "immutable_watermarks_sha256": getattr(args, "immutable_watermarks_sha256", None),
                "api_stopped": False}
     private_write(args.output, receipt)
     print(json.dumps({"status": receipt["status"], "source_count": len(rows),
@@ -427,12 +453,31 @@ def verify_activation_watermarks(args: argparse.Namespace, candidates: list[dict
     if path is None:
         if digest is not None:
             raise RuntimeError("quiesced watermark path is missing")
-        verify_current_api_watermarks(args.api_url, args.api_token, candidates)
+        verify_current_api_watermarks(args.api_url, args.api_token, candidates,
+                                      **immutable_options(args))
         return
     receipt = read_private(path, digest)
     verify_quiesced_watermarks(receipt, candidates,
                               acceptance["installed_binary_sha256"], int(time.time()))
     require_stopped_api()
+    options = immutable_options(args)
+    if receipt.get("immutable_watermarks_sha256") != getattr(args, "immutable_watermarks_sha256", None):
+        raise RuntimeError("quiesced immutable bindings differ from live capture")
+    cuts = [item for item in candidates if IMMUTABLE["immutable"](item)]
+    if cuts:
+        origins = [row.get("observation_origin", {}) for row in receipt["watermarks"]
+                   if row["source_id"] in {item["source_id"] for item in cuts}]
+        registries = {origin.get("api_registry") for origin in origins}
+        if len(origins) != len(cuts) or len(registries) != 1 \
+                or any(origin.get("method") != IMMUTABLE["METHOD"] for origin in origins) \
+                or not all(isinstance(value, str) for value in registries):
+            raise RuntimeError("quiesced immutable API registry provenance is missing")
+        def no_http(source_id):
+            raise RuntimeError("quiesced observation cannot call the API")
+        IMMUTABLE["observe"](cuts, no_http, bundle=options["immutable_bindings"],
+            read=read_private, query=options["query"], api_state=None,
+            captured_registry=Path(next(iter(registries))))
+        require_stopped_api()
 
 
 def sql_literal(value: str) -> str:
@@ -506,6 +551,7 @@ def plan_command(args: argparse.Namespace) -> None:
                      args.local_postgres, now)
     verify_activation_watermarks(args, audit["candidate_set"], acceptance)
     plan["quiesced_watermarks_sha256"] = getattr(args, "quiesced_watermarks_sha256", None)
+    plan["immutable_watermarks_sha256"] = getattr(args, "immutable_watermarks_sha256", None)
     private_write(args.output, plan)
     print(json.dumps({"status": plan["status"],
                       "plan_sha256": sha256(args.output.read_bytes()),
@@ -652,6 +698,8 @@ def apply_command(args: argparse.Namespace) -> None:
         fresh_preflight, now)
     if plan.get("quiesced_watermarks_sha256") != getattr(args, "quiesced_watermarks_sha256", None):
         raise RuntimeError("approved maintenance watermark binding differs")
+    if plan.get("immutable_watermarks_sha256") != getattr(args, "immutable_watermarks_sha256", None):
+        raise RuntimeError("approved immutable watermark bindings differ")
     verify_activation_watermarks(args, candidate_set, acceptance)
     validate_preflight(fresh_preflight, acceptance["preflight_operator_commit_sha"],
                        acceptance["schema_sha256"], now, maximum_age=300)
@@ -721,6 +769,9 @@ def main() -> int:
     parser.add_argument("--preflight-sha256")
     parser.add_argument("--quiesced-watermarks", type=Path)
     parser.add_argument("--quiesced-watermarks-sha256")
+    parser.add_argument("--immutable-watermarks", type=Path,
+                        help="Protected accepted immutable source proof bindings")
+    parser.add_argument("--immutable-watermarks-sha256")
     parser.add_argument("--installed-binary", type=Path, required=True)
     parser.add_argument("--plan", type=Path)
     parser.add_argument("--plan-sha256")
@@ -738,6 +789,8 @@ def main() -> int:
         parser.error("the installed API binary path is required")
     if (args.quiesced_watermarks is None) != (args.quiesced_watermarks_sha256 is None):
         parser.error("quiesced watermarks require an exact receipt and digest")
+    if (args.immutable_watermarks is None) != (args.immutable_watermarks_sha256 is None):
+        parser.error("immutable watermarks require exact bindings and digest")
     if args.phase != "capture-watermarks" and any(getattr(args, key) is None for key in
                                                  ("acceptance", "preflight", "preflight_sha256")):
         parser.error("activation plan/apply requires acceptance and exact preflight")

@@ -66,6 +66,15 @@ def observation(api_url: str, token: str, source_id: int) -> dict:
     return value
 
 
+def observe_sources(args: argparse.Namespace, candidates: list[dict], token: str) -> dict[int, dict]:
+    """The plan and finalization share one strict observation boundary."""
+    options = ACTIVATION.immutable_options(args)
+    return ACTIVATION.IMMUTABLE["observe"](candidates,
+        lambda source_id: observation(args.api_url, token, source_id),
+        bundle=options["immutable_bindings"], read=ACTIVATION.read_private,
+        query=options["query"], api_state=ACTIVATION.api_unit_state)
+
+
 def candidate_rows(rows: list[dict], baseline: list[dict]) -> dict[int, tuple[dict, dict]]:
     if len(rows) != len(baseline):
         raise RuntimeError("registered final-delta source set differs")
@@ -147,6 +156,8 @@ def make_plan(audit: dict, audit_sha: str, rows: list[dict], observed: dict[int,
             "observed_item_count": current["item_count"],
             "observed_input_bytes": current["input_bytes"],
             "application_read_bytes": current["application_read_bytes"],
+            **({"observation_origin": current["observation_origin"]}
+               if "observation_origin" in current else {}),
             "expected_active_generation_id": item["expected_active_generation_id"],
         })
     return {
@@ -299,12 +310,17 @@ def main() -> int:
     parser.add_argument("--plan-sha256")
     parser.add_argument("--receipts", type=Path)
     parser.add_argument("--receipts-sha256")
+    parser.add_argument("--immutable-watermarks", type=Path,
+                        help="Protected accepted immutable source proof bindings")
+    parser.add_argument("--immutable-watermarks-sha256")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_-]+", args.database):
         parser.error("database must be a local database name")
     if args.output.exists() or args.output.is_symlink():
         parser.error("protected final delta output already exists")
+    if (args.immutable_watermarks is None) != (args.immutable_watermarks_sha256 is None):
+        parser.error("immutable watermarks require exact bindings and digest")
     if args.phase == "plan" and not args.runtime_commit_sha:
         parser.error("plan requires an exact installed runtime commit")
     if args.phase == "finalize" and any(getattr(args, name) is None for name in (
@@ -333,8 +349,7 @@ def main() -> int:
             int(time.time()), maximum_age=1800 if args.phase == "plan" else 300)
         candidates = validate_audit(audit)
         rows = INVENTORY.read_sources(args.database, args.local_postgres)
-        observed = {item["source_id"]: observation(args.api_url, token, item["source_id"])
-                    for item in candidates}
+        observed = observe_sources(args, candidates, token)
         if ACTIVATION.canonical(rows) != ACTIVATION.canonical(
             INVENTORY.read_sources(args.database, args.local_postgres)):
             raise RuntimeError("registered source or candidate state drifted during observation")
@@ -347,6 +362,7 @@ def main() -> int:
             plan = ACTIVATION.read_private(args.plan, args.plan_sha256)
             receipts = ACTIVATION.read_private(args.receipts, args.receipts_sha256)
             if plan.get("baseline_audit_sha256") != args.baseline_audit_sha256 \
+                    or plan.get("immutable_watermarks_sha256") != args.immutable_watermarks_sha256 \
                     or plan.get("operator_commit_sha") != args.operator_commit_sha \
                     or plan.get("schema_sha256") != args.schema_sha256 \
                     or plan.get("installed_binary_sha256") != args.installed_binary_sha256 \
@@ -354,6 +370,10 @@ def main() -> int:
                         plan.get("runtime_commit_sha") != args.runtime_commit_sha):
                 raise RuntimeError("final delta baseline audit differs")
             value = finalize(plan, audit, receipts, rows, observed, ACTIVATION.read_private)
+        value["immutable_watermarks_sha256"] = args.immutable_watermarks_sha256
+        value["watermark_observation_origins"] = {
+            str(source_id): value["observation_origin"] for source_id, value in observed.items()
+            if "observation_origin" in value}
         ACTIVATION.private_write(args.output, value)
     except (RuntimeError, OSError, FileExistsError, KeyError, TypeError) as error:
         parser.error(str(error))
