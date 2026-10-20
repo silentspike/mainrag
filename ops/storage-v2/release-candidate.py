@@ -989,6 +989,8 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
     """Require complete legacy path recall and independent support for every new hit."""
     version = evidence.get("schema_version")
     policy = ("simple-conjunction-source-snapshot-v1" if source_review is not None else
+              "copied-jsonl-body-non-inferiority-v1"
+              if version == "mainrag.storage-v2.query-coverage.v5" else
               "simple-conjunction-non-inferiority-v2"
               if version == "mainrag.storage-v2.query-coverage.v4" else
               "simple-conjunction-non-inferiority-v1"
@@ -998,9 +1000,11 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
     if version not in {"mainrag.storage-v2.query-coverage.v1",
                        "mainrag.storage-v2.query-coverage.v2",
                        "mainrag.storage-v2.query-coverage.v3",
-                       "mainrag.storage-v2.query-coverage.v4"} \
+                       "mainrag.storage-v2.query-coverage.v4",
+                       "mainrag.storage-v2.query-coverage.v5"} \
             or (source_review is not None
-                and version != "mainrag.storage-v2.query-coverage.v4") \
+                and version not in {"mainrag.storage-v2.query-coverage.v4",
+                                    "mainrag.storage-v2.query-coverage.v5"}) \
             or evidence.get("query_sha256") != sha256_text(seed["query"]) \
             or any(type(evidence.get(key)) is not int or evidence[key] <= 0
                    for key in ("source_id", "generation_id", "generation_seq")) \
@@ -1043,17 +1047,29 @@ def query_coverage_gates(seed: dict[str, Any], current: dict[str, Any], storage:
                          and row["posting_frequency"] == row["reference_frequency"])
                     or (version in {"mainrag.storage-v2.query-coverage.v2",
                                         "mainrag.storage-v2.query-coverage.v3",
-                                        "mainrag.storage-v2.query-coverage.v4"}
+                                        "mainrag.storage-v2.query-coverage.v4",
+                                        "mainrag.storage-v2.query-coverage.v5"}
                             and row.get("fts_body_matches") is True
                             and row.get("segment_matches") is True)
-                    or (version == "mainrag.storage-v2.query-coverage.v4"
+                    or (version in {"mainrag.storage-v2.query-coverage.v4",
+                                    "mainrag.storage-v2.query-coverage.v5"}
                             and row.get("legacy_segment_matches") is True
                             and row.get("segment_matches") is True)
+                    or (version == "mainrag.storage-v2.query-coverage.v5"
+                            and re.fullmatch(r"\w+", seed["query"]) is not None
+                            and 1 <= len(seed["query"].encode("utf-8")) <= 128
+                            and seed["query"].lower() not in {"and", "or", "not"}
+                            and row.get("copied_jsonl_body_matches") is True)
                     ):
                 return failed
             if identity == "occurrence_id" \
-                    and version == "mainrag.storage-v2.query-coverage.v4" \
+                    and version in {"mainrag.storage-v2.query-coverage.v4",
+                                    "mainrag.storage-v2.query-coverage.v5"} \
                     and type(row.get("legacy_segment_matches")) is not bool:
+                return failed
+            if identity == "occurrence_id" \
+                    and version == "mainrag.storage-v2.query-coverage.v5" \
+                    and type(row.get("copied_jsonl_body_matches")) is not bool:
                 return failed
     current_paths = path_identity(current["results"])
     storage_paths = path_identity(storage["results"])
