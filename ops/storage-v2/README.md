@@ -412,6 +412,15 @@ ordinary ingest and full search/intelligence/benchmark gate still follow
 before #67 can be accepted. Do not invoke `apply` without this complete
 approved procedure and a fresh explicit owner instruction for the exact plan.
 
+After a regular sync with actual source changes, retain its private API response
+or the JSON output of `mainrag --json source sync`. Run
+`activation-set.py verify-post-ingest` with the exact digests for the plan,
+committed attempt, default switch, and sync response. This read-only phase
+matches the first committed ingest receipt to the current pointer set and
+retains the observed source I/O. A no-change response does not establish the
+first changed ingest. Verify the active search, source inspection, intelligence
+commands, and benchmark before accepting #67.
+
 ```bash
 python3 ops/storage-v2/activation-set.py apply \
   --database mainrag --local-postgres \
