@@ -747,6 +747,11 @@ def exercise_disposable_catalog_protocol(database, socket, user_id, config=None)
         raise RuntimeError('only the declared public CI fixture transport is accepted')
     db = object.__new__(O.LocalDatabase)
     db.database, db.user_id = database, str(uuid.UUID(user_id))
+    container = os.environ.get('STORAGE_V2_TEST_LOCAL_CONTAINER')
+    if container:
+        from eval.storage_v2.schema.local_operator_fixture import container_psql
+        db.command = container_psql(container, database)
+        return _exercise_catalog_protocol(db, config)
     db.command = ['psql', '-X', '--no-psqlrc', '-qAt', '-v', 'ON_ERROR_STOP=1',
                   '-h', '127.0.0.1', '-d', database, '-U', 'fixture']
     environment = O.clean_environment() | {'PGUSER': 'fixture', 'PGPASSWORD': 'fixture_only'}
