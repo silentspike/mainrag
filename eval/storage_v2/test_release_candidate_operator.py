@@ -149,7 +149,8 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "digest differs"):
                 MODULE.load_gold_suite(arguments, checkpoint, verified, source_review)
 
-    def test_build_uses_unpredictable_public_source_reference(self) -> None:
+    @patch.object(MODULE, "thin_pool_capacity", return_value=None)
+    def test_build_uses_unpredictable_public_source_reference(self, _non_lvm_fixture) -> None:
         result = {"active_generation_before": None, "active_generation_after": None,
                   "item_count": 1, "generation_id": 2, "generation_seq": 1,
                   "source_watermark_sha256": "c" * 64, "reused_generation": False,
@@ -561,7 +562,8 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                         ["quality_passed"])
         self.assertFalse(MODULE.search_query_gates(seed, empty, empty, 2000)["quality_passed"])
 
-    def test_failed_queries_persist_private_evidence_and_never_qualify(self) -> None:
+    @patch.object(MODULE, "thin_pool_capacity", return_value=None)
+    def test_failed_queries_persist_private_evidence_and_never_qualify(self, _non_lvm_fixture) -> None:
         seed, current = self.search_fixture()
         for seeds in ([seed], []):
             with self.subTest(query_count=len(seeds)), tempfile.TemporaryDirectory() as temporary:
@@ -602,7 +604,8 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "output already exists"):
                     MODULE.verify(arguments, "private-token")
 
-    def test_deferred_performance_keeps_quality_and_never_publishes(self) -> None:
+    @patch.object(MODULE, "thin_pool_capacity", return_value=None)
+    def test_deferred_performance_keeps_quality_and_never_publishes(self, _non_lvm_fixture) -> None:
         seed, current = self.search_fixture()
         for fault in (None, "quality", "integrity", "lexical"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
@@ -885,7 +888,8 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
         self.assertEqual(state.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
 
-    def test_transport_failures_keep_completed_and_pending_proof_without_qualifying(self) -> None:
+    @patch.object(MODULE, "thin_pool_capacity", return_value=None)
+    def test_transport_failures_keep_completed_and_pending_proof_without_qualifying(self, _non_lvm_fixture) -> None:
         seed, current, storage, proof, identity = self.coverage_fixture()
         # Include bodies to prove pending results do not copy full response content.
         current["results"][0]["content"] = "private-pending-body"
@@ -1204,7 +1208,8 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
                 mutate(proof)
                 self.assertFalse(MODULE.query_coverage_gates(seed, current, storage, proof, checkpoint)["passed"])
 
-    def test_supported_coverage_is_bound_into_dual_read_and_qualification(self) -> None:
+    @patch.object(MODULE, "thin_pool_capacity", return_value=None)
+    def test_supported_coverage_is_bound_into_dual_read_and_qualification(self, _non_lvm_fixture) -> None:
         seed, current, storage, proof, identity = self.coverage_fixture()
         seed["id"] = "1" * 64
         with tempfile.TemporaryDirectory() as temporary:
@@ -1410,7 +1415,8 @@ class ReleaseCandidateOperatorTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "local production API"):
                 MODULE.observe_reader_package(arguments)
 
-    def test_failing_gold_case_stops_before_dual_read_or_qualification(self) -> None:
+    @patch.object(MODULE, "thin_pool_capacity", return_value=None)
+    def test_failing_gold_case_stops_before_dual_read_or_qualification(self, _non_lvm_fixture) -> None:
         seed, current, storage, proof, identity = self.coverage_fixture()
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
