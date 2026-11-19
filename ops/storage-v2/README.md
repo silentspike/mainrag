@@ -1655,6 +1655,10 @@ for the frozen generation. It publishes the index in one transaction. The word
 reader checks ready metadata, source access and current coverage for its
 requested occurrences. Ambiguous or conflicting hash candidates are checked
 against exact segments. Phrase and Boolean search use their established path.
+The pack groups six-byte entries by prefix after projecting narrow rows for
+the ordered aggregate. Native GC includes canonical references from staged
+projections, published generations and unfinished batches in its retention
+proof.
 
 The search footprint collector includes every retained staging and index
 relation in the search projection total. Source qualification measures the
