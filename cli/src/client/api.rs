@@ -168,11 +168,53 @@ pub struct HealthServices {
     pub tei: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum SyncSourceResponse {
     Active(ActiveSyncResponse),
     Legacy(LegacySyncResponse),
+}
+
+impl<'de> Deserialize<'de> for SyncSourceResponse {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("storage_v2").is_some() {
+            // The normal admin endpoint wraps the native receipt in storage_v2.
+            // Never fall back to legacy when that native response is malformed.
+            if value.get("status").and_then(|v| v.as_str()) != Some("completed") {
+                return Err(D::Error::custom("native sync did not complete"));
+            }
+            let mut native = value["storage_v2"].clone();
+            let fields = native
+                .as_object_mut()
+                .ok_or_else(|| D::Error::custom("native sync result is not an object"))?;
+            if fields.contains_key("source_id") || fields.contains_key("source_io") {
+                return Err(D::Error::custom("ambiguous native sync envelope"));
+            }
+            fields.insert("source_id".to_string(), value["source_id"].clone());
+            fields.insert("source_io".to_string(), value["stats"]["source_io"].clone());
+            if value["stats"]["errors"].as_u64() != Some(0) {
+                return Err(D::Error::custom("native sync reported errors"));
+            }
+            return serde_json::from_value(native)
+                .map(Self::Active)
+                .map_err(D::Error::custom);
+        }
+        if value.get("generation_id").is_some()
+            || matches!(
+                value.get("status").and_then(|v| v.as_str()),
+                Some("ACTIVE_INGEST_COMMITTED" | "NO_CHANGE")
+            )
+        {
+            return serde_json::from_value(value)
+                .map(Self::Active)
+                .map_err(D::Error::custom);
+        }
+        serde_json::from_value(value)
+            .map(Self::Legacy)
+            .map_err(D::Error::custom)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -187,6 +229,8 @@ pub struct ActiveSyncResponse {
     pub source_io: serde_json::Value,
     pub telemetry: serde_json::Value,
     pub receipt: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_attempt_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1741,5 +1785,44 @@ mod sync_response_tests {
             "source_id":7,"status":"completed"
         }))
         .is_err());
+    }
+
+    #[test]
+    fn actual_admin_sync_envelope_keeps_native_receipt_and_rejects_legacy_fallback() {
+        for status in ["ACTIVE_INGEST_COMMITTED", "NO_CHANGE"] {
+            let mut native = active(status);
+            let source_io = native.as_object_mut().unwrap().remove("source_io").unwrap();
+            native.as_object_mut().unwrap().remove("source_id");
+            native["progress_attempt_id"] = json!("00000000-0000-4000-8000-000000000007");
+            if status == "NO_CHANGE" {
+                native["receipt"] = serde_json::Value::Null;
+                native["changed_item_count"] = json!(0);
+            }
+            let input = json!({"status":"completed","source_id":7,"error_details":[],
+                "stats":{"files_processed":12,"chunks_created":0,"embeddings_generated":0,
+                    "errors":0,"source_io":source_io},"storage_v2":native});
+            let parsed: SyncSourceResponse = serde_json::from_value(input.clone()).unwrap();
+            assert!(matches!(&parsed, SyncSourceResponse::Active(_)));
+            let output = serde_json::to_value(&parsed).unwrap();
+            assert_eq!(output["receipt"], input["storage_v2"]["receipt"]);
+            assert_eq!(output["status"], status);
+            assert_eq!(output["source_io"], input["stats"]["source_io"]);
+            assert_eq!(
+                output["progress_attempt_id"],
+                input["storage_v2"]["progress_attempt_id"]
+            );
+            assert!(!parsed.summary().contains("chunks"));
+            for field in ["status", "generation_id", "generation_seq"] {
+                let mut broken = input.clone();
+                broken["storage_v2"].as_object_mut().unwrap().remove(field);
+                assert!(
+                    serde_json::from_value::<SyncSourceResponse>(broken).is_err(),
+                    "{field}"
+                );
+            }
+            let mut broken = input;
+            broken["stats"]["errors"] = json!(1);
+            assert!(serde_json::from_value::<SyncSourceResponse>(broken).is_err());
+        }
     }
 }
