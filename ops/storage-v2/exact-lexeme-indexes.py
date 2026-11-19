@@ -42,6 +42,37 @@ SIGNATURES = (
     'storage_v2_exact_lexeme_probes_ready()',
     'storage_v2_authorized_cached_lexical_first_candidates(bigint[],bigint[],text)',
     'storage_v2_scoped_query_posting(bigint[],text[])')
+KEY32_INDEXES = ('idx_storage_v2_compact_lexical_key32',
+                 'idx_storage_v2_compact_posting_key32')
+KEY32_EXPRESSIONS = (
+    'public.storage_v2_probe_keys32(public.storage_v2_compact_lexical_exact_lexemes(fts_vectors))',
+    'public.storage_v2_probe_keys32(terms)')
+KEY32_SIGNATURES = ('storage_v2_probe_keys32(text[])', 'storage_v2_key32_probes_ready()',
+                    'storage_v2_key32_probes_ready(text)')
+
+
+def index_variant(config=None):
+    variant = (config or {}).get('index_variant', 'wide')
+    if type(variant) is not str or variant not in ('wide', 'key32'):
+        raise RuntimeError('unknown reviewed index variant')
+    return variant
+
+
+def index_names(config=None):
+    return KEY32_INDEXES if index_variant(config) == 'key32' else INDEXES
+
+
+def readiness(config=None):
+    return KEY32_SIGNATURES[1] if index_variant(config) == 'key32' else SIGNATURES[2]
+
+
+def migration_binding(config):
+    if index_variant(config) != 'key32':
+        return
+    expected = config.get('key32_migration_sha256')
+    P.sha_bytes(expected)
+    if P.file_sha(HERE.parent.parent / 'migrations/185_storage_v2_selective_key32.sql') != expected:
+        raise RuntimeError('exact reviewed SQL185 migration differs')
 
 
 def module(name, path):
@@ -61,10 +92,13 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
-def operator_digest():
+def operator_digest(config=None):
     paths = (Path(__file__), HERE / 'posting-compaction.py', HERE / 'release-candidate.py',
              HERE / 'legacy_capacity.py', HERE.parent.parent /
              'migrations/159_storage_v2_exact_lexeme_probes.sql')
+    if index_variant(config) == 'key32':
+        migration_binding(config)
+        paths += (HERE.parent.parent / 'migrations/185_storage_v2_selective_key32.sql',)
     return digest({p.name: P.file_sha(p) for p in paths})
 
 
@@ -84,13 +118,15 @@ def catalog_oid(value):
     return value
 
 
-def ddl(phase, drop=False):
+def ddl(phase, drop=False, config=None):
     if type(phase) is not int or phase not in (0, 1):
         raise ValueError('unknown constant index phase')
+    names = index_names(config)
+    expressions = KEY32_EXPRESSIONS if index_variant(config) == 'key32' else EXPRESSIONS
     if drop:
-        return 'DROP INDEX CONCURRENTLY public.' + INDEXES[phase]
-    return ('CREATE INDEX CONCURRENTLY ' + INDEXES[phase] + ' ON public.' +
-            TABLES[phase] + ' USING gin (' + EXPRESSIONS[phase] + ')')
+        return 'DROP INDEX CONCURRENTLY public.' + names[phase]
+    return ('CREATE INDEX CONCURRENTLY ' + names[phase] + ' ON public.' +
+            TABLES[phase] + ' USING gin (' + expressions[phase] + ')')
 
 
 def clean_environment():
@@ -252,33 +288,61 @@ FUNCTION_SQL = """SELECT p.oid::regprocedure::text signature,r.rolname owner,
 CONTRACT_SQL = """SELECT relation_oid::bigint oid,encode(identity_sha256,'hex') pin,
  encode(storage_v2_posting_conversion_relation_sha256(relation_oid::regclass),'hex') actual
  FROM storage_v2_posting_conversion_catalog_contract ORDER BY relation_oid"""
+LEXICAL_CONTRACT_SQL = CONTRACT_SQL.replace('storage_v2_posting_conversion_catalog_contract',
+                                           'storage_v2_lexical_conversion_catalog_contract')
+LEXICAL_FUNCTION_SQL = """SELECT signature,owner_oid::bigint owner,
+ encode(definition_sha256,'hex') definition,encode(acl_sha256,'hex') acl
+ FROM storage_v2_lexical_conversion_function_contract ORDER BY signature"""
+LEXICAL_SEAL_DIGEST = """sha256(convert_to(jsonb_build_object(
+ 'functions',(SELECT jsonb_agg(to_jsonb(c) ORDER BY signature)
+ FROM public.storage_v2_lexical_conversion_function_contract c),
+ 'relations',(SELECT jsonb_agg(to_jsonb(c) ORDER BY relation_oid)
+ FROM public.storage_v2_lexical_conversion_catalog_contract c))::text,'UTF8'))"""
+LEXICAL_SEAL_SQL = """SELECT singleton,function_count,catalog_count,
+ encode(contract_sha256,'hex') pin,encode(""" + LEXICAL_SEAL_DIGEST + """,'hex') actual
+ FROM public.storage_v2_lexical_conversion_contract_seal"""
 
 
-def catalog(db):
+def catalog(db, config=None):
     result = {'cores': db.query(CORE_SQL), 'indexes': db.query(INDEX_SQL),
               'functions': db.query(FUNCTION_SQL), 'contract': db.query(CONTRACT_SQL),
               'function_contract': db.query("SELECT signature,owner_oid::bigint owner,encode(definition_sha256,'hex') definition,encode(acl_sha256,'hex') acl FROM storage_v2_posting_conversion_contract ORDER BY signature"),
               'state': P.state_identities(db)}
-    if len(result['cores']) != 2 or len(result['contract']) != 7 or len(result['function_contract']) != 23:
+    function_count = 24 if index_variant(config) == 'key32' else 23
+    if len(result['cores']) != 2 or len(result['contract']) != 7 or len(result['function_contract']) != function_count:
         raise RuntimeError('the installed relation/SQL157 catalog contract is incomplete')
     # Detect same-name objects on another table/schema, not just matching targets.
-    result['names'] = db.query("SELECT n.nspname schema,c.relname name,c.oid::bigint oid FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relname IN (%s,%s) ORDER BY c.oid", INDEXES)
+    result['names'] = db.query("SELECT n.nspname schema,c.relname name,c.oid::bigint oid FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relname IN (%s,%s) ORDER BY c.oid", index_names(config))
+    if index_variant(config) == 'key32':
+        result['lexical_contract'] = db.query(LEXICAL_CONTRACT_SQL)
+        result['lexical_functions'] = db.query(LEXICAL_FUNCTION_SQL)
+        result['lexical_seal'] = db.query(LEXICAL_SEAL_SQL)
+        seals = result['lexical_seal']
+        if not result['lexical_contract'] or len(seals) != 1 or seals[0]['singleton'] is not True \
+                or seals[0]['function_count'] != len(result['lexical_functions']) \
+                or seals[0]['catalog_count'] != len(result['lexical_contract']) \
+                or seals[0]['pin'] != seals[0]['actual']:
+            raise RuntimeError('the installed lexical catalog seal is incomplete or differs')
     return result
 
 
-def exact_index(row, phase, snapshot):
+def exact_index(row, phase, snapshot, config=None):
     table = next(r for r in snapshot['cores'] if r['name'] == TABLES[phase])
     expected_expression = ('storage_v2_compact_lexical_exact_lexemes(fts_vectors)',
                            'storage_v2_compact_posting_exact_term_keys(terms)')[phase]
-    checks = {'table_oid': table['oid'], 'owner': table['core']['owner'], 'method': 'gin',
+    if index_variant(config) == 'key32':
+        expected_expression = (
+            'storage_v2_probe_keys32(storage_v2_compact_lexical_exact_lexemes(fts_vectors))',
+            'storage_v2_probe_keys32(terms)')[phase]
+    checks = {'name': index_names(config)[phase], 'table_oid': table['oid'], 'owner': table['core']['owner'], 'method': 'gin',
               'options': None, 'tablespace': 0, 'unique': False, 'primary_key': False, 'exclusion': False,
               'natts': 1, 'nkeys': 1, 'predicate': None, 'keys': '0',
               'expression': expected_expression, 'opclass': 'array_ops', 'opnamespace': 'pg_catalog', 'option': 0}
     if any(row.get(k) != v for k, v in checks.items()):
         raise RuntimeError('a same-name index has a conflicting exact definition')
-    if phase == 1:
-        # Full-term SHA256 keys are BYTEA[], which have no collation. The raw
-        # terms column remains untouched, including arbitrary-length literals.
+    if phase == 1 or index_variant(config) == 'key32':
+        # BYTEA[] wide posting keys and both INTEGER[] key32 probes have no
+        # collation. The original raw terms/vectors remain untouched.
         collation = 0
     else:
         # The reviewed installed catalog records the database default collation OID.
@@ -288,7 +352,7 @@ def exact_index(row, phase, snapshot):
     return row['valid'] and row['ready'] and row['live'] and not row['checkxmin']
 
 
-def delta(original, current, intents, accepted_pins=()):
+def delta(original, current, intents, accepted_pins=(), config=None, accepted_lexical_pins=None):
     if original['cores'] != current['cores'] or original['functions'] != current['functions'] \
             or original['function_contract'] != current['function_contract'] or original['state'] != current['state']:
         raise RuntimeError('original columns, authority, functions, generation or pointer state drifted')
@@ -297,15 +361,18 @@ def delta(original, current, intents, accepted_pins=()):
     if any(now.get(oid) != row for oid, row in old.items()):
         raise RuntimeError('an original index changed or disappeared')
     additions = {}
+    names = index_names(config)
     for oid, row in now.items():
         if oid in old:
             continue
-        if row['name'] not in INDEXES:
+        if row['name'] not in names:
             raise RuntimeError('an unrelated index was added')
-        phase = INDEXES.index(row['name'])
-        if str(phase) not in intents or intents[str(phase)]['ddl_sha256'] != digest(ddl(phase)):
+        phase = names.index(row['name'])
+        if str(phase) not in intents or intents[str(phase)]['ddl_sha256'] != digest(ddl(phase, config=config)):
             raise RuntimeError('an index addition lacks this operation durable pre-DDL intent')
-        additions[phase] = (row, exact_index(row, phase, original))
+        if phase in additions:
+            raise RuntimeError('duplicate owned index phase identity')
+        additions[phase] = (row, exact_index(row, phase, original, config))
     names = [{'schema': 'public', 'name': r['name'], 'oid': r['oid']} for r, _ in additions.values()]
     if sorted(current['names'], key=lambda r: r['oid']) != sorted(names, key=lambda r: r['oid']):
         raise RuntimeError('same-name catalog objects are conflicting or outside the owned targets')
@@ -321,14 +388,69 @@ def delta(original, current, intents, accepted_pins=()):
             raise RuntimeError('compact catalog pin is neither original nor exact current identity')
         if oid == compact and 1 not in additions and row['actual'] != before[oid]['actual']:
             raise RuntimeError('compact catalog changed without the exact owned addition')
+    if index_variant(config) == 'key32':
+        lexical_delta(original, current, additions, accepted_lexical_pins or {})
     return additions
 
 
-def gate_helpers(snapshot, expected):
+def lexical_delta(original, current, additions, accepted_pins):
+    if original['lexical_functions'] != current['lexical_functions']:
+        raise RuntimeError('original lexical function contract changed')
+    before = {r['oid']: r for r in original['lexical_contract']}
+    after = {r['oid']: r for r in current['lexical_contract']}
+    if before.keys() != after.keys():
+        raise RuntimeError('original lexical catalog membership changed')
+    targets = {c['oid']: TABLES.index(c['name']) for c in original['cores']}
+    if not any(oid in before and phase == 0 for oid, phase in targets.items()):
+        raise RuntimeError('original compact lexical catalog pin is missing')
+    for oid, row in after.items():
+        if oid not in targets:
+            if row != before[oid]:
+                raise RuntimeError('an unrelated lexical catalog pin changed')
+            continue
+        if row['pin'] not in (before[oid]['pin'], row['actual'], *accepted_pins.get(str(oid), ())):
+            raise RuntimeError('lexical catalog pin is neither original nor exact owned identity')
+        if targets[oid] not in additions and row['actual'] != before[oid]['actual']:
+            raise RuntimeError('lexical catalog changed without the exact owned addition')
+    old_seal, seal = original['lexical_seal'][0], current['lexical_seal'][0]
+    if any(seal[k] != old_seal[k] for k in ('singleton', 'function_count', 'catalog_count')) \
+            or seal['pin'] != seal['actual']:
+        raise RuntimeError('original lexical seal membership or digest changed')
+
+
+def lexical_pin_update(current):
+    rows = [row for row in current['lexical_contract'] if row['pin'] != row['actual']]
+    if not rows:
+        return ''
+    seal = current['lexical_seal'][0]
+    sql = """IF NOT EXISTS(SELECT 1 FROM pg_trigger
+ WHERE tgrelid='public.storage_v2_lexical_conversion_contract_seal'::regclass
+ AND tgname='storage_v2_lexical_conversion_seal_immutable' AND tgenabled='O' AND tgtype=27
+ AND tgfoid='public.storage_v2_reject_retrieval_mutation()'::regprocedure)
+ THEN RAISE EXCEPTION 'lexical seal trigger differs'; END IF;"""
+    for row in rows:
+        sql += ('UPDATE public.storage_v2_lexical_conversion_catalog_contract SET identity_sha256=decode(' +
+                P.literal(row['actual']) + ",'hex') WHERE relation_oid=" + str(integer(row['oid'])) +
+                ' AND identity_sha256=decode(' + P.literal(row['pin']) + ",'hex');" +
+                "IF NOT FOUND THEN RAISE EXCEPTION 'lexical catalog compare-and-swap failed'; END IF;")
+    sql += ('ALTER TABLE public.storage_v2_lexical_conversion_contract_seal DISABLE TRIGGER '
+            'storage_v2_lexical_conversion_seal_immutable;'
+            'UPDATE public.storage_v2_lexical_conversion_contract_seal SET contract_sha256=' +
+            LEXICAL_SEAL_DIGEST + ' WHERE singleton AND function_count=' + str(integer(seal['function_count'])) +
+            ' AND catalog_count=' + str(integer(seal['catalog_count'])) +
+            ' AND contract_sha256=decode(' + P.literal(seal['pin']) + ",'hex');" +
+            "IF NOT FOUND THEN RAISE EXCEPTION 'lexical seal compare-and-swap failed'; END IF;"
+            'ALTER TABLE public.storage_v2_lexical_conversion_contract_seal ENABLE TRIGGER '
+            'storage_v2_lexical_conversion_seal_immutable;')
+    return sql
+
+
+def gate_helpers(snapshot, expected, config=None):
     functions = {r['signature']: r for r in snapshot['functions']}
-    if set(expected) != set(SIGNATURES):
-        raise RuntimeError('all five exact installed SQL159 function identities are required')
-    for signature in SIGNATURES:
+    signatures = SIGNATURES + KEY32_SIGNATURES if index_variant(config) == 'key32' else SIGNATURES
+    if set(expected) != set(signatures):
+        raise RuntimeError('all five SQL159 and selected SQL185 function identities are required')
+    for signature in signatures:
         row = functions.get(signature)
         if row is None or expected[signature] != {k: row[k] for k in ('definition_sha256', 'metadata_sha256')}:
             raise RuntimeError('installed helper/reader byte or authority identity differs')
@@ -347,6 +469,23 @@ def gate_helpers(snapshot, expected):
                 or {r[0] for r in row['acl']} != grants \
                 or any(r[1:] != ['EXECUTE', False] for r in row['acl']):
             raise RuntimeError('SQL159 helper owner, ACL, execution or planner properties differ')
+    if index_variant(config) == 'key32':
+        for signature, volatility, strict, language, returns in (
+            (KEY32_SIGNATURES[0], 'i', True, 'sql', 'integer[]'),
+            (KEY32_SIGNATURES[1], 's', False, 'sql', 'boolean'),
+            (KEY32_SIGNATURES[2], 's', True, 'plpgsql', 'boolean'),
+        ):
+            row = functions[signature]
+            if row['owner'] != 'mainrag_v2_lexical_rank_owner' \
+                    or row['volatility'] != volatility or row['strict'] is not strict \
+                    or row['parallel'] != 's' or row['definer'] or row['leakproof'] \
+                    or catalog_oid(row['support']) != 0 or row['language'] != language \
+                    or row['returns'] != returns \
+                    or row['config'] != ['search_path=pg_catalog, public, pg_temp'] \
+                    or {r[0] for r in row['acl']} != {
+                        'mainrag_v2_lexical_rank_owner', 'mainrag_v2_frontier_owner', 'mainrag'} \
+                    or any(r[1:] != ['EXECUTE', False] for r in row['acl']):
+                raise RuntimeError('SQL185 helper owner, ACL, execution or planner properties differ')
 
 
 def writer_gate(db, own_pid=None):
@@ -529,7 +668,7 @@ def monitor_budget(config, db, phase, start, started, drop=False):
     b = bounds(config, phase, drop)
     r = resource_observation(config, db)
     size = db.query('SELECT coalesce(pg_total_relation_size(to_regclass(%s)),0)::bigint bytes',
-                    ('public.' + INDEXES[phase],))[0]['bytes']
+                    ('public.' + index_names(config)[phase],))[0]['bytes']
     if not drop and estimate_mode(config, phase) == 'guarded_complete_build' \
             and terminal_page_wal_bound(size) > b['wal_bytes']:
         raise RuntimeError('owned guarded index exceeds the terminal-page WAL envelope; cancel and retain it')
@@ -570,7 +709,7 @@ class Workflow:
                 or profile.get('block_bytes') != 8192 or profile.get('segment_bytes') != 16 * 1024 ** 2:
             raise RuntimeError('guarded complete build lacks its retained original runtime-profile admission')
         actual = self.db.query('SELECT pg_total_relation_size(%s::regclass)::bigint bytes',
-                               ('public.' + INDEXES[phase],))[0]['bytes']
+                               ('public.' + index_names(self.config)[phase],))[0]['bytes']
         integer(actual)
         proof = {'mode': 'guarded_complete_build', 'index_oid': row['oid'],
                  'index_bytes': actual, 'terminal_page_wal_upper_bytes': terminal_page_wal_bound(actual),
@@ -585,10 +724,11 @@ class Workflow:
             raise RuntimeError('complete guarded index exceeds its reviewed cap or terminal WAL envelope; retain and reconcile it')
 
     def reconcile(self, *, allow_overcap_for_rollback=False):
-        current = catalog(self.db)
+        current = catalog(self.db, self.config)
         current['default_collation_oid'] = self.manifest['original']['default_collation_oid']
         additions = delta(self.manifest['original'], current, self.state['intents'],
-                          self.state.get('accepted_compact_pins', ()))
+                          self.state.get('accepted_compact_pins', ()), self.config,
+                          self.state.get('accepted_lexical_pins', {}))
         for phase, (row, ready) in additions.items():
             if ready:
                 # Lost acknowledgements may be reconciled, but a valid index
@@ -597,18 +737,31 @@ class Workflow:
                     allow_overcap_for_rollback=allow_overcap_for_rollback)
         compact = next(r for r in current['contract'] if r['oid'] ==
                        next(c['oid'] for c in current['cores'] if c['name'] == TABLES[1]))
-        if compact['pin'] != compact['actual']:
+        lexical = lexical_pin_update(current) if index_variant(self.config) == 'key32' else ''
+        if compact['pin'] != compact['actual'] or lexical:
             # Narrow compare-and-swap ONLY the known compact row after the entire
             # original catalog/function contract and owned additions were compared.
-            self.state.setdefault('accepted_compact_pins', []).append(compact['actual'])
+            if compact['pin'] != compact['actual']:
+                self.state.setdefault('accepted_compact_pins', []).append(compact['actual'])
+            if lexical:
+                for row in current['lexical_contract']:
+                    if row['pin'] != row['actual']:
+                        self.state.setdefault('accepted_lexical_pins', {}).setdefault(str(row['oid']), []).append(row['actual'])
             self.checkpoint('CATALOG_PIN_ACK_PENDING')
-            self.session.statement('DO $pin$ BEGIN UPDATE public.storage_v2_posting_conversion_catalog_contract '
-                "SET identity_sha256=decode(" + P.literal(compact['actual']) + ",'hex') WHERE relation_oid=" +
-                str(compact['oid']) + " AND identity_sha256=decode(" + P.literal(compact['pin']) + ",'hex');" +
-                "IF NOT FOUND THEN RAISE EXCEPTION 'compact catalog compare-and-swap failed'; END IF;" +
-                'PERFORM public.storage_v2_posting_conversion_require_operator();END $pin$')
+            posting = ''
+            if compact['pin'] != compact['actual']:
+                posting = ('UPDATE public.storage_v2_posting_conversion_catalog_contract '
+                    "SET identity_sha256=decode(" + P.literal(compact['actual']) + ",'hex') WHERE relation_oid=" +
+                    str(compact['oid']) + " AND identity_sha256=decode(" + P.literal(compact['pin']) + ",'hex');" +
+                    "IF NOT FOUND THEN RAISE EXCEPTION 'compact catalog compare-and-swap failed'; END IF;")
+            self.session.statement('DO $pin$ BEGIN ' + posting + lexical +
+                'PERFORM public.storage_v2_posting_conversion_require_operator();' +
+                ('PERFORM public.storage_v2_require_lexical_conversion_operator();' if index_variant(self.config) == 'key32' else '') +
+                'END $pin$')
         else:
             self.session.statement('SELECT public.storage_v2_posting_conversion_require_operator()')
+            if index_variant(self.config) == 'key32':
+                self.session.statement('SELECT public.storage_v2_require_lexical_conversion_operator()')
         self.state['reconciled'] = {str(i): {'oid': row['oid'], 'valid_ready': ready}
                                     for i, (row, ready) in additions.items()}
         self.checkpoint('RECONCILED')
@@ -618,7 +771,7 @@ class Workflow:
         runtime_gate(self.config, self.manifest['package_sha256'])
         writer_gate(self.db, self.session.identity['pid'])
         start = admission(self.config, self.db, phase, drop)
-        text = ddl(phase, drop)
+        text = ddl(phase, drop, self.config)
         guarded = not drop and estimate_mode(self.config, phase) == 'guarded_complete_build'
         self.session.statement("SET statement_timeout=" + P.literal(str(bounds(self.config, phase, drop)['seconds']) + 's') +
             ';SET maintenance_work_mem=' + P.literal(str(max(1, bounds(self.config, phase, drop)['ram_bytes'] // 1024)) + 'kB') +
@@ -680,7 +833,7 @@ class Workflow:
             additions = self.reconcile()
         if set(additions) != {0, 1} or not all(v[1] for v in additions.values()):
             raise RuntimeError('both exact owned indexes are not valid and ready')
-        if self.session.scalar('SELECT public.storage_v2_exact_lexeme_probes_ready()') is not True:
+        if self.session.scalar('SELECT public.' + readiness(self.config)) is not True:
             raise RuntimeError('installed two-index ready gate did not acknowledge completion')
         self.checkpoint('COMPLETE_TWO_EXACT_INDEXES_READY')
 
@@ -689,14 +842,20 @@ class Workflow:
         # No helper drop: the installed159 readers depend on all three helpers and
         # their fallback is precisely what makes a two-index rollback safe.
         self.state['helpers_retained_for_installed_reader'] = list(SIGNATURES[:3])
+        if index_variant(self.config) == 'key32':
+            self.state['helpers_retained_for_installed_reader'].extend(KEY32_SIGNATURES)
         for phase in (1, 0):
             if phase in additions:
                 self.run_phase(phase, drop=True)
                 additions = self.reconcile(allow_overcap_for_rollback=True)
-        current = catalog(self.db)
+        current = catalog(self.db, self.config)
         if current['contract'] != self.manifest['original']['contract']:
             raise RuntimeError('rollback did not restore the original compact catalog contract')
-        if self.session.scalar('SELECT public.storage_v2_exact_lexeme_probes_ready()') is not False:
+        if index_variant(self.config) == 'key32' and any(
+                current[key] != self.manifest['original'][key]
+                for key in ('lexical_contract', 'lexical_functions', 'lexical_seal')):
+            raise RuntimeError('rollback did not restore the original lexical catalog and seal')
+        if self.session.scalar('SELECT public.' + readiness(self.config)) is not False:
             raise RuntimeError('reader fallback not restored after owned-index rollback')
         self.checkpoint('ROLLED_BACK_ORIGINAL_CATALOG_HELPERS_RETAINED')
 
@@ -725,23 +884,31 @@ def main():
     parser.add_argument('--config', type=Path, help='private reviewed local bounds and runtime binding; prepare only')
     parser.add_argument('--expected-manifest-sha256')
     parser.add_argument('--expected-package-sha256', required=True)
+    parser.add_argument('--index-variant', choices=('wide', 'key32'),
+                        help='prepare only; must match the reviewed config, defaults to legacy wide')
     args = parser.parse_args()
     P.sha_bytes(args.expected_package_sha256)
     if args.action == 'prepare':
         if args.config is None or args.manifest.exists():
             raise RuntimeError('preparation needs a private config and a new manifest path')
         config, config_sha = P.private_read(args.config)
+        if args.index_variant is not None and args.index_variant != index_variant(config):
+            raise RuntimeError('requested index variant differs from the reviewed config')
         state = {'operation_id': str(uuid.uuid4()), 'intents': {}, 'status': 'PREPARING'}
     else:
+        if args.index_variant is not None:
+            raise RuntimeError('execution uses only the immutable manifest index variant')
         manifest, sha = P.private_read(args.manifest)
+        config = manifest['config']
         if sha != args.expected_manifest_sha256 or manifest['schema_version'] != SCHEMA \
-                or manifest['operator_sha256'] != operator_digest() \
+                or manifest['operator_sha256'] != operator_digest(config) \
                 or manifest['package_sha256'] != args.expected_package_sha256:
             raise RuntimeError('exact private manifest/package/operator binding differs')
-        config = manifest['config']
         state, _ = P.private_read(args.manifest.with_suffix('.state.json'))
         if state.get('manifest_sha256') != sha or state.get('operation_id') != manifest['operation_id']:
             raise RuntimeError('durable state belongs to a different operation or manifest')
+    index_variant(config)
+    migration_binding(config)
     runtime_gate(config, args.expected_package_sha256)
     db = LocalDatabase(config)
     for phase in range(2):
@@ -771,13 +938,17 @@ def main():
         stack.callback(db.capacity.observer.close)
         if args.action == 'prepare':
             session.statement('SELECT public.storage_v2_posting_conversion_require_operator()')
-            original = catalog(db)
+            if index_variant(config) == 'key32':
+                session.statement('SELECT public.storage_v2_require_lexical_conversion_operator()')
+            original = catalog(db, config)
             original['default_collation_oid'] = db.query("SELECT 'default'::regcollation::oid::bigint oid")[0]['oid']
             if original['names'] or any(r['pin'] != r['actual'] for r in original['contract']):
                 raise RuntimeError('initial indexes must be absent and the original seven catalog pins exact')
+            if index_variant(config) == 'key32' and any(r['pin'] != r['actual'] for r in original['lexical_contract']):
+                raise RuntimeError('initial lexical catalog pins must be exact')
             if any(r['tablespace'] != 0 for r in original['cores']):
                 raise RuntimeError('target relations must use the admitted default DB tablespace')
-            gate_helpers(original, config['installed_functions'])
+            gate_helpers(original, config['installed_functions'], config)
             for phase in range(2):
                 actual = db.query('SELECT pg_total_relation_size(%s::regclass)::bigint bytes',
                                   ('public.' + TABLES[phase],))[0]['bytes']
@@ -785,7 +956,7 @@ def main():
                     raise RuntimeError('conservative estimate does not bind the actual original cache relation allocation')
                 admission(config, db, phase)
             manifest = {'schema_version': SCHEMA, 'operation_id': state['operation_id'],
-                'operator_sha256': operator_digest(), 'package_sha256': args.expected_package_sha256,
+                'operator_sha256': operator_digest(config), 'package_sha256': args.expected_package_sha256,
                 'config_sha256': config_sha, 'config': config, 'original': original,
                 'created_at_unix': time.time(), 'owner_uid': os.geteuid()}
             R.atomic_private_json(args.manifest, manifest, replace=False)
@@ -794,7 +965,7 @@ def main():
             R.atomic_private_json(args.manifest.with_suffix('.state.json'), state, replace=False)
             print(json.dumps({'status': state['status'], 'manifest_sha256': sha}))
             return
-        gate_helpers(catalog(db), config['installed_functions'])
+        gate_helpers(catalog(db, config), config['installed_functions'], config)
         workflow = Workflow(db, session, manifest, state,
             lambda value: R.atomic_private_json(args.manifest.with_suffix('.state.json'), value), config)
         try:

@@ -29,26 +29,35 @@ def original_catalog():
         'default_collation_oid': 100}
 
 
-def add_index(current, phase, valid=True):
-    row = {'oid': 1000 + phase, 'table_oid': 10 if phase == 0 else 20,
-           'name': O.INDEXES[phase], 'owner': 30, 'options': None, 'tablespace': 0,
+def add_index(current, phase, valid=True, config=None):
+    key32 = config is not None and config.get('index_variant') == 'key32'
+    row = {'oid': (2000 if key32 else 1000) + phase, 'table_oid': 10 if phase == 0 else 20,
+           'name': O.index_names(config)[phase], 'owner': 30, 'options': None, 'tablespace': 0,
            'method': 'gin', 'unique': False, 'primary_key': False, 'exclusion': False,
            'natts': 1, 'nkeys': 1, 'predicate': None, 'keys': '0',
            'expression': ('storage_v2_compact_lexical_exact_lexemes(fts_vectors)',
                           'storage_v2_compact_posting_exact_term_keys(terms)')[phase],
            'opclass': 'array_ops', 'opnamespace': 'pg_catalog', 'option': 0,
-           'collation': 100 if phase == 0 else 0,
+           'collation': 100 if phase == 0 and not key32 else 0,
            'valid': valid, 'ready': valid, 'live': True, 'checkxmin': False,
-           'definition': O.ddl(phase).replace(' CONCURRENTLY', '')}
+           'definition': O.ddl(phase, config=config).replace(' CONCURRENTLY', '')}
+    if key32:
+        row['expression'] = (
+            'storage_v2_probe_keys32(storage_v2_compact_lexical_exact_lexemes(fts_vectors))',
+            'storage_v2_probe_keys32(terms)')[phase]
     current['indexes'].append(row)
     current['names'].append({'schema': 'public', 'name': row['name'], 'oid': row['oid']})
     if phase == 1:
         current['contract'][0]['actual'] = 'f' * 64
+    if key32:
+        for contract in current.get('lexical_contract', []):
+            if contract['oid'] == row['table_oid']:
+                contract['actual'] = ('d' if phase == 0 else 'e') * 64
     return row
 
 
-def intent(phase):
-    return {str(phase): {'ddl_sha256': O.digest(O.ddl(phase))}}
+def intent(phase, config=None):
+    return {str(phase): {'ddl_sha256': O.digest(O.ddl(phase, config=config))}}
 
 
 def guarded_config():
@@ -72,7 +81,7 @@ class ExactLexemeOwnershipTests(unittest.TestCase):
     def test_ci_transport_is_fixture_only_and_does_not_copy_private_environment(self):
         fixture = {'STORAGE_V2_TEST_SOCKET': '127.0.0.1', 'PGUSER': 'fixture',
                    'PGPASSWORD': 'fixture_only', 'PRIVATE_TOKEN': 'must-not-copy'}
-        def observe(db):
+        def observe(db, config=None):
             self.assertIn('127.0.0.1', db.command)
             self.assertEqual(db.command[-2:], ['-U', 'fixture'])
             self.assertEqual(O.clean_environment().get('PGPASSWORD'), 'fixture_only')
@@ -512,8 +521,213 @@ class ExactLexemeOwnershipTests(unittest.TestCase):
         self.assertEqual(state['status'], 'ROLLED_BACK_ORIGINAL_CATALOG_HELPERS_RETAINED')
 
 
-def exercise_disposable_catalog_protocol(database, socket, user_id):
-    """Called by the existing owned SQL159 schema fixture, not by production CLI.
+class Key32IndexOwnershipTests(unittest.TestCase):
+    config = {'index_variant': 'key32'}
+
+    def original_with_wide_pair(self):
+        original = original_catalog()
+        for phase in (0, 1):
+            add_index(original, phase)
+        original['contract'][0]['pin'] = original['contract'][0]['actual']
+        # catalog(key32) queries only the selected names, but retains every
+        # pre-existing index row in the protected original snapshot.
+        original['names'] = []
+        original['lexical_contract'] = [
+            {'oid': original['cores'][0]['oid'], 'pin': 'c' * 64, 'actual': 'c' * 64},
+            {'oid': 99, 'pin': 'a' * 64, 'actual': 'a' * 64}]
+        original['lexical_functions'] = [{'signature': 'fixture_lexical_dependency()', 'definition': 'a' * 64}]
+        original['lexical_seal'] = [{'singleton': True, 'function_count': 1,
+            'catalog_count': 2, 'pin': 'b' * 64, 'actual': 'b' * 64}]
+        return original
+
+    def test_opt_in_constant_pair_and_legacy_default_remain_distinct(self):
+        self.assertEqual(O.index_names(), O.INDEXES)
+        self.assertEqual(O.ddl(0), O.ddl(0, config={'index_variant': 'wide'}))
+        self.assertEqual(O.ddl(0, config=self.config),
+            'CREATE INDEX CONCURRENTLY idx_storage_v2_compact_lexical_key32 ON '
+            'public.storage_v2_compact_lexical_block USING gin '
+            '(public.storage_v2_probe_keys32(public.storage_v2_compact_lexical_exact_lexemes(fts_vectors)))')
+        self.assertEqual(O.ddl(1, config=self.config),
+            'CREATE INDEX CONCURRENTLY idx_storage_v2_compact_posting_key32 ON '
+            'public.storage_v2_compact_posting_block USING gin (public.storage_v2_probe_keys32(terms))')
+        for phase in (0, 1):
+            self.assertEqual(O.ddl(phase, True, self.config),
+                             'DROP INDEX CONCURRENTLY public.' + O.KEY32_INDEXES[phase])
+        for variant in (True, None, 'key32;DROP', 32):
+            with self.subTest(variant=variant), self.assertRaises(RuntimeError):
+                O.ddl(0, config={'index_variant': variant})
+
+    def test_wide_indexes_are_protected_and_never_adopted_by_key32_intents(self):
+        old = self.original_with_wide_pair()
+        self.assertEqual(O.delta(old, copy.deepcopy(old), {}, config=self.config), {})
+        for phase in (0, 1):
+            now = copy.deepcopy(old)
+            add_index(now, phase, config=self.config)
+            self.assertTrue(O.delta(old, now, intent(phase, self.config), config=self.config)[phase][1])
+            with self.assertRaisesRegex(RuntimeError, 'durable pre-DDL intent'):
+                O.delta(old, now, intent(phase), config=self.config)
+            now['indexes'][0]['valid'] = False
+            with self.assertRaisesRegex(RuntimeError, 'original index'):
+                O.delta(old, now, intent(phase, self.config), config=self.config)
+        now = copy.deepcopy(old)
+        now['indexes'].pop()
+        with self.assertRaisesRegex(RuntimeError, 'original index'):
+            O.delta(old, now, {}, config=self.config)
+
+    def test_integer_array_shape_and_wrong_schema_or_wide_expression_refuse(self):
+        old = self.original_with_wide_pair()
+        for phase in (0, 1):
+            for key, value in (('expression', O.EXPRESSIONS[phase].replace('public.', '')),
+                               ('collation', 100), ('options', ['fastupdate=off']),
+                               ('predicate', 'true'), ('opclass', 'tsvector_ops'), ('table_oid', 99)):
+                now = copy.deepcopy(old)
+                add_index(now, phase, config=self.config)[key] = value
+                with self.subTest(phase=phase,key=key), self.assertRaises(RuntimeError):
+                    O.delta(old, now, intent(phase, self.config), config=self.config)
+            now = copy.deepcopy(old)
+            add_index(now, phase, config=self.config)
+            now['names'][0]['schema'] = 'other'
+            with self.assertRaisesRegex(RuntimeError, 'same-name'):
+                O.delta(old, now, intent(phase, self.config), config=self.config)
+
+    def test_actual_key32_relation_sizes_and_both_readiness_gate_before_completion(self):
+        config = dict(guarded_config(), **self.config)
+        old = self.original_with_wide_pair();now = copy.deepcopy(old)
+        for phase in (0, 1):
+            add_index(now, phase, config=config)
+        now['contract'][0]['pin'] = now['contract'][0]['actual']
+        state = {'intents': {str(phase): dict(intent(phase,config)[str(phase)],
+            before={'guarded_runtime_profile': guarded_profile()}) for phase in (0, 1)}}
+        db = Mock();db.query.return_value = [{'bytes': O.GIB}]
+        session = SimpleNamespace(statement=Mock(),scalar=Mock(return_value=True))
+        flow = O.Workflow(db,session,{'original':old},state,lambda s:None,config)
+        flow.run_phase = Mock()
+        with patch.object(O,'catalog',return_value=now):flow.build()
+        flow.run_phase.assert_not_called()
+        self.assertEqual(state['status'],'COMPLETE_TWO_EXACT_INDEXES_READY')
+        self.assertEqual(session.scalar.call_args.args[0],
+                         'SELECT public.storage_v2_key32_probes_ready()')
+        self.assertEqual([call.args[1][0] for call in db.query.call_args_list],
+                         ['public.'+name for name in O.KEY32_INDEXES])
+        for phase in (0, 1):
+            proof=state['complete_build_proofs'][str(phase)]
+            self.assertEqual(proof['index_oid'],2000+phase)
+            self.assertEqual(proof['index_bytes'],O.GIB)
+            self.assertTrue(proof['admitted'])
+        db.query.return_value=[{'bytes':O.GUARDED_INDEX_CAP+8192}]
+        with patch.object(O,'catalog',return_value=now), self.assertRaisesRegex(RuntimeError,'retain and reconcile'):
+            flow.build()
+        self.assertEqual(state['status'],'COMPLETE_BUILD_PROOF_REJECTED_INDEX_RETAINED')
+        db.query.return_value=[{'bytes':O.GIB}];session.scalar.return_value=False
+        with patch.object(O,'catalog',return_value=now), self.assertRaisesRegex(RuntimeError,'ready gate'):
+            flow.build()
+
+    def test_rollback_drops_only_owned_new_pair_and_preserves_old_helpers(self):
+        old=self.original_with_wide_pair();now=copy.deepcopy(old)
+        rows={phase:add_index(now,phase,config=self.config) for phase in (0,1)}
+        session=SimpleNamespace(statement=Mock(),scalar=Mock(return_value=False))
+        state={'intents':{str(i):intent(i,self.config)[str(i)] for i in (0,1)}}
+        flow=O.Workflow(None,session,{'original':old},state,lambda s:None,self.config)
+        flow.reconcile=Mock(side_effect=[{i:(rows[i],True) for i in (0,1)}, {0:(rows[0],True)}, {}])
+        flow.run_phase=Mock()
+        with patch.object(O,'catalog',return_value=old):flow.rollback()
+        self.assertEqual([c.args for c in flow.run_phase.call_args_list],[(1,),(0,)])
+        self.assertTrue(all(c.kwargs=={'drop':True} for c in flow.run_phase.call_args_list))
+        self.assertEqual(state['helpers_retained_for_installed_reader'],list(O.SIGNATURES[:3]+O.KEY32_SIGNATURES))
+        self.assertEqual(old['indexes'][0]['name'],O.INDEXES[0])
+        self.assertEqual(old['indexes'][1]['name'],O.INDEXES[1])
+
+    def test_all_eight_installed_functions_and_key32_authorities_are_pinned(self):
+        functions=[];expected={}
+        roles=['mainrag_v2_lexical_rank_owner','mainrag_v2_frontier_owner','mainrag']
+        specs=[(sig,'i' if i<2 else 's',i!=2,'plpgsql' if i==2 else 'sql',
+                ('text[]','bytea[]','boolean','record','record')[i],roles if i else roles[:2])
+               for i,sig in enumerate(O.SIGNATURES)]
+        specs += [(O.KEY32_SIGNATURES[0],'i',True,'sql','integer[]',roles),
+                  (O.KEY32_SIGNATURES[1],'s',False,'sql','boolean',roles),
+                  (O.KEY32_SIGNATURES[2],'s',True,'plpgsql','boolean',roles)]
+        for signature,volatility,strict,language,returns,grants in specs:
+            row=dict(signature=signature,definition_sha256='a'*64,metadata_sha256='b'*64,
+                owner=roles[0],volatility=volatility,strict=strict,parallel='s',definer=False,
+                leakproof=False,support=0,language=language,returns=returns,
+                config=['search_path=pg_catalog, public, pg_temp'],
+                acl=[[role,'EXECUTE',False] for role in grants])
+            functions.append(row)
+            expected[signature]={k:row[k] for k in ('definition_sha256','metadata_sha256')}
+        O.gate_helpers({'functions':functions},expected,self.config)
+        for signature in O.KEY32_SIGNATURES:
+            missing=dict(expected);missing.pop(signature)
+            with self.subTest(missing=signature),self.assertRaisesRegex(RuntimeError,'function identities'):
+                O.gate_helpers({'functions':functions},missing,self.config)
+        for index in (5,6,7):
+            for field,value in (('returns','text[]'),('strict',not functions[index]['strict']),
+                                ('definer',True),('parallel','u'),('owner','unexpected_owner'),
+                                ('acl',[[role,'EXECUTE',False] for role in roles+['PUBLIC']])):
+                changed=copy.deepcopy(functions);changed[index][field]=value
+                with self.subTest(index=index,field=field),self.assertRaisesRegex(RuntimeError,'SQL185 helper'):
+                    O.gate_helpers({'functions':changed},expected,self.config)
+        changed=copy.deepcopy(functions);changed[5]['definition_sha256']='c'*64
+        with self.assertRaisesRegex(RuntimeError,'byte or authority'):
+            O.gate_helpers({'functions':changed},expected,self.config)
+
+    def test_prepare_catalog_keeps_exact_current_contract_count_and_new_names(self):
+        cores=original_catalog()['cores']
+        db=Mock()
+        lexical = self.original_with_wide_pair()
+        db.query.side_effect=[cores,[],[],[{}]*7,[{}]*24,[],
+            lexical['lexical_contract'], lexical['lexical_functions'], lexical['lexical_seal']]
+        with patch.object(O.P,'state_identities',return_value={}):
+            result=O.catalog(db,self.config)
+        self.assertEqual(len(result['function_contract']),24)
+        self.assertEqual(db.query.call_args_list[5].args[1],O.KEY32_INDEXES)
+        db.query.side_effect=[cores,[],[],[{}]*7,[{}]*23]
+        with patch.object(O.P,'state_identities',return_value={}),self.assertRaisesRegex(RuntimeError,'incomplete'):
+            O.catalog(db,self.config)
+        with patch.object(O.P,'file_sha',return_value='a'*64) as observed:
+            O.migration_binding(dict(self.config,key32_migration_sha256='a'*64))
+        self.assertEqual(observed.call_args.args[0].name,'185_storage_v2_selective_key32.sql')
+        with patch.object(O.P,'file_sha',return_value='b'*64),self.assertRaisesRegex(RuntimeError,'migration differs'):
+            O.migration_binding(dict(self.config,key32_migration_sha256='a'*64))
+
+    def test_lexical_relation_and_seal_cas_are_owned_and_restore_exactly(self):
+        old = self.original_with_wide_pair()
+        now = copy.deepcopy(old)
+        add_index(now, 0, config=self.config)
+        O.delta(old, now, intent(0, self.config), config=self.config)
+        state = {'intents': intent(0, self.config)}
+        session = SimpleNamespace(statement=Mock())
+        flow = O.Workflow(None, session, {'original': old}, state, lambda s: None, self.config)
+        with patch.object(O, 'catalog', return_value=now):
+            flow.reconcile()
+        sql = session.statement.call_args.args[0]
+        self.assertIn('UPDATE public.storage_v2_lexical_conversion_catalog_contract', sql)
+        self.assertIn('AND identity_sha256=decode(', sql)
+        self.assertIn('AND contract_sha256=decode(', sql)
+        self.assertIn('DISABLE TRIGGER storage_v2_lexical_conversion_seal_immutable', sql)
+        self.assertIn('ENABLE TRIGGER storage_v2_lexical_conversion_seal_immutable', sql)
+        self.assertIn('PERFORM public.storage_v2_require_lexical_conversion_operator()', sql)
+        self.assertEqual(state['accepted_lexical_pins'], {str(old['cores'][0]['oid']): ['d' * 64]})
+        for field in ('lexical_functions', 'lexical_contract', 'lexical_seal'):
+            changed = copy.deepcopy(now)
+            if field == 'lexical_functions':
+                changed[field][0]['definition'] = 'c' * 64
+            elif field == 'lexical_contract':
+                changed[field][1]['actual'] = 'c' * 64
+            else:
+                changed[field][0]['actual'] = 'c' * 64
+            with self.subTest(field=field), self.assertRaisesRegex(RuntimeError, 'lexical'):
+                O.delta(old, changed, intent(0, self.config), config=self.config)
+        # A lost acknowledgement of our previous pin is admissible on inverse;
+        # the desired digest itself is the original actual relation identity.
+        after_drop = copy.deepcopy(old)
+        after_drop['lexical_contract'][0]['pin'] = 'd' * 64
+        O.delta(old, after_drop, state['intents'], config=self.config,
+                accepted_lexical_pins=state['accepted_lexical_pins'])
+        self.assertIn("decode('" + 'c' * 64, O.lexical_pin_update(after_drop))
+
+
+def exercise_disposable_catalog_protocol(database, socket, user_id, config=None):
+    """Called by the owned SQL159/185 schema fixtures, not by production CLI.
 
     Reuses that disposable database; no extra cluster or model/performance work.
     Resource/runtime policy tests stay pure because this is a public tiny fixture.
@@ -523,7 +737,7 @@ def exercise_disposable_catalog_protocol(database, socket, user_id):
     if Path(socket).is_absolute():
         db = O.LocalDatabase({'database': database, 'socket': str(socket),
                              'user_id': user_id, 'peer_admin_via_sudo': False})
-        return _exercise_catalog_protocol(db)
+        return _exercise_catalog_protocol(db, config)
     # The existing public CI service uses this exact loopback fixture account.
     # This adapter is test-only: the production constructor/environment still
     # rejects TCP and credentials. Reuse the same disposable database and real
@@ -533,38 +747,50 @@ def exercise_disposable_catalog_protocol(database, socket, user_id):
         raise RuntimeError('only the declared public CI fixture transport is accepted')
     db = object.__new__(O.LocalDatabase)
     db.database, db.user_id = database, str(uuid.UUID(user_id))
+    container = os.environ.get('STORAGE_V2_TEST_LOCAL_CONTAINER')
+    if container:
+        from eval.storage_v2.schema.local_operator_fixture import container_psql
+        db.command = container_psql(container, database)
+        return _exercise_catalog_protocol(db, config)
     db.command = ['psql', '-X', '--no-psqlrc', '-qAt', '-v', 'ON_ERROR_STOP=1',
                   '-h', '127.0.0.1', '-d', database, '-U', 'fixture']
     environment = O.clean_environment() | {'PGUSER': 'fixture', 'PGPASSWORD': 'fixture_only'}
     with patch.object(O, 'clean_environment', return_value=environment):
-        return _exercise_catalog_protocol(db)
+        return _exercise_catalog_protocol(db, config)
 
 
-def _exercise_catalog_protocol(db):
+def _exercise_catalog_protocol(db, config=None):
+    config = {} if config is None else config
     operation = str(uuid.uuid4())
     session = O.Session(db, operation)
     try:
         session.statement('SELECT public.storage_v2_posting_conversion_require_operator()')
-        old = O.catalog(db)
+        if O.index_variant(config) == 'key32':
+            session.statement('SELECT public.storage_v2_require_lexical_conversion_operator()')
+        old = O.catalog(db, config)
         old['default_collation_oid'] = db.query("SELECT 'default'::regcollation::oid::bigint oid")[0]['oid']
         if old['names']:
             raise AssertionError('disposable smoke must start before its first exact indexes')
         state = {'operation_id': operation, 'intents': {}}
-        flow = O.Workflow(db, session, {'original': old}, state, lambda s: None, {})
+        flow = O.Workflow(db, session, {'original': old}, state, lambda s: None, config)
         for phase in (0, 1):
-            state['intents'].update(intent(phase))
-            session.statement(O.ddl(phase))
+            state['intents'].update(intent(phase, config))
+            session.statement(O.ddl(phase, config=config))
             additions = flow.reconcile()
             if not additions[phase][1]:
                 raise AssertionError('actual concurrent index not valid and ready')
-        if session.scalar('SELECT public.storage_v2_exact_lexeme_probes_ready()') is not True:
+        if session.scalar('SELECT public.' + O.readiness(config)) is not True:
             raise AssertionError('actual two-index ready gate not true')
         for phase in (1, 0):
-            session.statement(O.ddl(phase, drop=True))
+            session.statement(O.ddl(phase, drop=True, config=config))
             flow.reconcile()
-        if O.catalog(db)['contract'] != old['contract']:
+        restored = O.catalog(db, config)
+        if restored['contract'] != old['contract']:
             raise AssertionError('actual reverse DROP failed to restore original contract')
-        if session.scalar('SELECT public.storage_v2_exact_lexeme_probes_ready()') is not False:
+        if O.index_variant(config) == 'key32' and any(restored[key] != old[key]
+                for key in ('lexical_contract', 'lexical_functions', 'lexical_seal')):
+            raise AssertionError('actual reverse DROP failed to restore original lexical contract/seal')
+        if session.scalar('SELECT public.' + O.readiness(config)) is not False:
             raise AssertionError('installed fallback gate not false after actual DROP')
         return {'status': 'PASS', 'sequential_concurrent_indexes': 2,
                 'original_catalog_restored': True, 'helpers_retained': True}
