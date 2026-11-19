@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import importlib.util
 import io
 import json
@@ -192,6 +193,120 @@ class ActivationOperatorTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "watermark drifted"):
                 OPERATOR.verify_current_api_watermarks(
                     "http://127.0.0.1:3001", "private", expected)
+
+
+class PostIngestReadbackTests(unittest.TestCase):
+    def fixture(self):
+        plan_sha = "a" * 64
+        manifest_sha = "b" * 64
+        activation_id = "00000000-0000-4000-8000-000000000002"
+        plan = {"schema_version": "mainrag.storage-v2.activation-plan.v1",
+                "status": "READY_FOR_EXPLICIT_APPROVAL",
+                "manifest_sha256": manifest_sha, "manifest": {
+            "activation_id": activation_id, "code_commit_sha": "c" * 40,
+            "sources": [{"source_id": 7, "candidate_generation_id": 41},
+                        {"source_id": 8, "candidate_generation_id": 91}]}}
+        joined = {"activation_id": activation_id, "manifest_sha256": manifest_sha,
+                  "plan_sha256": plan_sha}
+        attempt = {**joined, "schema_version": "mainrag.storage-v2.activation-attempt.v1",
+                   "status": "DB_COMMITTED_DEFAULT_SWITCH_PENDING", "pointer_set_sha256": "e" * 64}
+        switched = {**joined, "schema_version": "mainrag.storage-v2.default-switch.v1",
+                    "status": "DEFAULT_SWITCHED_POST_INGEST_PENDING", "observed_at_unix": 100}
+        api_receipt = {"status": "ACTIVE_INGEST_COMMITTED", "receipt_id": 11,
+                       "source_id": 7, "generation_id": 42, "pointer_set_sha256": "d" * 64}
+        native = {"status": "ACTIVE_INGEST_COMMITTED", "sync_mode": "full_source_observation",
+                  "generation_id": 42, "generation_seq": 3, "item_count": 12,
+                  "changed_item_count": 2, "receipt": api_receipt,
+                  "telemetry": {"generation_reused": False}}
+        response = {"status": "completed", "source_id": 7, "error_details": [],
+                    "stats": {"errors": 0, "source_io": {"application_read_bytes": None}},
+                    "storage_v2": native}
+        receipt = {"id": 11, "activation_id": activation_id, "source_id": 7,
+                   "prior_generation_id": 41, "generation_id": 42, "run_id": 19,
+                   "before_pointer_set_sha256": "e" * 64, "after_pointer_set_sha256": "d" * 64,
+                   "source_count": 2, "source_classification_sha256": "f" * 64,
+                   "source_watermark_sha256": "1" * 64, "verification_manifest_sha256": "2" * 64,
+                   "verification_proof_sha256": "3" * 64, "created_at_unix": 101.5}
+        readback = {"receipt": receipt, "receipt_count": 1,
+                    "pointer_set_sha256": "d" * 64, "source_classification_sha256": "f" * 64,
+                    "activation": {"id": activation_id, "manifest_sha256": manifest_sha,
+                        "source_count": 2, "pointer_set_sha256": "e" * 64,
+                        "source_classification_sha256": "f" * 64},
+                    "sources": [{"source_id": 7, "is_test": False, "active_generation_id": 42,
+                        "active_status": "active", "active_generation_count": 1, "generation_seq": 3,
+                        "item_count": 12, "changed_item_count": 2, "prior_status": "superseded",
+                        "verification_manifest_sha256": "2" * 64,
+                        "witness": {"source_watermark_sha256": "1" * 64,
+                                    "commit_sha": "c" * 40, "adapter_profile_id": "fixture-v1"}},
+                        {"source_id": 8, "active_generation_id": 91,
+                         "active_status": "active", "active_generation_count": 1}],
+                    "run": {"id": 19, "source_id": 7, "generation_id": 42, "status": "sealed",
+                        "expected_active_generation_id": 41, "semantic_manifest_sha256": "1" * 64,
+                        "expected_item_count": 12, "adapter_profile_id": "fixture-v1"}}
+        return plan, attempt, switched, response, readback, plan_sha
+
+    def check(self, values):
+        return OPERATOR.verify_post_ingest(*values[:5], plan_sha256=values[5])
+
+    def test_actual_api_and_cli_receipts_prove_only_the_ordinary_commit(self):
+        values = self.fixture()
+        result = self.check(values)
+        self.assertTrue(result["regular_ingest_committed"])
+        self.assertFalse(result["whole_issue67_accepted"])
+        self.assertEqual(result["status"], "POST_INGEST_COMMITTED_ACTIVE_CHECKS_PENDING")
+        self.assertIn("benchmark", result["remaining_checks"])
+        self.assertIsNone(result["source_io"]["application_read_bytes"])
+        flat = {**values[3]["storage_v2"], "source_id": 7,
+                "source_io": values[3]["stats"]["source_io"]}
+        self.assertEqual(self.check((*values[:3], flat, *values[4:])), result)
+
+    def test_unknown_no_change_and_mixed_pointer_or_receipt_drift_never_pass(self):
+        changes = [
+            (1, ("status",), "COMMIT_OUTCOME_UNKNOWN"),
+            (2, ("status",), "SWITCH_OUTCOME_UNKNOWN"),
+            (2, ("plan_sha256",), "0" * 64),
+            (3, ("storage_v2", "status"), "NO_CHANGE"),
+            (3, ("storage_v2", "changed_item_count"), 0),
+            (3, ("storage_v2", "receipt", "receipt_id"), 12),
+            (4, ("receipt_count",), 2),
+            (4, ("receipt", "before_pointer_set_sha256"), "0" * 64),
+            (4, ("receipt", "after_pointer_set_sha256"), "0" * 64),
+            (4, ("receipt", "created_at_unix"), 99),
+            (4, ("sources", 1, "active_generation_id"), 92),
+            (4, ("sources", 0, "is_test"), True),
+            (4, ("sources", 0, "changed_item_count"), 3),
+            (4, ("sources", 0, "prior_status"), "active"),
+            (4, ("sources", 0, "witness", "commit_sha"), "0" * 40),
+            (4, ("run", "status"), "building"),
+            (4, ("run", "expected_active_generation_id"), 40),
+            (4, ("source_classification_sha256",), "0" * 64),
+        ]
+        for index, path, replacement in changes:
+            with self.subTest(path=path):
+                values = copy.deepcopy(self.fixture())
+                target = values[index]
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = replacement
+                with self.assertRaises(RuntimeError):
+                    self.check(values)
+
+    def test_readback_is_one_readonly_transaction_and_never_resyncs(self):
+        plan, _, _, _, snapshot, _ = self.fixture()
+        with patch.object(OPERATOR, "psql", return_value=json.dumps(snapshot)) as database:
+            self.assertEqual(OPERATOR.post_ingest_readback("fixture", False,
+                plan["manifest"]["activation_id"], plan["manifest_sha256"], 11), snapshot)
+        self.assertEqual(database.call_count, 1)
+        self.assertIs(database.call_args.kwargs["readonly"], True)
+        sql = database.call_args.args[1]
+        self.assertIn("REPEATABLE READ READ ONLY", sql)
+        self.assertIn("storage_v2_require_complete_active_set", sql)
+        self.assertNotIn("storage_v2_activate_regular_ingest", sql)
+        self.assertNotIn("UPDATE ", sql)
+        with self.assertRaises(RuntimeError), patch.object(OPERATOR, "psql") as unused:
+            OPERATOR.post_ingest_readback("fixture", False,
+                plan["manifest"]["activation_id"], plan["manifest_sha256"], True)
+        unused.assert_not_called()
 
 
 if __name__ == "__main__":
