@@ -224,6 +224,12 @@ matching comparison. File lengths, allocated blocks and filesystem free space
 are distinct measurements. An observed reduction requires manifest-bound cleanup
 receipts and independent corpus-preservation evidence before attribution to dedup.
 
+With local PostgreSQL filesystem access, add `--database-allocated-blocks` to a
+snapshot to account for allocated heap, TOAST and index blocks. The optional
+census reconciles all relation forks with PostgreSQL and records shared
+catalogs separately. Treat an incomplete census as partial evidence and retain
+separate ledgers for packs, external storage, WAL and filesystem free space.
+
 Use `--reader-package-receipt` and
 `--expected-reader-package-receipt-sha256` to bind the new reader checks to the
 local production installation. This mode checks the actual running service
