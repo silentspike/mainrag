@@ -264,7 +264,7 @@ jobs:
         shell: bash
         run: |
           cargo test --locked -p mainrag-cli sync_response_tests -- --nocapture | tee native-sync-response-tests.log
-          python3 -c 'from pathlib import Path; assert "2 passed; 0 failed; 0 ignored;" in Path("native-sync-response-tests.log").read_text(), "Expected committed, unchanged, malformed and legacy sync response coverage"'
+          python3 -c 'from pathlib import Path; assert "3 passed; 0 failed; 0 ignored;" in Path("native-sync-response-tests.log").read_text(), "Expected the flat native, admin envelope and legacy sync regressions to execute"'
       - name: Verify CPU backfill route isolation
         shell: bash
         run: |
