@@ -175,6 +175,44 @@ class SelectiveKey32Tests(previous.CopiedLiteralExistenceTests, encoded.EncodedL
         self.assertEqual(result['status'],'PASS');self.assertTrue(result['original_catalog_restored'])
         self.sql(self.operator('SELECT storage_v2_posting_conversion_require_operator();SELECT storage_v2_require_lexical_conversion_operator()'))
 
+    def test_scope_join_preserves_candidate_identity_and_authority(self):
+        words = ' '.join(f'scopeword{number}' for number in range(120))
+        row, _, _ = self.block([words, words + ' afternote'])
+        occurrence = row['occurrence']
+        source = row['source']
+        conversion = self.sql(self.operator(
+            "SELECT disposition FROM storage_v2_convert_retained_lexical_block("
+            f"'00000000-0000-0000-0000-000000000186',decode('{'ba' * 32}','hex'),{occurrence},0,"
+            f"decode('{row['original']}','hex'),decode('{row['identity']}','hex'),8388608,10000)"))
+        self.assertEqual(conversion, 'CONVERTED')
+
+        signature = 'storage_v2_derived_lexical_candidate_occurrences(bigint[],bigint[],integer[])'
+        candidate = signature.split('(')[0]
+        observed = f"""
+            SELECT jsonb_agg((SELECT count(*) FROM {candidate}(scopes.ids,ARRAY[{source}]::BIGINT[],scopes.keys))
+                             ORDER BY scopes.sequence)
+            FROM (VALUES
+                (1,ARRAY[{occurrence},{occurrence},NULL]::BIGINT[],storage_v2_posting_fingerprints(ARRAY['afternote'])),
+                (2,ARRAY[NULL]::BIGINT[],NULL::INTEGER[]),
+                (3,ARRAY[]::BIGINT[],NULL::INTEGER[]),
+                (4,NULL::BIGINT[],NULL::INTEGER[]),
+                (5,ARRAY[{occurrence}]::BIGINT[],NULL::INTEGER[])
+            ) AS scopes(sequence,ids,keys);"""
+        migration = (ROOT / 'migrations/186_storage_v2_join_derived_candidate_scope.sql').read_text()
+        migration = migration.replace('\nBEGIN;','',1).replace('\nCOMMIT;','',1)
+        admin = f"SET LOCAL app.user_id='{self.schema.ADMIN_ID}';"
+        other = f"SET LOCAL app.user_id='{self.schema.OTHER_ID}';"
+        authority = f"SELECT to_jsonb(p)-'prosrc' FROM pg_proc p WHERE oid='{signature}'::REGPROCEDURE;"
+        output = self.sql('BEGIN;' + admin + authority + observed + other + observed + admin
+                          + migration + authority + observed + other + observed + 'ROLLBACK;')
+        values = list(map(json.loads, filter(None, output.splitlines())))
+        before_acl, before_hits, before_denied, after_acl, after_hits, after_denied = values
+        self.assertEqual(before_acl, after_acl)
+        self.assertEqual(before_hits, [1, 0, 0, 0, 1])
+        self.assertEqual(after_hits, before_hits)
+        self.assertEqual(before_denied, [0, 0, 0, 0, 0])
+        self.assertEqual(after_denied, before_denied)
+
 
 # Reuse setup and fixture methods, never rerun unrelated inherited campaigns.
 for _name in dir(SelectiveKey32Tests):
