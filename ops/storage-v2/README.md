@@ -1241,6 +1241,15 @@ avoid decoding blocks selected only by a sixteen-bit fingerprint collision.
 Until then, the existing readers remain available. An index with a reserved name
 and an unexpected definition is an error, not evidence of readiness.
 
+Migration 185 adds a smaller candidate-key option for these two compact
+relations. Set `index_variant` to `key32` in the reviewed operator manifest
+configuration and supply the migration digest and function identities. Each
+ready index can serve its own reader. It uses the first 32 bits of SHA-256
+to select blocks, then uses the original terms, frequencies and weighted
+segment vectors to verify matches. The encoded lexical representation keeps
+its existing reader. The operator retains existing wide indexes. Measure
+allocated space on the same data population before attributing a saving.
+
 The migration does not build indexes or rewrite source bodies, vectors or
 posting dictionaries. `exact-lexeme-indexes.py` is the separate local operator
 for sequential concurrent index creation and guarded removal. It requires an

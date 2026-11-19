@@ -602,6 +602,7 @@ jobs:
               'eval.storage_v2.schema.test_copied_jsonl_body_recall.CopiedJsonlBodyRecallTests',
               'eval.storage_v2.schema.test_copied_jsonl_query_evidence.CopiedJsonlQueryEvidenceTests',
               'eval.storage_v2.schema.test_copied_literal_existence.CopiedLiteralExistenceTests',
+              'eval.storage_v2.schema.test_selective_key32.SelectiveKey32Tests',
           ]
           shard = int(os.environ['SCHEMA_SHARD'])
           assert shard in (0, 1), 'Expected one of the two declared schema shards'

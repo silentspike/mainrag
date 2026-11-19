@@ -18,12 +18,19 @@ def sql_file(path: Path, root: Path, parents=()) -> str:
     return re.sub(r'(?m)^\\(ir|i)\s+([^\s]+)[ \t]*$', include, path.read_text())
 
 
+def container_psql(container: str, database: str) -> list[str]:
+    if not re.fullmatch(r'[0-9a-f]{12,64}', container):
+        raise AssertionError('Expected the exact owned PostgreSQL service container')
+    return ['docker', 'exec', '-i', container, 'psql', '-X', '--no-psqlrc', '-qAt',
+            '-v', 'ON_ERROR_STOP=1', '--host=/var/run/postgresql',
+            '--username', os.environ['PGUSER'], '--dbname', database]
+
+
 def command(cls, *arguments: str, check: bool = True):
     container = os.environ.get('STORAGE_V2_TEST_LOCAL_CONTAINER')
     if not container:
         return cls.base.command.__func__(cls, *arguments, check=check)
-    if not re.fullmatch(r'[0-9a-f]{12,64}', container):
-        raise AssertionError('Expected the exact owned PostgreSQL service container')
+    argv = container_psql(container, cls.database)
     arguments = list(arguments)
     statement = None
     for option in ('--command', '--file'):
@@ -33,10 +40,7 @@ def command(cls, *arguments: str, check: bool = True):
             statement = sql_file(Path(value), cls.schema.ROOT) if option == '--file' else value
             del arguments[index:index + 2]
             break
-    argv = ['docker', 'exec', '-i', container, 'psql', '-X', '--no-psqlrc', '-qAt',
-            '-v', 'ON_ERROR_STOP=1', '--host=/var/run/postgresql',
-            '--username', os.environ['PGUSER'], '--dbname', cls.database, *arguments]
-    result = subprocess.run(argv, input=statement, text=True, capture_output=True,
+    result = subprocess.run([*argv, *arguments], input=statement, text=True, capture_output=True,
                             cwd=cls.schema.ROOT)
     if check and result.returncode:
         raise AssertionError(result.stderr)
