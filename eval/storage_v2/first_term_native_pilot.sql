@@ -1,6 +1,8 @@
 -- Same-population native first-hit pilot. Run in one local psql session.
 -- Required psql variables are pilot_source_id, pilot_generation_seq,
 -- pilot_term and pilot_user_id. Optional bounds below cover a sample only.
+-- Define pilot_inverted when invoking this file through psql -f to add the
+-- inverted layout and its standalone fallback to the same transaction.
 -- All writes are temporary and the transaction ends with ROLLBACK.
 \set ON_ERROR_STOP on
 \if :{?pilot_occurrence_limit}
@@ -24,6 +26,9 @@ SET LOCAL idle_in_transaction_session_timeout = '30s';
 SET LOCAL work_mem = '16MB';
 SET LOCAL maintenance_work_mem = '32MB';
 SET LOCAL temp_file_limit = '256MB';
+\if :{?pilot_inverted}
+SET LOCAL temp_buffers = '64MB';
+\endif
 SET LOCAL max_parallel_workers_per_gather = 0;
 SET LOCAL jit = off;
 SET LOCAL app.user_id = :'pilot_user_id';
@@ -397,4 +402,7 @@ BEGIN
 END
 $hash32_parity$;
 
+\if :{?pilot_inverted}
+\ir inverted_first_term_pilot.sql
+\endif
 ROLLBACK;
