@@ -117,6 +117,8 @@ class FootprintTests(unittest.TestCase):
         self.assertEqual(F.category('legacy_hit_mapping'), 'durable_hit_compatibility')
         self.assertEqual(F.category('storage_v2_legacy_rank_payload'),
                          'search_projection_and_reader_metadata')
+        self.assertEqual(F.category('storage_v2_inverted_projection'),
+                         'search_projection_and_reader_metadata')
         self.assertEqual(F.category('new_unknown_table'), 'other_database_objects')
         self.assertEqual(F.category('content_body', 'unrelated'), 'other_database_objects')
 
