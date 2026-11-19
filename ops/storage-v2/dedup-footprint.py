@@ -121,6 +121,7 @@ def category(name, schema='public'):
         return 'legacy_coexistence'
     if name.startswith(('storage_v2_search_', 'storage_v2_lexical_',
                         'storage_v2_compact_', 'storage_v2_derived_lexical_',
+                        'storage_v2_inverted_',
                         'storage_v2_byte_posting_', 'storage_v2_ordinary_first_',
                         'storage_v2_document_postings_', 'storage_v2_legacy_rank_',
                         'storage_v2_legacy_lexical_', 'storage_v2_reader_metadata_',

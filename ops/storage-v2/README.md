@@ -1632,6 +1632,35 @@ backups. Capacity admission must include measured database/index growth, packs,
 retained WAL/archive growth, backup growth and the final-delta reserve. A small
 vector compression result alone is not a full-source resource gate.
 
+### Packed inverted projections during ingest
+
+Migrations 188 and 189 stage packed first-hit projections in the existing
+derived lexical writer. Local administrators opt in a source through
+`storage_v2_set_inverted_source_enabled`. Each enabled write uses the already
+validated weighted vectors and commits the projection and occurrence binding
+in the same transaction as the lexical block. Within a source, occurrences
+with the same canonical document and checked block layout share one projection.
+
+For a ready frozen generation, the local operator can stage missing retained
+blocks with `storage_v2_backfill_inverted_projections`. Start at occurrence
+zero and block minus one, then use the returned cursor and `has_more`. The
+operator bounds both block count and logical input bytes before reconstructing
+any vectors. Regular ingest supplies projections for new content.
+
+Use `storage_v2_append_inverted_batch` with the target generation, the next
+zero-based batch number and a bounded block limit. Replay the same request to
+reconcile a lost acknowledgement. `storage_v2_publish_inverted_generation`
+requires the expected batch count and complete current derived-block coverage
+for the frozen generation. It publishes the index in one transaction. The word
+reader checks ready metadata, source access and current coverage for its
+requested occurrences. Ambiguous or conflicting hash candidates are checked
+against exact segments. Phrase and Boolean search use their established path.
+
+The search footprint collector includes every retained staging and index
+relation in the search projection total. Source qualification measures the
+complete API, exact reader parity, follow-on ingest and net physical allocation
+on the same corpus.
+
 ## Global native GC and pack reclamation
 
 `native-gc.py` implements the database mark/sweep phase after accepted activation,
