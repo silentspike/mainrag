@@ -1632,6 +1632,21 @@ backups. Capacity admission must include measured database/index growth, packs,
 retained WAL/archive growth, backup growth and the final-delta reserve. A small
 vector compression result alone is not a full-source resource gate.
 
+### Packed inverted projections during ingest
+
+Migrations 188 and 189 stage packed first-hit projections in the existing
+derived lexical writer. Local administrators opt in a source through
+`storage_v2_set_inverted_source_enabled`. Each enabled write uses the already
+validated weighted vectors and commits the projection and occurrence binding
+in the same transaction as the lexical block. Within a source, occurrences
+with the same canonical document and checked block layout share one projection.
+
+The staged payload supplies the input for a future sealed batch index. The
+search footprint collector includes its tables and indexes in the search
+projection total. Source qualification requires a published layout, exact
+reader parity, a follow-on ingest and a measured reduction including every
+retained representation.
+
 ## Global native GC and pack reclamation
 
 `native-gc.py` implements the database mark/sweep phase after accepted activation,

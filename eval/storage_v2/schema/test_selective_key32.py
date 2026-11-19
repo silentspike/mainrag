@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import unittest
+import uuid
 from eval.storage_v2.schema import test_copied_literal_existence as previous
 from eval.storage_v2.schema import test_encoded_lexical_blocks as encoded
 from eval.storage_v2.schema import test_retained_lexical_conversion as lexical
@@ -212,6 +213,199 @@ class SelectiveKey32Tests(previous.CopiedLiteralExistenceTests, encoded.EncodedL
         self.assertEqual(after_hits, before_hits)
         self.assertEqual(before_denied, [0, 0, 0, 0, 0])
         self.assertEqual(after_denied, before_denied)
+
+    def test_inverted_ingest_opt_in_shared_layout_and_drift(self):
+        token = uuid.uuid4().hex
+        source = int(self.sql(
+            f"INSERT INTO sources(id,name,type,path) SELECT max(id)+1,'inverted-{token}',"
+            "'fixture','synthetic-inverted' FROM sources RETURNING id"
+        ))
+        run = self.begin(source, token * 2, uuid.uuid4().hex * 2)
+        words = [['shared', f'ordinal{index}'] for index in range(64)]
+        words[19].append(COLLISION[0])
+        words[56].append(COLLISION[1])
+        segments = [' '.join(group) for group in words]
+        context_prefixes = ['headingproof' if index == 45 else '' for index in range(64)]
+        start = 1
+        starts = []
+        for segment in segments:
+            starts.append(start)
+            start += len(segment) + 1
+        # Use genuine small inline leaves and let PostgreSQL construct the
+        # large document. The lexical writer receives only 64 short segments.
+        body = f"{self.quote(' '.join(segments))} || repeat(' ', 262144)"
+        graph = json.loads(self.sql(self.admin(f"""
+            WITH text_body AS MATERIALIZED (SELECT {body} AS value),
+            full_body AS MATERIALIZED (
+                SELECT convert_to(value,'UTF8') AS bytes, value FROM text_body
+            ), leaves AS MATERIALIZED (
+                SELECT offset_bytes, node.id
+                FROM full_body
+                CROSS JOIN LATERAL generate_series(1,octet_length(bytes),60000) offsets(offset_bytes)
+                CROSS JOIN LATERAL storage_v2_put_inline_body(
+                    substring(bytes FROM offset_bytes FOR 60000)
+                ) part
+                CROSS JOIN LATERAL storage_v2_put_leaf_node('shadow-fixture','text',part.id) node
+            ), children AS (
+                SELECT array_agg(id ORDER BY offset_bytes) AS ids FROM leaves
+            ), root AS MATERIALIZED (
+                SELECT node.id, octet_length(bytes) AS byte_count, sha256(bytes) AS digest, value
+                FROM full_body CROSS JOIN children
+                CROSS JOIN LATERAL storage_v2_put_internal_node('shadow-fixture','document',
+                    octet_length(bytes), array_fill('content'::TEXT,ARRAY[cardinality(ids)]), ids
+                ) node
+            ), components AS MATERIALIZED (
+                SELECT root.*, retrieval.id AS view_id
+                FROM root CROSS JOIN LATERAL storage_v2_put_retrieval_view(
+                    'chunk','fixture-view-v1','text','fixture-tokenizer-v1',0,
+                    ARRAY['content'],ARRAY['node'],ARRAY[root.id],ARRAY[0::BIGINT],ARRAY[byte_count::BIGINT]
+                ) retrieval
+            ), documents AS MATERIALIZED (
+                SELECT components.*, document.id AS document_id
+                FROM components CROSS JOIN LATERAL storage_v2_put_search_document(
+                    'mainrag.lexical-simple.v1','node',components.id,value,ARRAY[]::TEXT[]
+                ) document
+            )
+            SELECT jsonb_build_object('node',id,'view',view_id,'document',document_id,
+                'bytes',byte_count,'digest',encode(digest,'hex'))
+            FROM documents;
+        """)))
+        self.sql(self.admin(f"SELECT storage_v2_bind_search_document({graph['view']},0,{graph['document']},1.0)"))
+        self.complete_analysis(graph['digest'])
+        items = json.loads(self.sql(self.admin(f"""
+            SELECT jsonb_object_agg(inputs.item,jsonb_build_array(staged.occurrence_id,staged.artifact_version_id))
+            FROM (VALUES ('disabled'),('first'),('second')) inputs(item)
+            CROSS JOIN LATERAL storage_v2_stage_shadow_item(
+                {run},inputs.item,'document','synthetic-item',jsonb_build_object('item',inputs.item),
+                'fixture-adapter-v1',{graph['node']},NULL,'{graph['digest']}',{graph['bytes']},
+                decode('{graph['digest']}','hex'),'fixture-analysis-v1',{graph['view']},
+                '/synthetic/'||inputs.item,'{{"byte_start":0}}'::JSONB
+            ) staged;
+        """)))
+        self.assertEqual(len({row[0] for row in items.values()}), 3)
+        self.assertEqual(len({row[1] for row in items.values()}), 3)
+
+        def write(item, function='storage_v2_put_lexical_segments_located'):
+            occurrence, artifact = items[item]
+            return (
+                f'{function}({occurrence},{artifact},'
+                f'{self.array(list(range(64)), "BIGINT")},{self.array(segments, "TEXT")},'
+                f'{self.array(context_prefixes, "TEXT")},array_fill(\'textkind\'::TEXT,ARRAY[64]),'
+                f'{self.array(starts, "BIGINT")},{self.array(starts, "BIGINT")})'
+            )
+
+        def app_write(item, *, with_context=False):
+            if not with_context:
+                return self.admin(f"SELECT {write(item)};RESET ROLE;")
+            occurrence, artifact = items[item]
+            return self.admin(
+                f'SELECT storage_v2_begin_lexical_document_context({run},{occurrence},{artifact},64);'
+                f"SELECT {write(item, 'storage_v2_stage_lexical_document_context')};"
+                f'SELECT storage_v2_finish_lexical_document_context({occurrence},{artifact});'
+                'RESET ROLE;'
+            )
+
+        def projection_state(stage):
+            return f"""
+                SELECT jsonb_build_object('stage','{stage}','projections',(SELECT jsonb_agg(
+                    jsonb_build_array(document_id,representative_occurrence_id,representative_block_order,
+                                      encode(layout_sha256,'hex'),encode(payload,'hex'))
+                    ORDER BY document_id,layout_sha256)
+                    FROM storage_v2_inverted_projection WHERE source_id={source}),
+                    'bindings',(SELECT jsonb_agg(jsonb_build_array(
+                        occurrence_id,artifact_version_id,document_id,block_order,encode(layout_sha256,'hex'))
+                        ORDER BY occurrence_id)
+                        FROM storage_v2_inverted_binding WHERE source_id={source}),
+                    'derived',(SELECT jsonb_object_agg(occurrence_id,fingerprints)
+                        FROM storage_v2_derived_lexical_block WHERE source_id={source}));
+            """
+
+        def transaction_body(number):
+            path, = (ROOT / 'migrations').glob(f'{number}_*.sql')
+            return path.read_text().replace('\nBEGIN;', '', 1).replace('\nCOMMIT;', '', 1)
+
+        activation = f'SELECT storage_v2_set_inverted_source_enabled({source},TRUE);'
+        denied_operator = f"""
+            DO $fixture_inverted_denied$
+            BEGIN
+                BEGIN
+                    PERFORM set_config('app.user_id','{self.schema.OTHER_ID}',TRUE);
+                    PERFORM storage_v2_set_inverted_source_enabled({source},TRUE);
+                    RAISE EXCEPTION 'fixture accepted unauthorized inverted source enable';
+                EXCEPTION WHEN insufficient_privilege THEN
+                    IF SQLERRM NOT LIKE '%inverted projection requires local administrative operator%' THEN
+                        RAISE;
+                    END IF;
+                END;
+            END $fixture_inverted_denied$;
+        """
+        drift = f"""
+            DO $fixture_inverted_drift$
+            BEGIN
+                BEGIN
+                    ALTER TABLE storage_v2_inverted_projection
+                        DISABLE TRIGGER storage_v2_inverted_projection_immutable;
+                    UPDATE storage_v2_inverted_projection
+                       SET payload=set_byte(payload,2,get_byte(payload,2) # 1)
+                     WHERE source_id={source};
+                    IF NOT FOUND THEN RAISE EXCEPTION 'fixture did not simulate stored payload drift'; END IF;
+                    ALTER TABLE storage_v2_inverted_projection
+                        ENABLE TRIGGER storage_v2_inverted_projection_immutable;
+                    PERFORM {write('second')};
+                    RAISE EXCEPTION 'fixture ingest accepted the changed same-layout payload';
+                EXCEPTION WHEN OTHERS THEN
+                    IF SQLERRM NOT LIKE '%inverted projection payload proof differs%' THEN
+                        RAISE;
+                    END IF;
+                END;
+            END $fixture_inverted_drift$;
+        """
+        output = self.sql(
+            f"BEGIN;SET LOCAL app.user_id='{self.schema.ADMIN_ID}';"
+            + transaction_body(188) + transaction_body(189) + denied_operator
+            + app_write('disabled') + projection_state('disabled')
+            + activation + app_write('first') + app_write('second', with_context=True) + projection_state('enabled')
+            + app_write('second', with_context=True) + projection_state('retry') + drift + projection_state('restored')
+            + "ROLLBACK; SELECT to_regclass('public.storage_v2_inverted_projection') IS NULL;"
+        )
+        states = {row['stage']: row for row in map(json.loads, (
+            line for line in output.splitlines() if line.startswith('{')
+        ))}
+        self.assertIsNone(states['disabled']['projections'])
+        self.assertIsNone(states['disabled']['bindings'])
+        self.assertEqual(set(states['disabled']['derived']), {str(items['disabled'][0])})
+
+        enabled = states['enabled']
+        self.assertEqual(len(enabled['projections']), 1)
+        document, representative, block_order, layout_hash, payload = enabled['projections'][0]
+        self.assertEqual((document, representative, block_order), (graph['document'], items['first'][0], 0))
+        self.assertEqual(enabled['bindings'], sorted(
+            [occurrence, artifact, graph['document'], 0, layout_hash]
+            for occurrence, artifact in (items['first'], items['second'])
+        ))
+        first = {}
+        for ordinal, terms in enumerate(words):
+            for term in [*terms, 'textkind', context_prefixes[ordinal]]:
+                if term:
+                    first.setdefault(term, ordinal)
+        groups = {}
+        for term, ordinal in first.items():
+            key = hashlib.sha256(term.encode('UTF8')).digest()[:4]
+            groups.setdefault(key[:2], []).append((key[2:], ordinal))
+        expected = b''.join(
+            coarse + (suffixes[0][0] + bytes([suffixes[0][1]])
+                      if len(suffixes) == 1 else b'\x00\x00\xff')
+            for coarse, suffixes in sorted(groups.items())
+        )
+        self.assertTrue(any(len(group) > 1 for group in groups.values()))
+        self.assertEqual(bytes.fromhex(payload), expected)
+        fingerprints = [int.from_bytes(coarse, 'big') for coarse in sorted(groups)]
+        for occurrence, _ in items.values():
+            self.assertEqual(enabled['derived'][str(occurrence)], fingerprints)
+        for replay in ('retry', 'restored'):
+            self.assertEqual({k: v for k, v in states[replay].items() if k != 'stage'},
+                             {k: v for k, v in enabled.items() if k != 'stage'})
+        self.assertEqual(output.splitlines()[-1], 't')
 
 
 # Reuse setup and fixture methods, never rerun unrelated inherited campaigns.
