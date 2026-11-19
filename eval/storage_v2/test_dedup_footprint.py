@@ -225,5 +225,103 @@ class FootprintTests(unittest.TestCase):
                 F.read_private(path)
 
 
+class DatabaseAllocationTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.data = self.root/'pgdata'
+        self.base = self.data/'base'/'7'
+        self.base.mkdir(parents=True)
+        (self.data/'global').mkdir()
+        names = ['11','11.1','11_fsm','11_vm.2','12','13','14']
+        for name in names:
+            (self.base/name).write_bytes(b'x'*4096)
+        (self.data/'global'/'99').write_bytes(b'x'*4096)
+        relations = [dict(oid=n,kind=kind,filepath='base/7/'+str(n),
+            owner_name='storage_v2_search_document',owner_schema='public') for n,kind in ((11,'r'),(12,'t'),(13,'i'),(14,'i'))]
+        relations.append(dict(oid=99,kind='r',filepath='global/99',owner_name='pg_database',owner_schema='pg_catalog'))
+        for relation in relations:
+            relation['fork_lengths'] = (dict(main=8192, fsm=4096, vm=4096, init=0)
+                if relation['oid'] == 11 else dict(main=4096, fsm=0, vm=0, init=0))
+        self.observed = dict(database_oid=7,building_run_count=0,active_backend_count=0,
+            physical_storage=dict(data_directory=str(self.data),server_major='18',tablespaces=[],relations=relations))
+
+    def test_heap_toast_indexes_segments_forks_use_actual_blocks_once_without_body_reads(self):
+        with patch.object(Path, 'read_bytes', side_effect=AssertionError('body read forbidden')):
+            value = F.database_allocated_blocks(self.observed)
+        self.assertTrue(value['complete'])
+        self.assertFalse(value['exclusive_bytes_proven'])
+        self.assertFalse(value['physical_reclaim_proven'])
+        files = [*self.base.iterdir(),self.data/'global'/'99']
+        self.assertEqual(value['allocated_file_bytes'],sum(path.stat().st_blocks*512 for path in files))
+        self.assertEqual(value['file_length_bytes'],sum(path.stat().st_size for path in files))
+        self.assertEqual(len(value['records']),8)
+        forks = {(r['fork'],r['segment']) for r in value['records'] if r['relation_oid']==11}
+        self.assertEqual(forks,{('main',0),('main',1),('fsm',0),('vm',2)})
+        self.assertEqual(value['shared_cluster_catalog_allocated_bytes'],(self.data/'global'/'99').stat().st_blocks*512)
+        self.assertEqual(value['canonical_content_bytes_read'],0)
+
+    def test_unmapped_missing_toast_symlink_or_active_writer_never_complete(self):
+        (self.base/'orphan').write_bytes(b'x'*4096)
+        (self.base/'12').unlink()
+        (self.base/'11.1').unlink()
+        (self.base/'unreviewed_link').symlink_to(self.base/'11')
+        self.observed['building_run_count']=1
+        value=F.database_allocated_blocks(self.observed)
+        self.assertFalse(value['complete'])
+        reasons={item['reason'] for item in value['unknown']}
+        self.assertIn('unmapped_database_file',reasons)
+        self.assertIn('missing_relation_toast_or_index_main_file',reasons)
+        self.assertIn('relation_fork_lengths_changed_or_incomplete',reasons)
+        self.assertIn('symlink_directory_special_or_mounted_file',reasons)
+        self.assertIn('database_writers_or_active_backends_not_frozen',reasons)
+
+    def test_hardlinks_are_counted_once_and_external_alias_is_unknown(self):
+        (self.base/'12').unlink()
+        import os
+        os.link(self.base/'11',self.base/'12')
+        value=F.database_allocated_blocks(self.observed)
+        self.assertFalse(value['complete'])
+        self.assertEqual(len(value['records']),7)
+        self.assertIn('hardlink_crosses_relation_or_category',{r['reason'] for r in value['unknown']})
+        os.link(self.base/'13',self.root/'outside-census')
+        value=F.database_allocated_blocks(self.observed)
+        self.assertIn('hardlink_outside_census',{r['reason'] for r in value['unknown']})
+
+    def test_tablespace_metadata_link_is_bound_and_drift_rejected(self):
+        space=self.root/'tablespace';directory=space/'PG_18_202601001'/'7';directory.mkdir(parents=True)
+        (directory/'55').write_bytes(b'x'*4096)
+        links=self.data/'pg_tblspc';links.mkdir();link=links/'9999';link.symlink_to(space,target_is_directory=True)
+        meta=self.observed['physical_storage'];meta['tablespaces']=[dict(oid=9999,location=str(space))]
+        meta['relations'].append(dict(oid=55,kind='r',filepath='pg_tblspc/9999/PG_18_202601001/7/55',
+            owner_name='content_body',owner_schema='public',
+            fork_lengths=dict(main=4096, fsm=0, vm=0, init=0)))
+        self.assertTrue(F.database_allocated_blocks(self.observed)['complete'])
+        import os
+        real_scandir=os.scandir
+        replacement=self.root/'different';replacement.mkdir()
+        def changed(path):
+            iterator=real_scandir(path)
+            if Path(path)==directory:
+                link.unlink();link.symlink_to(replacement,target_is_directory=True)
+            return iterator
+        with patch.object(F.os,'scandir',side_effect=changed):
+            value=F.database_allocated_blocks(self.observed)
+        self.assertFalse(value['complete'])
+        self.assertIn('tablespace_link_changed',{r['reason'] for r in value['unknown']})
+
+    def test_opt_in_sql_is_metadata_only_and_missing_metadata_or_bound_stays_unknown(self):
+        result=SimpleNamespace(returncode=0,stdout=json.dumps(self.observed))
+        with patch.object(F.subprocess,'run',return_value=result) as invoke:
+            F.observe_database('fixture',True,allocated_blocks=True)
+        sql=invoke.call_args.kwargs['input']
+        self.assertIn("'physical_storage'",sql)
+        self.assertIn('pg_relation_filepath',sql)
+        self.assertIn('pg_tablespace_location',sql)
+        self.assertFalse(F.database_allocated_blocks({})['complete'])
+        self.assertFalse(F.database_allocated_blocks(self.observed,maximum_entries=1)['complete'])
+
+
 if __name__ == '__main__':
     unittest.main()
