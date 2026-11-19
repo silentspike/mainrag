@@ -674,6 +674,200 @@ def verify_committed(plan: dict, readback: dict) -> None:
         raise RuntimeError("committed activation source set differs")
 
 
+def ordinary_sync_result(response: dict) -> tuple[int, dict]:
+    """Accept the normal API envelope or its lossless CLI projection."""
+    if not isinstance(response, dict):
+        raise RuntimeError("ordinary sync response is invalid")
+    native = response.get("storage_v2", response)
+    if "storage_v2" in response and (
+        response.get("status") != "completed"
+        or response.get("stats", {}).get("errors") != 0
+    ):
+        raise RuntimeError("ordinary sync did not complete without errors")
+    source_id = response.get("source_id")
+    if type(source_id) is not int or source_id <= 0 or not isinstance(native, dict) \
+            or native.get("status") != "ACTIVE_INGEST_COMMITTED" \
+            or any(type(native.get(k)) is not int or native[k] <= 0
+                   for k in ("generation_id", "generation_seq", "changed_item_count")) \
+            or type(native.get("item_count")) is not int or native["item_count"] < 0 \
+            or not isinstance(response.get("stats", {}).get("source_io", native.get("source_io")), dict) \
+            or not isinstance(native.get("telemetry"), dict) \
+            or not isinstance(native.get("receipt"), dict) \
+            or type(native["receipt"].get("receipt_id")) is not int \
+            or native["receipt"]["receipt_id"] <= 0:
+        raise RuntimeError("a positive ordinary ingest commit, not NO_CHANGE, is required")
+    return source_id, native
+
+
+def post_ingest_readback(database: str, local_postgres: bool, activation_id: str,
+                         manifest_sha: str, receipt_id: int) -> dict:
+    identifier = str(uuid.UUID(activation_id))
+    if not valid_hash(manifest_sha) or type(receipt_id) is not int or receipt_id <= 0:
+        raise RuntimeError("exact ordinary ingest receipt identity is required")
+    # No pack/body scan, build or activation. The existing complete-set guard
+    # validates the latest chained pointer digest and source classification.
+    query = """
+BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET LOCAL row_security = off;
+DO $readback$ BEGIN
+ PERFORM public.storage_v2_require_complete_active_set('%s');
+END $readback$;
+SELECT jsonb_build_object(
+ 'activation',(SELECT to_jsonb(a) FROM storage_v2_activation_set_evidence a WHERE id='%s'::uuid),
+ 'receipt',(SELECT to_jsonb(r)||jsonb_build_object('created_at_unix',extract(epoch FROM r.created_at))
+     FROM storage_v2_active_ingest_receipt r WHERE id=%d),
+ 'receipt_count',(SELECT count(*) FROM storage_v2_active_ingest_receipt WHERE activation_id='%s'::uuid),
+ 'pointer_set_sha256',storage_v2_pointer_set_sha256(),
+ 'source_classification_sha256',storage_v2_source_classification_sha256(),
+ 'sources',(SELECT jsonb_agg(jsonb_build_object(
+   'source_id',s.id,'is_test',s.is_test,'active_generation_id',p.active_generation_id,
+   'active_status',g.status::text,'active_generation_count',
+      (SELECT count(*) FROM source_generation a WHERE a.source_id=s.id AND a.status='active'),
+   'generation_seq',g.generation_seq,'item_count',g.item_count,
+   'changed_item_count',CASE WHEN s.id=(SELECT source_id FROM storage_v2_active_ingest_receipt WHERE id=%d)
+     THEN (SELECT count(DISTINCT source_item_id) FROM generation_item_version
+      WHERE source_id=s.id AND (valid_from_seq=g.generation_seq OR valid_to_seq=g.generation_seq)) END,
+   'witness',g.witness,'verification_manifest_sha256',g.verification_manifest_sha256,
+   'prior_status',(SELECT old.status::text FROM source_generation old
+       WHERE old.id=(SELECT prior_generation_id FROM storage_v2_active_ingest_receipt WHERE id=%d)
+         AND old.source_id=s.id)) ORDER BY s.id)
+   FROM sources s JOIN logical_source p ON p.id=s.id
+   JOIN source_generation g ON g.id=p.active_generation_id AND g.source_id=s.id),
+ 'run',(SELECT jsonb_build_object('id',r.id,'source_id',r.source_id,'generation_id',r.generation_id,
+   'status',r.status,'expected_active_generation_id',r.expected_active_generation_id,
+   'semantic_manifest_sha256',r.semantic_manifest_sha256,'expected_item_count',r.expected_item_count,
+   'adapter_profile_id',r.adapter_profile_id) FROM storage_v2_ingest_run r
+   JOIN storage_v2_active_ingest_receipt receipt ON receipt.run_id=r.id WHERE receipt.id=%d)
+);
+COMMIT;
+""" % (manifest_sha, identifier, receipt_id, identifier, receipt_id, receipt_id, receipt_id)
+    value = json.loads(psql(database, query, local_postgres, readonly=True))
+    if not isinstance(value, dict):
+        raise RuntimeError("ordinary ingest database readback is invalid")
+    return value
+
+
+def verify_post_ingest(plan: dict, attempt: dict, switched: dict, response: dict,
+                       readback: dict, *, plan_sha256: str) -> dict:
+    """Prove exactly the first ordinary pointer advance; never infer health."""
+    source_id, native = ordinary_sync_result(response)
+    manifest = plan.get("manifest")
+    if plan.get("schema_version") != "mainrag.storage-v2.activation-plan.v1" \
+            or plan.get("status") != "READY_FOR_EXPLICIT_APPROVAL" \
+            or not isinstance(manifest, dict) or not isinstance(manifest.get("sources"), list) \
+            or not manifest["sources"] or not valid_hash(plan.get("manifest_sha256")) \
+            or not valid_hash(plan_sha256) \
+            or attempt.get("schema_version") != "mainrag.storage-v2.activation-attempt.v1" \
+            or attempt.get("status") != "DB_COMMITTED_DEFAULT_SWITCH_PENDING" \
+            or switched.get("schema_version") != "mainrag.storage-v2.default-switch.v1" \
+            or switched.get("status") != "DEFAULT_SWITCHED_POST_INGEST_PENDING" \
+            or any(attempt.get(k) != value or switched.get(k) != value for k, value in (
+                ("activation_id", manifest["activation_id"]),
+                ("manifest_sha256", plan["manifest_sha256"]),
+                ("plan_sha256", plan_sha256))) \
+            or type(readback.get("receipt_count")) is not int or readback["receipt_count"] != 1:
+        raise RuntimeError("exact committed activation, switch and first ingest ancestry is required")
+    expected = {item["source_id"]: item["candidate_generation_id"] for item in manifest["sources"]}
+    activation = readback.get("activation") or {}
+    receipt = readback.get("receipt") or {}
+    if source_id not in expected or activation.get("id") != manifest["activation_id"] \
+            or activation.get("manifest_sha256") != plan["manifest_sha256"] \
+            or activation.get("source_count") != len(expected) \
+            or activation.get("pointer_set_sha256") != attempt.get("pointer_set_sha256") \
+            or receipt.get("activation_id") != activation["id"] \
+            or receipt.get("source_id") != source_id \
+            or receipt.get("prior_generation_id") != expected[source_id] \
+            or receipt.get("generation_id") != native["generation_id"] \
+            or receipt["generation_id"] == expected[source_id] \
+            or receipt.get("before_pointer_set_sha256") != activation.get("pointer_set_sha256") \
+            or receipt.get("after_pointer_set_sha256") != readback.get("pointer_set_sha256") \
+            or receipt.get("source_count") != len(expected) \
+            or receipt.get("source_classification_sha256") != activation.get("source_classification_sha256") \
+            or receipt.get("source_classification_sha256") != readback.get("source_classification_sha256") \
+            or type(switched.get("observed_at_unix")) is not int \
+            or type(receipt.get("created_at_unix")) not in (int, float) \
+            or not switched["observed_at_unix"] <= receipt["created_at_unix"] \
+            or any(not valid_hash(receipt.get(k)) for k in (
+                "before_pointer_set_sha256", "after_pointer_set_sha256", "source_watermark_sha256",
+                "verification_manifest_sha256", "verification_proof_sha256")) \
+            or receipt["before_pointer_set_sha256"] == receipt["after_pointer_set_sha256"]:
+        raise RuntimeError("ordinary ingest live receipt or pointer chain differs")
+    raw_receipt = native["receipt"]
+    if any(raw_receipt.get(k) != value for k, value in (
+        ("status", "ACTIVE_INGEST_COMMITTED"), ("receipt_id", receipt.get("id")),
+        ("source_id", source_id), ("generation_id", receipt["generation_id"]),
+        ("pointer_set_sha256", receipt["after_pointer_set_sha256"]))):
+        raise RuntimeError("ordinary sync response differs from its committed database receipt")
+    expected[source_id] = native["generation_id"]
+    rows = readback.get("sources")
+    if not isinstance(rows, list) or len(rows) != len(expected) \
+            or {row.get("source_id") for row in rows} != set(expected) \
+            or any(row.get("active_generation_id") != expected[row["source_id"]]
+                   or row.get("active_status") != "active" or row.get("active_generation_count") != 1
+                   for row in rows):
+        raise RuntimeError("ordinary ingest left a missing, mixed or unexpected active pointer")
+    current = next(row for row in rows if row["source_id"] == source_id)
+    run = readback.get("run") or {}
+    witness = current.get("witness") or {}
+    if current.get("is_test") is not False or current.get("prior_status") != "superseded" \
+            or current.get("generation_seq") != native["generation_seq"] \
+            or current.get("item_count") != native["item_count"] \
+            or current.get("changed_item_count") != native["changed_item_count"] \
+            or current.get("verification_manifest_sha256") != receipt["verification_manifest_sha256"] \
+            or witness.get("source_watermark_sha256") != receipt["source_watermark_sha256"] \
+            or witness.get("commit_sha") != manifest["code_commit_sha"] \
+            or run.get("id") != receipt.get("run_id") or run.get("status") != "sealed" \
+            or run.get("source_id") != source_id or run.get("generation_id") != native["generation_id"] \
+            or run.get("expected_active_generation_id") != receipt["prior_generation_id"] \
+            or run.get("semantic_manifest_sha256") != receipt["source_watermark_sha256"] \
+            or run.get("expected_item_count") != native["item_count"] \
+            or not isinstance(run.get("adapter_profile_id"), str) \
+            or run["adapter_profile_id"] != witness.get("adapter_profile_id"):
+        raise RuntimeError("ordinary ingest sealed run, generation or runtime identity differs")
+    return {"schema_version": "mainrag.storage-v2.post-ingest-readback.v1",
+            "status": "POST_INGEST_COMMITTED_ACTIVE_CHECKS_PENDING",
+            "activation_manifest_sha256": plan["manifest_sha256"],
+            "regular_ingest_committed": True, "whole_issue67_accepted": False,
+            "source_id": source_id, "receipt_id": receipt["id"],
+            "generation_id": native["generation_id"], "changed_item_count": native["changed_item_count"],
+            "pointer_set_sha256": receipt["after_pointer_set_sha256"],
+            "source_io": response.get("stats", {}).get("source_io", native.get("source_io")),
+            "telemetry": native.get("telemetry"),
+            "remaining_checks": ["active_search_api_and_cli", "active_source_inspection",
+                                 "card", "explain", "layers", "ownership", "benchmark"]}
+
+
+def post_ingest_command(args: argparse.Namespace) -> None:
+    plan = read_private(args.plan, args.plan_sha256)
+    attempt = read_private(args.attempt, args.attempt_sha256)
+    switched = read_private(args.default_switch, args.default_switch_sha256)
+    response = read_private(args.sync_response, args.sync_response_sha256)
+    _, native = ordinary_sync_result(response)
+    if sha256(args.installed_binary.read_bytes()) != plan.get("installed_binary_sha256"):
+        raise RuntimeError("post-ingest installed binary differs from activation")
+    # Reuse the coupled switch's existing live service/env/API readers only.
+    # No service action or sync dispatch is called by this phase.
+    switch = runpy.run_path(str(Path(__file__).with_name("default-read-switch.py")))
+    before = switch["read_service_state"]()
+    if before[1:] != (plan["manifest_sha256"], plan["manifest"]["code_commit_sha"]) \
+            or running_binary_sha256(str(before[0])) != plan["installed_binary_sha256"] \
+            or switch["api_read_path"](args.api_url, args.token_file) != "storage_v2_active":
+        raise RuntimeError("post-ingest live default, runtime or process differs")
+    readback = post_ingest_readback(args.database, args.local_postgres,
+        plan["manifest"]["activation_id"], plan["manifest_sha256"], native["receipt"]["receipt_id"])
+    value = verify_post_ingest(plan, attempt, switched, response, readback,
+                               plan_sha256=args.plan_sha256)
+    if switch["read_service_state"]() != before \
+            or running_binary_sha256(str(before[0])) != plan["installed_binary_sha256"]:
+        raise RuntimeError("API changed during ordinary ingest readback")
+    value.update(observed_at_unix=int(time.time()), actual_database_readback=readback,
+                 plan_sha256=args.plan_sha256, attempt_sha256=args.attempt_sha256,
+                 default_switch_sha256=args.default_switch_sha256,
+                 sync_response_sha256=args.sync_response_sha256)
+    private_write(args.output, value)
+    print(json.dumps({k: value[k] for k in ("status", "source_id", "receipt_id", "whole_issue67_accepted")}))
+
+
 def apply_command(args: argparse.Namespace) -> None:
     now = int(time.time())
     plan = read_private(args.plan, args.plan_sha256)
@@ -755,13 +949,13 @@ def apply_command(args: argparse.Namespace) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("capture-watermarks", "plan", "apply"))
+    parser.add_argument("phase", choices=("capture-watermarks", "plan", "apply", "verify-post-ingest"))
     parser.add_argument("--database", required=True)
     parser.add_argument("--local-postgres", action="store_true")
     parser.add_argument("--api-url", default="http://127.0.0.1:3001")
     parser.add_argument("--token-env", default="MAINRAG_TOKEN")
     parser.add_argument("--token-file", type=Path)
-    parser.add_argument("--audit", type=Path, required=True)
+    parser.add_argument("--audit", type=Path)
     parser.add_argument("--audit-sha256")
     parser.add_argument("--acceptance", type=Path)
     parser.add_argument("--acceptance-sha256")
@@ -779,6 +973,12 @@ def main() -> int:
     parser.add_argument("--approval-sha256")
     parser.add_argument("--admin-context", type=Path)
     parser.add_argument("--admin-context-sha256")
+    parser.add_argument("--attempt", type=Path)
+    parser.add_argument("--attempt-sha256")
+    parser.add_argument("--default-switch", type=Path)
+    parser.add_argument("--default-switch-sha256")
+    parser.add_argument("--sync-response", type=Path)
+    parser.add_argument("--sync-response-sha256")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if re.fullmatch(r"[A-Za-z0-9_-]+", args.database) is None:
@@ -791,7 +991,9 @@ def main() -> int:
         parser.error("quiesced watermarks require an exact receipt and digest")
     if (args.immutable_watermarks is None) != (args.immutable_watermarks_sha256 is None):
         parser.error("immutable watermarks require exact bindings and digest")
-    if args.phase != "capture-watermarks" and any(getattr(args, key) is None for key in
+    if args.phase != "verify-post-ingest" and args.audit is None:
+        parser.error("activation capture/plan/apply requires the complete audit")
+    if args.phase not in ("capture-watermarks", "verify-post-ingest") and any(getattr(args, key) is None for key in
                                                  ("acceptance", "preflight", "preflight_sha256")):
         parser.error("activation plan/apply requires acceptance and exact preflight")
     if args.phase == "capture-watermarks" and not args.audit_sha256:
@@ -803,6 +1005,11 @@ def main() -> int:
         "admin_context", "admin_context_sha256",
     )):
         parser.error("apply requires the exact plan, approval and admin context")
+    if args.phase == "verify-post-ingest" and any(getattr(args, key) is None for key in (
+        "plan", "plan_sha256", "attempt", "attempt_sha256", "default_switch",
+        "default_switch_sha256", "sync_response", "sync_response_sha256", "token_file",
+    )):
+        parser.error("post-ingest requires exact plan, commit, switch, response and protected API token")
     if args.output.exists() or args.output.is_symlink():
         parser.error("protected plan output already exists")
     try:
@@ -811,7 +1018,7 @@ def main() -> int:
         parser.error(str(error))
     try:
         {"capture-watermarks": capture_watermarks_command, "plan": plan_command,
-         "apply": apply_command}[args.phase](args)
+         "apply": apply_command, "verify-post-ingest": post_ingest_command}[args.phase](args)
     except (RuntimeError, OSError, FileExistsError) as error:
         parser.error(str(error))
     return 0
