@@ -1641,11 +1641,25 @@ validated weighted vectors and commits the projection and occurrence binding
 in the same transaction as the lexical block. Within a source, occurrences
 with the same canonical document and checked block layout share one projection.
 
-The staged payload supplies the input for a future sealed batch index. The
-search footprint collector includes its tables and indexes in the search
-projection total. Source qualification requires a published layout, exact
-reader parity, a follow-on ingest and a measured reduction including every
-retained representation.
+For a ready frozen generation, the local operator can stage missing retained
+blocks with `storage_v2_backfill_inverted_projections`. Start at occurrence
+zero and block minus one, then use the returned cursor and `has_more`. The
+operator bounds both block count and logical input bytes before reconstructing
+any vectors. Regular ingest supplies projections for new content.
+
+Use `storage_v2_append_inverted_batch` with the target generation, the next
+zero-based batch number and a bounded block limit. Replay the same request to
+reconcile a lost acknowledgement. `storage_v2_publish_inverted_generation`
+requires the expected batch count and complete current derived-block coverage
+for the frozen generation. It publishes the index in one transaction. The word
+reader checks ready metadata, source access and current coverage for its
+requested occurrences. Ambiguous or conflicting hash candidates are checked
+against exact segments. Phrase and Boolean search use their established path.
+
+The search footprint collector includes every retained staging and index
+relation in the search projection total. Source qualification measures the
+complete API, exact reader parity, follow-on ingest and net physical allocation
+on the same corpus.
 
 ## Global native GC and pack reclamation
 
