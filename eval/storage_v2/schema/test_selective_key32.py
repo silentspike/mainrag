@@ -282,6 +282,9 @@ class SelectiveKey32Tests(previous.CopiedLiteralExistenceTests, encoded.EncodedL
                 '/synthetic/'||inputs.item,'{{"byte_start":0}}'::JSONB
             ) staged;
         """)))
+        # The context writer requires a building run during the test. Seal
+        # these staged items afterwards so later retention cases see no writer.
+        self.addCleanup(self.commit, run, 3)
         self.assertEqual(len({row[0] for row in items.values()}), 3)
         self.assertEqual(len({row[1] for row in items.values()}), 3)
 
