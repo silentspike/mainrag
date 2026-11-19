@@ -221,6 +221,7 @@ class SelectiveKey32Tests(previous.CopiedLiteralExistenceTests, encoded.EncodedL
             "'fixture','synthetic-inverted' FROM sources RETURNING id"
         ))
         run = self.begin(source, token * 2, uuid.uuid4().hex * 2)
+        generation = int(self.sql(f"SELECT generation_id FROM storage_v2_ingest_run WHERE id={run}"))
         words = [['shared', f'ordinal{index}'] for index in range(64)]
         words[19].append(COLLISION[0])
         words[56].append(COLLISION[1])
@@ -288,11 +289,11 @@ class SelectiveKey32Tests(previous.CopiedLiteralExistenceTests, encoded.EncodedL
         self.assertEqual(len({row[0] for row in items.values()}), 3)
         self.assertEqual(len({row[1] for row in items.values()}), 3)
 
-        def write(item, function='storage_v2_put_lexical_segments_located'):
+        def write(item, function='storage_v2_put_lexical_segments_located', start_order=0):
             occurrence, artifact = items[item]
             return (
                 f'{function}({occurrence},{artifact},'
-                f'{self.array(list(range(64)), "BIGINT")},{self.array(segments, "TEXT")},'
+                f'{self.array(list(range(start_order, start_order + 64)), "BIGINT")},{self.array(segments, "TEXT")},'
                 f'{self.array(context_prefixes, "TEXT")},array_fill(\'textkind\'::TEXT,ARRAY[64]),'
                 f'{self.array(starts, "BIGINT")},{self.array(starts, "BIGINT")})'
             )
@@ -363,13 +364,120 @@ class SelectiveKey32Tests(previous.CopiedLiteralExistenceTests, encoded.EncodedL
                 END;
             END $fixture_inverted_drift$;
         """
+        seal_generation = self.admin(
+            f'SELECT (storage_v2_commit_shadow_ingest({run},3,'
+            f'storage_v2_shadow_generation_root({run}))).status;'
+            f'SELECT view_count FROM storage_v2_materialize_reader_metadata({generation});'
+            'RESET ROLE;'
+        )
+
+        def require_publication_error(call, message):
+            return f"""
+                DO $fixture_inverted_incomplete$
+                BEGIN
+                    BEGIN
+                        PERFORM {call};
+                        RAISE EXCEPTION 'fixture attempted an incomplete inverted publication';
+                    EXCEPTION WHEN OTHERS THEN
+                        IF SQLERRM NOT LIKE {self.quote('%' + message + '%')} THEN RAISE; END IF;
+                    END;
+                END $fixture_inverted_incomplete$;
+            """
+
+        def append_batch(stage, batch):
+            return (
+                f"SELECT jsonb_build_object('stage','{stage}','batch',to_jsonb(receipt)) "
+                f"FROM storage_v2_append_inverted_batch({generation},{batch},1) receipt;"
+            )
+
+        def ready_state(stage):
+            return (
+                f"SELECT jsonb_build_object('stage','{stage}','ready',"
+                f"storage_v2_inverted_generation_ready({generation}));"
+            )
+
+        def backfill_state(stage):
+            return (
+                f"SELECT jsonb_build_object('stage','{stage}','backfill',to_jsonb(receipt)) "
+                f"FROM storage_v2_backfill_inverted_projections({generation},0,-1,1,1048576) receipt;"
+            )
+
+        occurrence_scope = self.array(sorted(occurrence for occurrence, _ in items.values()), 'BIGINT')
+        queries = ','.join(f'({self.quote(query)})' for query in (
+            'headingproof', *COLLISION, 'invertednoprobe', '"shared ordinal19"',
+        ))
+
+        def reader_state(stage):
+            return f"""
+                SELECT jsonb_build_object('stage','{stage}','queries',jsonb_object_agg(query,
+                    (SELECT coalesce(jsonb_agg(to_jsonb(hit)
+                        ORDER BY hit.occurrence_id,hit.segment_order),'[]'::JSONB)
+                     FROM storage_v2_derived_lexical_first_candidates(
+                        {occurrence_scope},ARRAY[{source}]::BIGINT[],query
+                     ) hit)))
+                FROM (VALUES {queries}) inputs(query);
+            """
+
+        def reader_choice(stage):
+            return (
+                f"SELECT jsonb_build_object('stage','{stage}','generation',"
+                f"storage_v2_inverted_matching_generation({source},{occurrence_scope}));"
+            )
+
+        # Independently reverse the prefix transpose into the original
+        # five-byte slots and order each block by its complete coarse key.
+        published_payloads = f"""
+            WITH entries AS (
+                SELECT p.generation_id,p.batch_no,p.prefix,
+                    get_byte(p.postings,i) AS low_byte,
+                    get_byte(p.postings,i+1)*256+get_byte(p.postings,i+2) AS block_id,
+                    decode(lpad(to_hex(p.prefix::INTEGER),2,'0'),'hex')
+                    ||substring(p.postings FROM i+1 FOR 1)
+                    ||substring(p.postings FROM i+4 FOR 3) AS term_slot
+                FROM storage_v2_inverted_prefix p
+                CROSS JOIN LATERAL generate_series(0,octet_length(p.postings)-6,6) offsets(i)
+                WHERE p.generation_id={generation}
+            ), blocks AS (
+                SELECT b.occurrence_id,b.block_order,
+                    encode(string_agg(term_slot, ''::BYTEA ORDER BY e.prefix,e.low_byte),'hex') AS payload
+                FROM entries e JOIN storage_v2_inverted_block b
+                  USING(generation_id,batch_no,block_id)
+                GROUP BY b.occurrence_id,b.block_order
+            )
+            SELECT jsonb_build_object('stage','published_payloads','blocks',
+                jsonb_agg(jsonb_build_array(occurrence_id,block_order,payload) ORDER BY occurrence_id,block_order))
+            FROM blocks;
+        """
         output = self.sql(
             f"BEGIN;SET LOCAL app.user_id='{self.schema.ADMIN_ID}';"
             + transaction_body(188) + transaction_body(189) + denied_operator
             + app_write('disabled') + projection_state('disabled')
             + activation + app_write('first') + app_write('second', with_context=True) + projection_state('enabled')
             + app_write('second', with_context=True) + projection_state('retry') + drift + projection_state('restored')
-            + "ROLLBACK; SELECT to_regclass('public.storage_v2_inverted_projection') IS NULL;"
+            + seal_generation + reader_state('existing_reader')
+            + transaction_body(190) + transaction_body(191) + transaction_body(192)
+            + ready_state('unpublished') + reader_choice('unpublished_choice')
+            + require_publication_error(f'storage_v2_append_inverted_batch({generation},0,3)',
+                                        'inverted batch requires staged coverage for every selected derived block')
+            + backfill_state('backfilled') + backfill_state('backfill_replay') + projection_state('filled')
+            + append_batch('first_batch', 0) + append_batch('first_replay', 0) + ready_state('partially_appended')
+            + require_publication_error(f'storage_v2_publish_inverted_generation({generation},1)',
+                                        'inverted publication derived coverage is incomplete')
+            + append_batch('second_batch', 1) + append_batch('third_batch', 2)
+            + f'SELECT storage_v2_publish_inverted_generation({generation},3);'
+            + ready_state('published') + published_payloads
+            + reader_choice('published_choice') + reader_state('published_reader')
+            + 'SAVEPOINT fixture_new_derived_block;'
+            + self.admin(f"SELECT {write('first', start_order=64)};RESET ROLE;")
+            + reader_choice('new_block_choice') + reader_state('new_block_reader')
+            + 'ROLLBACK TO fixture_new_derived_block; RELEASE fixture_new_derived_block;'
+            + f"SET LOCAL app.user_id='{self.schema.OTHER_ID}';"
+            + reader_choice('denied_choice') + reader_state('denied_reader')
+            + f"SET LOCAL app.user_id='{self.schema.ADMIN_ID}';"
+            + f'SELECT storage_v2_set_inverted_source_enabled({source},FALSE);'
+            + reader_choice('disabled_choice') + reader_state('disabled_reader')
+            + "ROLLBACK; SELECT to_regclass('public.storage_v2_inverted_projection') IS NULL"
+            " AND to_regclass('public.storage_v2_inverted_generation') IS NULL;"
         )
         states = {row['stage']: row for row in map(json.loads, (
             line for line in output.splitlines() if line.startswith('{')
@@ -408,6 +516,34 @@ class SelectiveKey32Tests(previous.CopiedLiteralExistenceTests, encoded.EncodedL
         for replay in ('retry', 'restored'):
             self.assertEqual({k: v for k, v in states[replay].items() if k != 'stage'},
                              {k: v for k, v in enabled.items() if k != 'stage'})
+        self.assertEqual(states['filled']['projections'], enabled['projections'])
+        self.assertEqual(len(states['filled']['bindings']), 3)
+        for number, stage in enumerate(('first_batch', 'second_batch', 'third_batch')):
+            self.assertEqual(states[stage]['batch'], dict(
+                disposition='appended', batch_no=number, block_count=1, total_blocks=number + 1,
+            ))
+        self.assertEqual(states['first_replay']['batch'],
+                         dict(states['first_batch']['batch'], disposition='replayed'))
+        self.assertFalse(states['unpublished']['ready'])
+        self.assertFalse(states['partially_appended']['ready'])
+        self.assertTrue(states['published']['ready'])
+        self.assertEqual(states['published_payloads']['blocks'],
+                         sorted([occurrence, 0, payload] for occurrence, _ in items.values()))
+        self.assertEqual(states['backfilled']['backfill']['staged_blocks'], 1)
+        self.assertEqual(states['backfilled']['backfill']['decoded_occurrences'], 1)
+        self.assertEqual(states['backfill_replay']['backfill']['staged_blocks'], 0)
+        self.assertEqual(states['backfill_replay']['backfill']['decoded_occurrences'], 0)
+        for stage in ('unpublished_choice', 'new_block_choice', 'denied_choice', 'disabled_choice'):
+            self.assertIsNone(states[stage]['generation'])
+        self.assertEqual(states['published_choice']['generation'], generation)
+        old_reader = states['existing_reader']['queries']
+        self.assertEqual(states['published_reader']['queries'], old_reader)
+        self.assertEqual(states['new_block_reader']['queries'], old_reader)
+        self.assertEqual(states['disabled_reader']['queries'], old_reader)
+        self.assertTrue(all(not hits for hits in states['denied_reader']['queries'].values()))
+        for query, ordinal in (('headingproof',45),(COLLISION[0],19),(COLLISION[1],56)):
+            self.assertEqual([hit['segment_order'] for hit in old_reader[query]], [ordinal] * 3)
+        self.assertEqual(old_reader['invertednoprobe'], [])
         self.assertEqual(output.splitlines()[-1], 't')
 
 
