@@ -79,6 +79,28 @@ SELECT jsonb_build_object(
 COMMIT;
 """
 
+# Optional catalog metadata for the existing local allocated-block collector.
+# Every physical relation (including shared catalogs and TOAST indexes) maps once.
+PHYSICAL_SQL = """'physical_storage', jsonb_build_object(
+ 'data_directory',current_setting('data_directory'),
+ 'server_major',split_part(current_setting('server_version'),'.',1),
+ 'tablespaces',(SELECT jsonb_agg(jsonb_build_object('oid',oid,'location',pg_tablespace_location(oid))) FROM pg_tablespace),
+ 'relations',(SELECT coalesce(jsonb_agg(jsonb_build_object(
+   'oid',c.oid,'kind',c.relkind,'filepath',pg_relation_filepath(c.oid),
+   'fork_lengths',jsonb_build_object('main',pg_relation_size(c.oid,'main'),
+     'fsm',pg_relation_size(c.oid,'fsm'),'vm',pg_relation_size(c.oid,'vm'),
+     'init',pg_relation_size(c.oid,'init')),
+   'owner_name',coalesce(t.relname,p.relname,c.relname),
+   'owner_schema',coalesce(tn.nspname,pn.nspname,n.nspname)) ORDER BY c.oid),'[]')
+ FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+ LEFT JOIN pg_index i ON i.indexrelid=c.oid LEFT JOIN pg_class p ON p.oid=i.indrelid
+ LEFT JOIN pg_namespace pn ON pn.oid=p.relnamespace
+ LEFT JOIN pg_class t ON t.reltoastrelid=coalesce(p.oid,c.oid)
+ LEFT JOIN pg_namespace tn ON tn.oid=t.relnamespace
+ WHERE pg_relation_filepath(c.oid) IS NOT NULL AND c.relkind IN ('r','m','i','S','t'))),
+ """
+
+
 CANONICAL = {'content_body', 'content_dictionary', 'content_pack', 'content_pack_entry'}
 NATIVE = {'logical_source', 'source_generation', 'source_item', 'artifact_version',
           'generation_item_version', 'content_node', 'content_node_edge',
@@ -255,7 +277,7 @@ def qualifications_to_corpus(artifacts, expected_source_ids):
         evidence_sha256=hashlib.sha256(C.canonical([pin['qualification_file_sha256'] for pin in pins])).hexdigest()))
 
 
-def observe_database(database, privileged):
+def observe_database(database, privileged, *, allocated_blocks=False):
     if not re.fullmatch(r'[A-Za-z0-9_-]+', database):
         raise RuntimeError('database must be a local database name')
     command = (['sudo', '-n', '-u', 'postgres'] if privileged else []) + [
@@ -263,7 +285,8 @@ def observe_database(database, privileged):
     env = os.environ.copy()
     env['PGAPPNAME'] = 'mainrag-storage-v2-dedup-footprint'
     env['PGOPTIONS'] = (env.get('PGOPTIONS', '')+' -c default_transaction_read_only=on').strip()
-    result = subprocess.run(command, input=SQL, text=True, capture_output=True,
+    query = SQL.replace("'database_bytes',", PHYSICAL_SQL+"'database_bytes',", 1) if allocated_blocks else SQL
+    result = subprocess.run(command, input=query, text=True, capture_output=True,
                             timeout=40, env=env, check=False)
     if result.returncode:
         raise RuntimeError('read-only footprint observation failed; no absence is inferred')
@@ -305,15 +328,150 @@ def validate_roots(roots):
     return roots
 
 
-def snapshot(database, privileged, corpus, roots):
+def database_allocated_blocks(observed, *, seconds=15, maximum_entries=100000):
+    """Bounded metadata-only census; never read relation bodies or claim exclusivity.
+
+    pg_tblspc links are followed only after matching actual SQL tablespace
+    metadata. Other symlinks, missing forks and unstable files remain unknown.
+    Shared cluster catalogs are included once, and separately disclosed.
+    """
+    deadline = time.monotonic()+seconds
+    unknown = []; records = {}; roots = {}; mapping = {}; links = []; present = set()
+    fork_lengths = {}
+    result = dict(unit='FILESYSTEM_ALLOCATED_INODE_BLOCK_BYTES', complete=False,
+        exclusive_bytes_proven=False, physical_reclaim_proven=False, canonical_content_bytes_read=0,
+        includes_shared_cluster_catalogs=True, unknown=unknown)
+    try:
+        if type(seconds) is not int or not 1 <= seconds <= 30 or type(maximum_entries) is not int or not 1 <= maximum_entries <= 1000000:
+            raise ValueError('invalid census bounds')
+        metadata = observed['physical_storage']; data = Path(metadata['data_directory'])
+        if not data.is_absolute() or data.resolve(strict=True) != data:
+            raise ValueError('actual canonical PGDATA unavailable')
+        spaces = {str(t['oid']): Path(t['location']) for t in metadata['tablespaces'] if t['location']}
+        database = str(observed['database_oid'])
+        for relation in metadata['relations']:
+            path = Path(relation['filepath']); parts = path.parts
+            if path.is_absolute() or not parts or not parts[-1].isdecimal():
+                raise ValueError('unexpected physical relation path')
+            prefix = str(path.parent)
+            if parts[0] == 'global' and len(parts) == 2:
+                root = data/'global'
+            elif parts[0] == 'base' and len(parts) == 3 and parts[1] == database:
+                root = data/'base'/database
+            elif len(parts) == 5 and parts[0] == 'pg_tblspc' and parts[1] in spaces and parts[3] == database and re.fullmatch(r'PG_'+metadata['server_major']+r'_[0-9]+',parts[2]):
+                link = data/'pg_tblspc'/parts[1]; location = spaces[parts[1]]
+                if not location.is_absolute() or not link.is_symlink() or link.resolve(strict=True) != location.resolve(strict=True):
+                    raise ValueError('actual tablespace link/location differs')
+                links.append((link, link.lstat(), os.readlink(link)))
+                root = location/parts[2]/database
+            else:
+                raise ValueError('unknown database/tablespace path')
+            if root.resolve(strict=True) != root or not root.is_dir():
+                raise ValueError('unexpected symlink or missing database directory')
+            if prefix in roots and roots[prefix] != root:
+                raise ValueError('tablespace directory mapping differs')
+            if prefix not in roots and any(root == old or root in old.parents or old in root.parents for old in roots.values()):
+                raise ValueError('overlapping database directories')
+            roots[prefix] = root
+            key = (prefix, parts[-1])
+            if key in mapping:
+                raise ValueError('duplicate physical relfilenode')
+            mapping[key] = relation
+        if not mapping:
+            raise ValueError('empty physical catalog')
+        visits = 0; directories = []
+        for prefix, root in roots.items():
+            before = root.stat(); directories.append((root, before))
+            with os.scandir(root) as entries:
+                for entry in entries:
+                    visits += 1
+                    if visits > maximum_entries or time.monotonic() >= deadline:
+                        raise ValueError('bounded allocation census incomplete')
+                    info = entry.stat(follow_symlinks=False)
+                    if not stat.S_ISREG(info.st_mode) or info.st_dev != before.st_dev:
+                        unknown.append(dict(path=str(root/entry.name), reason='symlink_directory_special_or_mounted_file'))
+                        continue
+                    match = re.fullmatch(r'([0-9]+)(?:_(fsm|vm|init))?(?:\.([1-9][0-9]*))?', entry.name)
+                    owner = mapping.get((prefix, match[1])) if match else None
+                    if owner is None and entry.name not in {'PG_VERSION','pg_filenode.map','pg_internal.init','pg_control'}:
+                        unknown.append(dict(path=str(root/entry.name), reason='unmapped_database_file'))
+                    if match and owner and entry.name == match[1]:
+                        present.add((prefix, match[1]))
+                    if match and owner:
+                        fork = match[2] or 'main'
+                        fork_key = (owner['oid'], fork)
+                        fork_lengths[fork_key] = fork_lengths.get(fork_key, 0) + info.st_size
+                    key = (info.st_dev, info.st_ino); path = str(root/entry.name)
+                    group = category(owner['owner_name'],owner['owner_schema']) if owner else 'other_database_objects'
+                    if key in records:
+                        records[key]['paths'].append(path)
+                        if records[key]['category'] != group or records[key]['relation_oid'] != (owner['oid'] if owner else None):
+                            unknown.append(dict(path=path, reason='hardlink_crosses_relation_or_category'))
+                        continue
+                    records[key] = dict(paths=[path], device=info.st_dev, inode=info.st_ino,
+                        allocated_bytes=info.st_blocks*512, file_length_bytes=info.st_size, nlink=info.st_nlink,
+                        mtime_ns=info.st_mtime_ns, ctime_ns=info.st_ctime_ns,
+                        relation_oid=owner['oid'] if owner else None, category=group,
+                        fork=match[2] or 'main' if match else None, segment=int(match[3] or 0) if match else None,
+                        shared_cluster_catalog=prefix == 'global')
+        for key in sorted(set(mapping)-present):
+            unknown.append(dict(path=str(roots[key[0]]/key[1]), reason='missing_relation_toast_or_index_main_file'))
+        for relation in mapping.values():
+            expected = relation['fork_lengths']
+            if any(type(expected.get(fork)) is not int
+                   or expected[fork] != fork_lengths.get((relation['oid'], fork), 0)
+                   for fork in ('main', 'fsm', 'vm', 'init')):
+                unknown.append(dict(relation_oid=relation['oid'], reason='relation_fork_lengths_changed_or_incomplete'))
+        for row in records.values():
+            if row['nlink'] != len(row['paths']):
+                unknown.append(dict(path=row['paths'][0], reason='hardlink_outside_census'))
+            for path in row['paths']:
+                if time.monotonic() >= deadline:
+                    raise ValueError('allocation recheck deadline')
+                info = Path(path).lstat()
+                if (info.st_dev,info.st_ino,info.st_blocks*512,info.st_size,info.st_mtime_ns,info.st_ctime_ns,info.st_nlink) != tuple(row[k] for k in ('device','inode','allocated_bytes','file_length_bytes','mtime_ns','ctime_ns','nlink')):
+                    unknown.append(dict(path=path, reason='file_changed_during_census'))
+        for path, before in directories:
+            after = path.stat()
+            if (before.st_dev,before.st_ino,before.st_mtime_ns,before.st_ctime_ns) != (after.st_dev,after.st_ino,after.st_mtime_ns,after.st_ctime_ns):
+                unknown.append(dict(path=str(path), reason='database_directory_changed'))
+        for path, before, target in links:
+            after = path.lstat()
+            if not path.is_symlink() or (before.st_dev,before.st_ino,before.st_mtime_ns,before.st_ctime_ns,target) != (after.st_dev,after.st_ino,after.st_mtime_ns,after.st_ctime_ns,os.readlink(path)):
+                unknown.append(dict(path=str(path), reason='tablespace_link_changed'))
+        if observed['building_run_count'] or observed['active_backend_count']:
+            unknown.append(dict(reason='database_writers_or_active_backends_not_frozen'))
+        result.update(roots=[str(p) for p in roots.values()], visited_entries=visits,
+            directory_allocated_bytes=sum(info.st_blocks*512 for _,info in directories))
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        unknown.append(dict(reason='allocation_metadata_incomplete', error_type=type(error).__name__))
+    groups = {}
+    for row in records.values():
+        group = groups.setdefault(row['category'],dict(allocated_bytes=0,file_length_bytes=0,unique_inodes=0))
+        group['allocated_bytes'] += row['allocated_bytes']; group['file_length_bytes'] += row['file_length_bytes']; group['unique_inodes'] += 1
+    result.update(status='OBSERVED_ALLOCATED_DATABASE_FILES' if not unknown else 'PARTIAL_ALLOCATED_DATABASE_FILES',
+        complete=not unknown, groups=groups, records=list(records.values()), inodes_counted_once=True,
+        allocated_file_bytes=sum(r['allocated_bytes'] for r in records.values()),
+        file_length_bytes=sum(r['file_length_bytes'] for r in records.values()),
+        shared_cluster_catalog_allocated_bytes=sum(r['allocated_bytes'] for r in records.values() if r['shared_cluster_catalog']),
+        limitations=['Allocated inode blocks are not exclusive extents or physical thinpool ownership.',
+                    'Shared cluster catalogs and directory allocation are disclosed separately from database file lengths.',
+                    'External roots remain separate ledgers; no cross-root unique-extent total or dedup saving is inferred.'])
+    return result
+
+
+def snapshot(database, privileged, corpus, roots, *, allocated_database=False):
     started = time.time()
     corpus_descriptor(corpus)
     validate_roots(roots)
-    observed = observe_database(database, privileged)
+    observed = observe_database(database, privileged, allocated_blocks=True) if allocated_database else observe_database(database, privileged)
     groups = summarize_database(observed)
+    allocation = database_allocated_blocks(observed) if allocated_database else None
+    if allocation:
+        validate_roots({**roots, **{'postgresql-'+str(i): Path(root) for i, root in enumerate(allocation.get('roots', []))}})
     # Reuse cleanup's bounded nonsymlink traversal and hardlink deduplication.
     disks = {role: E.vector_space(path, privileged) for role, path in validate_roots(roots).items()}
-    return dict(schema_version=VERSION, status='OBSERVED_ONLY',
+    value = dict(schema_version=VERSION, status='OBSERVED_ONLY',
         observed_start_unix=started, observed_end_unix=time.time(),
         collector_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         measurement_contract_sha256=hashlib.sha256(C.canonical({name:
@@ -340,6 +498,10 @@ def snapshot(database, privileged, corpus, roots):
             'Catalog stored/live pack bytes are not actual file allocation or evidence that retired files were removed.',
             'No Qdrant API, archive server, backup, content read, mutation or integrity verification is invoked.',
         ])
+
+    if allocated_database:
+        value['database_allocated_blocks'] = allocation
+    return value
 
 
 def compare(before, after):
@@ -383,6 +545,7 @@ def compare(before, after):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--database')
+    parser.add_argument('--database-allocated-blocks', action='store_true', help='Bounded local PG heap/TOAST/index/fork allocation metadata; requires database filesystem read access')
     parser.add_argument('--local-postgres', action='store_true')
     parser.add_argument('--corpus', type=Path)
     parser.add_argument('--pack-root', type=Path)
@@ -397,12 +560,12 @@ def main():
     args = parser.parse_args()
     os.umask(0o077)
     if args.qualification_artifact:
-        if any((args.before, args.after, args.database, args.corpus, args.pack_root,
+        if any((args.database_allocated_blocks, args.before, args.after, args.database, args.corpus, args.pack_root,
                 args.qdrant_root, args.local_retained_root, args.local_postgres)):
             parser.error('corpus adaptation accepts only qualification artifacts, expected sources and output')
         value = qualifications_to_corpus(args.qualification_artifact, args.expected_source_id)
     elif args.before or args.after:
-        if not args.before or not args.after or any((args.database, args.corpus,
+        if not args.before or not args.after or any((args.database_allocated_blocks, args.database, args.corpus,
                 args.pack_root, args.qdrant_root, args.local_retained_root, args.local_postgres,
                 args.expected_source_id)):
             parser.error('comparison requires only --before, --after and --output')
@@ -422,7 +585,7 @@ def main():
             roots['qdrant'] = args.qdrant_root
         if args.local_retained_root:
             roots['retained_local_exports_and_evidence'] = args.local_retained_root
-        value = snapshot(args.database, args.local_postgres, corpus, roots)
+        value = snapshot(args.database, args.local_postgres, corpus, roots, allocated_database=args.database_allocated_blocks)
         value['corpus_file_sha256'] = corpus_sha
     digest = C.private_create(args.output, value)
     print(json.dumps(dict(status=value.get('status', 'CORPUS_FROM_HISTORICAL_ACCEPTED_ARTIFACTS'), evidence_sha256=digest,
