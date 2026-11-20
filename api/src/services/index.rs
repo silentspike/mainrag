@@ -535,14 +535,37 @@ impl IndexService {
                 continue;
             }
 
-            // Read file content
-            let content = match fs::read_to_string(file_path).await {
-                Ok(c) => c,
-                Err(e) => {
-                    let err_msg = format!("Failed to read {}: {}", file_path.display(), e);
-                    warn!("{}", err_msg);
-                    stats.errors.push(err_msg);
-                    continue;
+            // MEMORY GUARD: large conversation files are streamed from disk instead of
+            // being loaded whole. Without this the watcher path pulled entire files into
+            // memory (a 3 GB session meant a >3 GB spike) because process_raw_file only
+            // takes the streaming route when content is empty AND source_path is set —
+            // a condition this path could never satisfy. Mirrors plugins/fs.rs:239-252.
+            let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0) as usize;
+            let is_conversation_ext = file_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("jsonl") || e.eq_ignore_ascii_case("json"))
+                .unwrap_or(false);
+            let stream_from_disk =
+                is_conversation_ext && file_size > crate::plugins::LARGE_FILE_THRESHOLD;
+
+            // Read file content (skipped entirely when streaming)
+            let content = if stream_from_disk {
+                info!(
+                    "Large conversation file ({} MB): streaming from disk instead of loading: {}",
+                    file_size / (1024 * 1024),
+                    file_path.display()
+                );
+                String::new()
+            } else {
+                match fs::read_to_string(file_path).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let err_msg = format!("Failed to read {}: {}", file_path.display(), e);
+                        warn!("{}", err_msg);
+                        stats.errors.push(err_msg);
+                        continue;
+                    }
                 }
             };
 
@@ -584,11 +607,20 @@ impl IndexService {
 
             let raw_file = RawFile {
                 path: rel_path,
-                content: content.clone(),
-                size: content.len(),
+                // `size` is read before `content` is moved in — field order matters here.
+                size: if stream_from_disk {
+                    file_size
+                } else {
+                    content.len()
+                },
+                content,
                 language,
                 last_modified: None,
-                source_path: None,
+                source_path: if stream_from_disk {
+                    Some(file_path.clone())
+                } else {
+                    None
+                },
             };
 
             match self
@@ -861,9 +893,17 @@ impl IndexService {
                                         .await?
                                         .get(0);
 
-                                    // Expect at least 1 chunk per 10KB of old content
+                                    // Sanity guard against a half-finished previous sync.
+                                    // The threshold is derived from measurement, not guessed:
+                                    // conversation JSONL produce roughly 87-400 KB per chunk
+                                    // (4 MB file -> 48 chunks, 121 MB file -> 301 chunks).
+                                    // The former 1-chunk-per-10KB assumption was 9-40x too
+                                    // optimistic and therefore rejected *every* file, forcing a
+                                    // full re-chunk on each sync. 1 chunk per 1 MB stays safely
+                                    // below the real rate while still catching truncated indexes
+                                    // (e.g. 1.4 GB capped at 500 chunks -> expects 1400 -> rejected).
                                     let expected_min_chunks =
-                                        ((existing_size as i64) / 10_000).max(1);
+                                        ((existing_size as i64) / 1_000_000).max(1);
 
                                     if chunk_count >= expected_min_chunks {
                                         is_append_only = true;
@@ -1328,7 +1368,8 @@ impl IndexService {
             b_chunk_types.push(chunk_type.to_string());
             b_content_hashes.push(chunk_hash.clone());
             b_content_compressed.push(chunk_compressed);
-            b_content_texts.push(chunk_text.clone());
+            // PostgreSQL rejects NUL bytes in text columns and would abort the whole batch.
+            b_content_texts.push(crate::utils::text::strip_nul_bytes(chunk_text));
             b_start_lines.push(start_line as i32);
             b_end_lines.push(end_line as i32);
             b_levels.push(chunk.level as i16);
@@ -1707,32 +1748,12 @@ impl IndexService {
             raw_file.size / (1024 * 1024)
         );
 
-        // 1. Compute hash by streaming (never hold full file in memory)
-        let hash = {
-            let file = std::fs::File::open(disk_path).map_err(|e| {
-                AppError::Internal(format!("Failed to open {}: {}", disk_path.display(), e))
-            })?;
-            let mut reader = BufReader::with_capacity(64 * 1024, file);
-            let mut hasher = Sha256::new();
-            loop {
-                let buf = reader
-                    .fill_buf()
-                    .map_err(|e| AppError::Internal(format!("Read error: {}", e)))?;
-                if buf.is_empty() {
-                    break;
-                }
-                hasher.update(buf);
-                let len = buf.len();
-                reader.consume(len);
-            }
-            hasher.finalize().to_vec()
-        };
-
         let rel_path = &raw_file.path;
         let language = raw_file.language;
         let file_size = raw_file.size as i32;
 
-        // 2. Get DB client + RLS
+        // 1. DB client + RLS. Pulled up front because the append-only decision below
+        //    needs the previously indexed size and hash.
         let mut client = self.db.get().await?;
         client
             .execute(
@@ -1744,20 +1765,94 @@ impl IndexService {
             .execute("SELECT set_config('app.is_admin', 'true', false)", &[])
             .await?;
 
-        // 3. Check if file is unchanged
+        // 2. What do we already have for this file?
         let existing = client
             .query_opt(
-                "SELECT id, hash FROM files WHERE source_id = $1 AND path = $2",
+                "SELECT id, hash, size_original FROM files WHERE source_id = $1 AND path = $2",
                 &[&source_id, rel_path],
             )
             .await?;
+        let prev_hash: Option<Vec<u8>> = existing.as_ref().map(|r| r.get("hash"));
+        let prev_size: i64 = existing
+            .as_ref()
+            .map(|r| r.get::<_, i32>("size_original") as i64)
+            .unwrap_or(0);
 
-        if let Some(row) = &existing {
-            let existing_hash: Vec<u8> = row.get("hash");
-            if existing_hash == hash {
+        // 3. Hash the file by streaming (never hold the full file in memory).
+        //    While passing byte `prev_size` we fork off the hash of exactly that prefix.
+        //    If it equals the hash stored for the previous version, the first prev_size
+        //    bytes are provably unchanged — the file was only appended to. That lets us
+        //    keep the existing chunks instead of deleting and rebuilding all of them,
+        //    which is what made every sync of a large session so expensive.
+        let (hash, prefix_hash) = {
+            let file = std::fs::File::open(disk_path).map_err(|e| {
+                AppError::Internal(format!("Failed to open {}: {}", disk_path.display(), e))
+            })?;
+            let mut reader = BufReader::with_capacity(64 * 1024, file);
+            let mut hasher = Sha256::new();
+            let mut prefix: Option<Vec<u8>> = None;
+            let mut seen: i64 = 0;
+            loop {
+                let buf = reader
+                    .fill_buf()
+                    .map_err(|e| AppError::Internal(format!("Read error: {}", e)))?;
+                if buf.is_empty() {
+                    break;
+                }
+                let len = buf.len();
+                if prev_size > 0 && prefix.is_none() && seen + (len as i64) >= prev_size {
+                    let split = (prev_size - seen) as usize;
+                    hasher.update(&buf[..split]);
+                    prefix = Some(hasher.clone().finalize().to_vec());
+                    hasher.update(&buf[split..]);
+                } else {
+                    hasher.update(buf);
+                }
+                seen += len as i64;
+                reader.consume(len);
+            }
+            (hasher.finalize().to_vec(), prefix)
+        };
+
+        // 4. Unchanged?
+        if let Some(ref ph) = prev_hash {
+            if *ph == hash {
                 debug!("Large file {} unchanged (hash match), skipping", rel_path);
                 return Ok(ProcessResult::Skipped);
             }
+        }
+
+        // 5. Pure append? Requires: identical prefix (cryptographically verified above),
+        //    the file grew, and we actually have prior chunks to continue from.
+        let prev_chunk_state: Option<(i64, i64)> = if let Some(row) = &existing {
+            let fid: i64 = row.get("id");
+            let r = client
+                .query_one(
+                    "SELECT COUNT(*)::bigint, COALESCE(MAX(end_line), 0)::bigint FROM chunks WHERE file_id = $1",
+                    &[&fid],
+                )
+                .await?;
+            Some((r.get(0), r.get(1)))
+        } else {
+            None
+        };
+        let append_only = prev_size > 0
+            && (file_size as i64) > prev_size
+            && matches!((&prev_hash, &prefix_hash), (Some(p), Some(pf)) if p == pf)
+            && prev_chunk_state.map(|(n, _)| n > 0).unwrap_or(false);
+        let resume_line: u32 = if append_only {
+            prev_chunk_state.map(|(_, l)| l as u32).unwrap_or(0)
+        } else {
+            0
+        };
+        if append_only {
+            info!(
+                "APPEND-ONLY for {}: prefix hash matches, resuming at byte {} / line {} (+{} bytes)",
+                rel_path,
+                prev_size,
+                resume_line,
+                (file_size as i64) - prev_size
+            );
         }
 
         // 4. Upsert file record (NO content stored for large files)
@@ -1774,8 +1869,9 @@ impl IndexService {
             &[&source_id, rel_path, &hash, &empty_compressed, &language, &file_size, &(empty_compressed.len() as i32)],
         ).await?.get(0);
 
-        // 5. Delete existing chunks (with Qdrant cleanup)
-        {
+        // 7. Delete existing chunks — ONLY for a real rebuild. On a pure append the
+        //    existing chunks stay untouched and the new ones are added after them.
+        if !append_only {
             let tx = client.transaction().await?;
             tx.execute(
                 "INSERT INTO indexing_outbox (action, chunk_id, file_id, source_id, payload)
@@ -1844,14 +1940,31 @@ impl IndexService {
                 total_embeddings += e;
             }
         } else {
-            // JSONL: read line-by-line, accumulate messages, chunk when buffer full
-            let file = std::fs::File::open(disk_path)
+            // JSONL: read line-by-line, accumulate messages, chunk when buffer full.
+            // On a pure append we seek straight to the previously indexed byte offset,
+            // so only the delta is read and chunked — reading a 3 GB session to pick up
+            // a few new lines is exactly what this avoids.
+            let mut file = std::fs::File::open(disk_path)
                 .map_err(|e| AppError::Internal(format!("Failed to open: {}", e)))?;
+            if append_only {
+                use std::io::Seek;
+                file.seek(std::io::SeekFrom::Start(prev_size as u64))
+                    .map_err(|e| AppError::Internal(format!("Seek failed: {}", e)))?;
+                // Continue line numbering where the existing chunks ended.
+                global_line = resume_line;
+            }
             let reader = BufReader::with_capacity(READ_BUFFER, file);
 
             let chunker = crate::services::chunker::jsonl::JsonlChunker::default();
             let mut line_buffer = String::with_capacity(256 * 1024); // 256KB message accumulator
             let mut accumulated_chunks = Vec::new();
+            // The chunker only ever sees the current 256 KB window, so the line numbers it
+            // returns are relative to that window. Without shifting them every window would
+            // restart at line 1 and the stored positions would be wrong (a 4000-line file
+            // ended up with max(end_line)=171). Track how many lines preceded the current
+            // window and rebase each chunk onto absolute file lines.
+            let mut lines_before_window: usize = resume_line as usize;
+            let mut lines_in_window: usize = 0;
 
             for line_result in reader.lines() {
                 let line =
@@ -1863,11 +1976,18 @@ impl IndexService {
                 }
                 line_buffer.push_str(&line);
                 line_buffer.push('\n');
+                lines_in_window += 1;
 
                 // When buffer exceeds 256KB, chunk what we have and flush
                 if line_buffer.len() > 256 * 1024 {
-                    let batch_chunks = chunker.chunk(&line_buffer, language.as_deref());
+                    let mut batch_chunks = chunker.chunk(&line_buffer, language.as_deref());
+                    for ch in &mut batch_chunks {
+                        ch.start_line += lines_before_window;
+                        ch.end_line += lines_before_window;
+                    }
                     accumulated_chunks.extend(batch_chunks);
+                    lines_before_window += lines_in_window;
+                    lines_in_window = 0;
                     line_buffer.clear();
 
                     // Flush when we have enough chunks
@@ -1893,7 +2013,11 @@ impl IndexService {
 
             // Flush remaining
             if !line_buffer.is_empty() {
-                let batch_chunks = chunker.chunk(&line_buffer, language.as_deref());
+                let mut batch_chunks = chunker.chunk(&line_buffer, language.as_deref());
+                for ch in &mut batch_chunks {
+                    ch.start_line += lines_before_window;
+                    ch.end_line += lines_before_window;
+                }
                 accumulated_chunks.extend(batch_chunks);
             }
             if !accumulated_chunks.is_empty() {
@@ -1906,6 +2030,8 @@ impl IndexService {
                         rel_path,
                         &accumulated_chunks,
                         &language,
+                        // 0: chunk line numbers were already rebased to absolute
+                        // file lines above (including the append resume offset).
                         0,
                     )
                     .await?;
@@ -1971,7 +2097,8 @@ impl IndexService {
             b_chunk_types.push(format!("{:?}", chunk.chunk_type).to_lowercase());
             b_content_hashes.push(hash.clone());
             b_content_compressed.push(compressed);
-            b_content_texts.push(chunk.text.clone());
+            // PostgreSQL rejects NUL bytes in text columns and would abort the whole batch.
+            b_content_texts.push(crate::utils::text::strip_nul_bytes(&chunk.text));
             b_start_lines.push(chunk.start_line as i32);
             b_end_lines.push(chunk.end_line as i32);
             b_levels.push(chunk.level as i16);
