@@ -5,6 +5,8 @@ from eval.storage_v2.schema import test_copied_fragment_body_recall as fragment
 
 MIGRATION = fragment.ROOT / "migrations/184_storage_v2_copied_literal_existence.sql"
 BATCH_MIGRATION = fragment.ROOT / "migrations/187_storage_v2_batch_copied_generated_zero.sql"
+WITNESS_MIGRATION = fragment.ROOT / "migrations/193_storage_v2_index_copied_document_witness.sql"
+FRAGMENT_KEYS_MIGRATION = fragment.ROOT / "migrations/194_storage_v2_carry_copied_fragment_keys.sql"
 
 
 class CopiedLiteralExistenceTests(fragment.CopiedFragmentBodyRecallTests):
@@ -138,3 +140,94 @@ class CopiedLiteralExistenceTests(fragment.CopiedFragmentBodyRecallTests):
         self.assertEqual({signature for signature, pin in catalog_before['lexical'].items()
                           if catalog_after['lexical'][signature] != pin}, set(fragment.RANKS))
         self.assertNotEqual(catalog_before['seal'], catalog_after['seal'])
+
+    def test_split_document_witness_keeps_stored_and_reconstructed_ranks(self):
+        stored = self.copied('index proof persisted', chunk='index proof')
+        cached = self.copied('index proof compacted', chunk='index proof')
+        uncached = self.copied('index proof reconstructed', chunk='index proof')
+        rows = (stored, cached, uncached)
+        for row in rows:
+            self.addCleanup(self.commit, row['run'], 1)
+        fragments = self.fragmented(('ordinary prefix\n', 'tail -314159 suffix'))
+
+        short_scope = f"ARRAY[{','.join(str(row['occurrence']) for row in rows)}]::BIGINT[]"
+        long_scope = f"array_fill({stored['occurrence']}::BIGINT,ARRAY[1021]) || {short_scope}"
+        full_file = f"ARRAY[{fragments[0]['occurrence']},{fragments[1]['occurrence']}]::BIGINT[]"
+        orphan = f"ARRAY[{fragments[1]['occurrence']}]::BIGINT[]"
+        candidate_sources = [row['source'] for row in rows] + [fragments[0]['source']]
+        sources = f"ARRAY[{','.join(map(str,candidate_sources))}]::BIGINT[]"
+        queries = (
+            "('plain','index proof'),('phrase','\"index proof\"'),"
+            "('disjunction','index OR missing'),('reversed','\"proof index\"'),"
+            "('absent','index absent'),('null',NULL::TEXT),('fragment','314159')"
+        )
+
+        def replay(stage, actor):
+            return self.actor(actor, f"""
+                SELECT jsonb_build_object('stage',{self.quote(stage)},'result',jsonb_object_agg(
+                    coverage.kind || ':' || request.name,jsonb_build_object(
+                        'scoped',(SELECT coalesce(jsonb_agg(to_jsonb(rank)
+                            ORDER BY occurrence_id,score,segment_order),'[]'::JSONB)
+                            FROM storage_v2_source_segment_rank_candidates(coverage.ids,request.query,{sources}) rank),
+                        'unscoped',(SELECT coalesce(jsonb_agg(to_jsonb(rank)
+                            ORDER BY occurrence_id,score,segment_order),'[]'::JSONB)
+                            FROM storage_v2_source_segment_rank_candidates(coverage.ids,request.query) rank))))
+                FROM (VALUES ('short',{short_scope}),('long',{long_scope}),
+                             ('full_file',{full_file}),('orphan',{orphan})) coverage(kind,ids)
+                CROSS JOIN (VALUES {queries}) request(name,query)
+                WHERE (coverage.kind IN ('full_file','orphan')) = (request.name = 'fragment');
+                RESET ROLE;
+            """)
+
+        # Exercise all three valid physical vector shapes in this disposable
+        # transaction. The uncached shape retains exact fallback fingerprints.
+        configure_vectors = f"""
+            ALTER TABLE storage_v2_search_document DISABLE TRIGGER storage_v2_search_document_immutable;
+            UPDATE storage_v2_search_document
+               SET fts_simple_derived=TRUE,
+                   fts_simple=CASE WHEN id={cached['document']}
+                       THEN strip(storage_v2_safe_tsvector(search_text)) END,
+                   fts_simple_fingerprints=CASE WHEN id={uncached['document']}
+                       THEN storage_v2_lexical_block_fingerprints(ARRAY[storage_v2_safe_tsvector(search_text)]) END
+             WHERE id IN ({cached['document']},{uncached['document']});
+            ALTER TABLE storage_v2_search_document ENABLE TRIGGER storage_v2_search_document_immutable;
+            SELECT jsonb_build_object('stage','forms','result',jsonb_build_array(
+                (SELECT NOT fts_simple_derived AND fts_simple IS NOT NULL FROM storage_v2_search_document
+                    WHERE id={stored['document']}),
+                (SELECT fts_simple_derived AND fts_simple IS NOT NULL AND fts_simple_fingerprints IS NULL
+                    FROM storage_v2_search_document WHERE id={cached['document']}),
+                (SELECT fts_simple_derived AND fts_simple IS NULL AND fts_simple_fingerprints IS NOT NULL
+                    FROM storage_v2_search_document WHERE id={uncached['document']})));
+        """
+        batch = BATCH_MIGRATION.read_text().split('BEGIN;', 1)[1].rsplit('COMMIT;', 1)[0]
+        witness = WITNESS_MIGRATION.read_text().split('BEGIN;', 1)[1].rsplit('COMMIT;', 1)[0]
+        fragment_keys = FRAGMENT_KEYS_MIGRATION.read_text().split('BEGIN;', 1)[1].rsplit('COMMIT;', 1)[0]
+        admin = f"SET app.user_id='{self.schema.ADMIN_ID}';"
+        result = self.sql(
+            'BEGIN;' + admin + batch + configure_vectors + replay('before', self.schema.ADMIN_ID)
+            + 'SAVEPOINT before_witness;' + admin + witness + replay('split', self.schema.ADMIN_ID)
+            + admin + fragment_keys + replay('after', self.schema.ADMIN_ID)
+            + replay('denied', self.schema.OTHER_ID) + 'ROLLBACK TO SAVEPOINT before_witness;'
+            + replay('reverted', self.schema.ADMIN_ID) + 'ROLLBACK;'
+        )
+        records = (json.loads(line) for line in result.splitlines() if line.startswith('{'))
+        observed = {record['stage']: record['result'] for record in records}
+        self.assertEqual(observed['forms'], [True, True, True])
+        self.assertEqual(observed['before'], observed['split'])
+        self.assertEqual(observed['before'], observed['after'])
+        self.assertEqual(observed['before'], observed['reverted'])
+        self.assertTrue(all(not hits for ranks in observed['denied'].values() for hits in ranks.values()))
+        expected_occurrences = sorted(row['occurrence'] for row in rows)
+        for coverage in ('short', 'long'):
+            for scope in ('scoped', 'unscoped'):
+                for match in ('plain', 'phrase', 'disjunction'):
+                    ranks = observed['after'][f'{coverage}:{match}'][scope]
+                    self.assertEqual(sorted(rank['occurrence_id'] for rank in ranks
+                                            if rank['score'] >= 1000000), expected_occurrences)
+                for miss in ('reversed', 'absent', 'null'):
+                    self.assertEqual(observed['after'][f'{coverage}:{miss}'][scope], [])
+        for scope in ('scoped', 'unscoped'):
+            full_ranks = observed['after']['full_file:fragment'][scope]
+            self.assertEqual([rank['occurrence_id'] for rank in full_ranks if rank['score'] >= 1000000],
+                             [fragments[1]['occurrence']])
+            self.assertEqual(observed['after']['orphan:fragment'][scope], [])

@@ -455,7 +455,7 @@ class SelectiveKey32Tests(previous.CopiedLiteralExistenceTests, encoded.EncodedL
             + activation + app_write('first') + app_write('second', with_context=True) + projection_state('enabled')
             + app_write('second', with_context=True) + projection_state('retry') + drift + projection_state('restored')
             + seal_generation + reader_state('existing_reader')
-            + transaction_body(190) + transaction_body(191) + transaction_body(192)
+            + transaction_body(190) + transaction_body(191) + transaction_body(192) + transaction_body(195)
             + ready_state('unpublished') + reader_choice('unpublished_choice')
             + require_publication_error(f'storage_v2_append_inverted_batch({generation},0,3)',
                                         'inverted batch requires staged coverage for every selected derived block')

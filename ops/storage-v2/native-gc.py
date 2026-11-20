@@ -63,6 +63,131 @@ SCOPED_IMMUTABILITY_GUARDS = {
     'storage_v2_search_posting': ('storage_v2_retained_posting_delete_guard',),
 }
 
+# Inverted publication deliberately adds no foreign keys to the sealed
+# canonical catalogs. Its identity claims are retention roots, never leaves
+# on the sweep allowlist. Read only keys and proofs, including for a disabled
+# source with a previously staged or published projection.
+INVERTED_ROOTS_SQL = """
+CREATE TEMP TABLE gc_inverted_retention(kind TEXT PRIMARY KEY, reference_count BIGINT, identity_sha256 TEXT);
+DO $inverted$
+DECLARE
+ stage_tables CONSTANT TEXT[] := ARRAY['storage_v2_inverted_source','storage_v2_inverted_projection',
+                                      'storage_v2_inverted_binding'];
+ publication_tables CONSTANT TEXT[] := ARRAY['storage_v2_inverted_generation','storage_v2_inverted_batch',
+                                            'storage_v2_inverted_block','storage_v2_inverted_prefix'];
+ stage_count INTEGER;
+ publication_count INTEGER;
+BEGIN
+ SELECT count(*) FILTER (WHERE c.relname=ANY(stage_tables)),
+        count(*) FILTER (WHERE c.relname=ANY(publication_tables))
+   INTO stage_count,publication_count
+   FROM pg_class c WHERE c.relnamespace='public'::regnamespace
+     AND c.relname=ANY(stage_tables||publication_tables);
+ IF stage_count=0 AND publication_count=0 THEN RETURN; END IF;
+ IF stage_count<>cardinality(stage_tables)
+    OR publication_count NOT IN (0,cardinality(publication_tables))
+    OR EXISTS(SELECT 1 FROM pg_class c WHERE c.relnamespace='public'::regnamespace
+                AND c.relname=ANY(stage_tables||publication_tables) AND c.relkind<>'r') THEN
+  RAISE EXCEPTION 'native GC inverted retention catalog differs';
+ END IF;
+
+ CREATE TEMP TABLE gc_inverted_claim (
+    kind TEXT NOT NULL, occurrence_id BIGINT NOT NULL, block_order BIGINT NOT NULL,
+    source_id BIGINT NOT NULL, artifact_version_id BIGINT NOT NULL, document_id BIGINT NOT NULL,
+    layout_sha256 BYTEA NOT NULL, payload_sha256 BYTEA NOT NULL,
+    generation_id BIGINT, batch_no INTEGER, block_id INTEGER
+ );
+ IF EXISTS(
+    SELECT 1 FROM public.storage_v2_inverted_projection p
+     WHERE NOT EXISTS (
+        SELECT 1 FROM public.storage_v2_inverted_binding b
+         WHERE (b.occurrence_id,b.block_order,b.source_id,b.document_id,b.layout_sha256,b.payload_sha256)
+             = (p.representative_occurrence_id,p.representative_block_order,p.source_id,p.document_id,
+                p.layout_sha256,p.payload_sha256))
+ ) OR EXISTS(
+    SELECT 1 FROM public.storage_v2_inverted_binding b
+     WHERE NOT EXISTS (
+        SELECT 1 FROM public.storage_v2_inverted_projection p
+         WHERE (p.source_id,p.document_id,p.layout_sha256,p.payload_sha256)
+             = (b.source_id,b.document_id,b.layout_sha256,b.payload_sha256))
+ ) THEN
+  RAISE EXCEPTION 'native GC staged inverted proof differs';
+ END IF;
+ INSERT INTO gc_inverted_claim
+ SELECT 'staged',b.occurrence_id,b.block_order,b.source_id,b.artifact_version_id,
+        b.document_id,b.layout_sha256,b.payload_sha256,NULL::BIGINT,NULL::INTEGER,NULL::INTEGER
+ FROM public.storage_v2_inverted_binding b
+ UNION ALL
+ SELECT 'representative',b.occurrence_id,b.block_order,b.source_id,b.artifact_version_id,
+        b.document_id,b.layout_sha256,b.payload_sha256,NULL,NULL,NULL
+ FROM public.storage_v2_inverted_projection p JOIN public.storage_v2_inverted_binding b
+   ON (b.occurrence_id,b.block_order)=(p.representative_occurrence_id,p.representative_block_order);
+
+ IF publication_count<>0 THEN
+  IF EXISTS(
+     SELECT 1 FROM public.storage_v2_inverted_block b
+      WHERE NOT EXISTS (
+         SELECT 1 FROM public.storage_v2_inverted_generation state
+           JOIN public.source_generation g ON (g.id,g.source_id)=(state.generation_id,state.source_id)
+           JOIN public.storage_v2_inverted_batch batch ON batch.generation_id=state.generation_id
+          WHERE (state.generation_id,state.source_id,batch.batch_no)=(b.generation_id,b.source_id,b.batch_no))
+  ) THEN
+   RAISE EXCEPTION 'native GC inverted publication identity differs';
+  END IF;
+  INSERT INTO gc_inverted_claim
+  SELECT CASE WHEN state.published_at IS NULL THEN 'unfinished' ELSE 'published' END,
+         b.occurrence_id,b.block_order,b.source_id,b.artifact_version_id,b.document_id,
+         b.layout_sha256,b.payload_sha256,b.generation_id,b.batch_no,b.block_id
+  FROM public.storage_v2_inverted_block b JOIN public.storage_v2_inverted_generation state
+    ON state.generation_id=b.generation_id;
+ END IF;
+
+ IF EXISTS(
+    SELECT 1 FROM gc_inverted_claim claim
+     WHERE NOT EXISTS(
+        SELECT 1 FROM public.occurrence o
+          JOIN public.artifact_version a ON (a.id,a.source_id)=(o.artifact_version_id,o.source_id)
+          JOIN public.storage_v2_search_view_document v ON v.view_id=o.view_id AND v.ordinal=0
+          JOIN public.storage_v2_search_document d ON d.id=v.document_id AND d.component_kind='node'
+           AND d.node_id=a.content_root_node_id
+         WHERE (o.id,o.source_id,o.artifact_version_id,d.id)
+              =(claim.occurrence_id,claim.source_id,claim.artifact_version_id,claim.document_id))
+ ) THEN
+  RAISE EXCEPTION 'native GC inverted canonical identity differs';
+ END IF;
+ INSERT INTO gc_root
+ SELECT DISTINCT target.kind,target.id FROM gc_inverted_claim claim
+  CROSS JOIN LATERAL (VALUES ('occurrence',claim.occurrence_id),
+                            ('artifact_version',claim.artifact_version_id),
+                            ('storage_v2_search_document',claim.document_id)) target(kind,id)
+ ON CONFLICT DO NOTHING;
+
+ -- Bound each string aggregate independently of the corpus size. The
+ -- manifest covers metadata identity without reading TOASTed payloads.
+ INSERT INTO gc_inverted_retention
+ WITH identities AS (
+   SELECT kind,jsonb_build_array(occurrence_id,block_order,source_id,artifact_version_id,document_id,
+          encode(layout_sha256,'hex'),encode(payload_sha256,'hex'),generation_id,batch_no,block_id)::TEXT AS identity
+   FROM gc_inverted_claim
+ ), numbered AS (
+   SELECT kind,identity,(row_number() OVER(PARTITION BY kind ORDER BY identity COLLATE "C")-1)/2048 AS page
+   FROM identities
+ ), pages AS (
+   SELECT kind,page,count(*) AS reference_count,
+          encode(sha256(convert_to(string_agg(identity,',' ORDER BY identity COLLATE "C"),'UTF8')),'hex') AS identity_sha256
+   FROM numbered GROUP BY kind,page
+ )
+ SELECT kind,sum(reference_count),
+        encode(sha256(convert_to(string_agg(identity_sha256,',' ORDER BY page),'UTF8')),'hex')
+ FROM pages GROUP BY kind;
+ DROP TABLE gc_inverted_claim;
+END $inverted$;
+"""
+
+INVERTED_RETENTION_SNAPSHOT = """(SELECT jsonb_object_agg(kind,
+    jsonb_build_object('reference_count',reference_count,'identity_sha256',identity_sha256))
+    FROM gc_inverted_retention)"""
+
 
 def immutable_guard_predicate():
     ordinary = 'p.proname IN (' + ','.join(A.literal(name) for name in IMMUTABILITY_GUARDS) + ')'
@@ -83,6 +208,8 @@ def operator_digest():
                      '../../migrations/136_storage_v2_gc_body_identity.sql',
                      '../../migrations/171_storage_v2_compact_lexical_vector_codec.sql',
                      '../../migrations/172_storage_v2_encoded_lexical_blocks.sql',
+                     '../../migrations/188_storage_v2_inverted_projection.sql',
+                     '../../migrations/190_storage_v2_publish_inverted_batches.sql',
                      '../../api/src/services/pack_maintenance.rs', '../../api/src/bin/mainrag-pack-maintenance.rs')})
 
 
@@ -138,6 +265,7 @@ CREATE TEMP TABLE gc_edge(from_kind TEXT,from_id BIGINT,to_kind TEXT,to_id BIGIN
 INSERT INTO gc_root SELECT 'content_body',body.id FROM content_body body
     JOIN content_pack pack ON pack.id=body.pack_id WHERE pack.status IN ('candidate','verified');
 {explicit}
+{INVERTED_ROOTS_SQL}
 DO $graph$ DECLARE fk RECORD; owner RECORD; predicate TEXT;
 BEGIN
  FOR fk IN SELECT con.oid,con.conrelid,con.confrelid,
@@ -216,8 +344,8 @@ END $dependents$;
 """
 
 
-SNAPSHOT_SQL = """
-SELECT jsonb_build_object(
+SNAPSHOT_SQL = f"""
+SELECT (jsonb_build_object(
  'tables',(SELECT jsonb_agg(to_jsonb(s) ORDER BY name) FROM gc_state s),
  'dependents',(SELECT jsonb_agg(to_jsonb(s) ORDER BY name) FROM gc_dependents s),
  'root_set_sha256',(SELECT encode(sha256(convert_to(COALESCE(string_agg(kind||':'||id,',' ORDER BY kind,id),''),'UTF8')),'hex') FROM gc_mark),
@@ -234,7 +362,9 @@ SELECT jsonb_build_object(
        FROM pg_attribute WHERE attrelid IN(SELECT oid FROM pg_class WHERE relnamespace='public'::regnamespace) AND attnum>0
    UNION ALL SELECT oid::text||':'||polname||':'||polrelid||':'||polroles::text||':'||COALESCE(pg_get_expr(polqual,polrelid),'')||':'||COALESCE(pg_get_expr(polwithcheck,polrelid),'') FROM pg_policy
  ) definitions)
-)::text;
+) || COALESCE((SELECT jsonb_build_object('inverted_retention',retention)
+                FROM (SELECT {INVERTED_RETENTION_SNAPSHOT} AS retention) state
+                WHERE retention IS NOT NULL),'{{}}'::JSONB))::text;
 """
 
 
@@ -288,7 +418,10 @@ def resource_readback(plan, database, privileged, *, after=False):
     # Full JSON lengths include detoasted data. Reserve full-page WAL and
     # tuple overhead conservatively; DELETE does not physically compact indexes.
     wal_bound = 8*sum(row['dead_bytes']+32768*(row['total']-row['kept']) for row in states)+1024*1024
-    temporary_bound = 512*sum(row['total'] for row in states)+1024**3
+    inverted_references = sum(row['reference_count'] for row in plan['before'].get('inverted_retention', {}).values())
+    # Identity rows, root joins and bounded hash pages contribute to scratch
+    # usage, while every inverted relation stays outside the sweep's WAL cost.
+    temporary_bound = 512*sum(row['total'] for row in states)+2048*inverted_references+1024**3
     reserve = 42*1024**3
     additional = 0 if after else wal_bound+temporary_bound
     if headroom < reserve+additional or data_free < reserve+additional \
@@ -415,7 +548,7 @@ END $sweep$;
 SET CONSTRAINTS ALL IMMEDIATE;
 ALTER TABLE gc_state RENAME TO gc_state_before;
 ALTER TABLE gc_dependents RENAME TO gc_dependents_before;
-DROP TABLE gc_mark,gc_root,gc_edge,gc_target,gc_owner;
+DROP TABLE gc_mark,gc_root,gc_edge,gc_target,gc_owner,gc_inverted_retention;
 {graph}
 DO $after$ BEGIN
  IF EXISTS(SELECT 1 FROM gc_state after JOIN gc_state_before before USING(name)
@@ -423,7 +556,8 @@ DO $after$ BEGIN
     OR EXISTS(SELECT 1 FROM gc_dependents after JOIN gc_dependents_before before USING(name)
      WHERE after.total<>before.kept OR after.kept<>before.kept OR after.kept_sha256<>before.kept_sha256)
     OR (SELECT value->'root_set_sha256' FROM gc_before) IS DISTINCT FROM
-       to_jsonb((SELECT encode(sha256(convert_to(COALESCE(string_agg(kind||':'||id,',' ORDER BY kind,id),''),'UTF8')),'hex') FROM gc_mark)) THEN
+       to_jsonb((SELECT encode(sha256(convert_to(COALESCE(string_agg(kind||':'||id,',' ORDER BY kind,id),''),'UTF8')),'hex') FROM gc_mark))
+    OR (SELECT value->'inverted_retention' FROM gc_before) IS DISTINCT FROM {INVERTED_RETENTION_SNAPSHOT} THEN
   RAISE EXCEPTION 'native roots or retained content changed during sweep';
  END IF;
 END $after$;
@@ -437,7 +571,9 @@ INSERT INTO storage_v2_gc_receipt(manifest_sha256,gc_epoch_id,before_state_sha25
     'resource_policy',{A.literal(json.dumps(plan.get('resource_policy')))}::JSONB,
     'maintenance_binary_sha256',{A.literal(plan.get('maintenance_binary_sha256') or '')},
     'tables',(SELECT jsonb_agg(to_jsonb(s) ORDER BY name) FROM gc_state_before s),
-    'physical_reclaim_proven',FALSE) FROM gc_epoch_id;
+    'physical_reclaim_proven',FALSE) || COALESCE(
+      (SELECT jsonb_build_object('inverted_retention',value->'inverted_retention') FROM gc_before
+        WHERE value ? 'inverted_retention'),'{{}}'::JSONB) FROM gc_epoch_id;
 SELECT to_jsonb(receipt)::TEXT FROM storage_v2_gc_receipt receipt WHERE manifest_sha256={A.literal(manifest_sha)};
 COMMIT;
 """
