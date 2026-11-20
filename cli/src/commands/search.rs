@@ -199,7 +199,7 @@ pub async fn run(
 }
 
 /// Shorten conversation file paths: keep project name + filename, remove UUIDs.
-/// `/home/jan/.claude/projects/-work-mainrag/373489b1-ab6d-4f41-b1c4-7a3395fe3d1a.jsonl`
+/// `/home/example/.claude/projects/-work-mainrag/373489b1-ab6d-4f41-b1c4-7a3395fe3d1a.jsonl`
 /// → `work-mainrag/session.jsonl`
 /// `sessions/2026/03/28/rollout-2026-03-28T15-02-03-019d34c0-7d54-72b3-b019-145bbaa6c4d4.jsonl`
 /// → `sessions/2026/03/28/session.jsonl`

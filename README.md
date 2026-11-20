@@ -154,6 +154,8 @@ including CLI startup overhead ~30–50 ms).
 
 Evidence: [`data/benchmarks/search_latency_20260424T140514Z.json`](data/benchmarks/search_latency_20260424T140514Z.json),
 script: [`scripts/benchmark-search.py`](scripts/benchmark-search.py).
+Set `MAINRAG_BENCHMARK_QUERIES` to an owner-only JSON query file to rerun the benchmark.
+Published reports use ordered query IDs and contain the measured times.
 
 ### Quality baseline (early public preview)
 

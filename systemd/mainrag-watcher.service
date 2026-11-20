@@ -7,7 +7,6 @@ Requires=mainrag-api.service
 Type=simple
 User=mainrag
 Group=mainrag
-SupplementaryGroups=jan
 WorkingDirectory=/opt/mainrag
 
 # Watch only claude-conversations source in daemon mode
@@ -16,8 +15,8 @@ ExecStart=/opt/mainrag/bin/mainrag watch --source claude-conversations --daemon
 # API URL
 Environment=MAINRAG_API_URL=http://localhost:3001
 
-# Use config from mainrag user's home
-Environment=HOME=/var/lib/mainrag
+# Set the home containing the configured source on each installation.
+EnvironmentFile=/etc/mainrag/mainrag-watcher.env
 
 Restart=on-failure
 RestartSec=10
@@ -29,7 +28,6 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/var/lib/mainrag
-ReadOnlyPaths=/home/jan/.claude
 
 # Logging
 StandardOutput=journal
