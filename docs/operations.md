@@ -48,6 +48,12 @@ The API reads `/etc/mainrag/mainrag.env` (systemd `EnvironmentFile=`). An
 example file with all keys and redacted secrets ships as `mainrag.env.example`
 (generated in Phase 14 of the public-readiness sprint).
 
+Before using MainRAG lifecycle commands, set `MAINRAG_COMPOSE_FILE` to the
+absolute path of the deployment Compose file. The CLI reads this setting
+from the process environment, then from `/etc/mainrag/mainrag.env`.
+Existing installations should add the current Compose path to this file
+before updating the CLI. GPU start, stop, and rollback use the same path.
+
 | Variable                        | Purpose                                   |
 | ------------------------------- | ----------------------------------------- |
 | `DATABASE_URL`                  | `postgresql://user:pw@host:5432/db`       |
