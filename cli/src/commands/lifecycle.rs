@@ -4,6 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use colored::Colorize;
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::ffi::OsString;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
@@ -12,7 +13,7 @@ use std::process::{Command, ExitStatus, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const COMPOSE_FILE: &str = "/work/mainrag/docker-compose.yml";
+const COMPOSE_FILE_VAR: &str = "MAINRAG_COMPOSE_FILE";
 const COMPOSE_ENV_FILE: &str = "/etc/mainrag/mainrag.env";
 const VERIFY_QUERY: &str = "mainrag";
 
@@ -177,13 +178,17 @@ enum AuthProbe<T> {
 }
 
 pub async fn stop(json_output: bool) -> Result<()> {
+    let compose_file = resolve_compose_file(
+        std::env::var_os(COMPOSE_FILE_VAR),
+        Path::new(COMPOSE_ENV_FILE),
+    )?;
     if !json_output {
         println!("{}", "Stopping MainRAG lifecycle services...".bold());
     }
 
     systemctl_tolerant("stop", APP_UNITS);
     systemctl_tolerant("stop", LEGACY_GPU_UNITS);
-    compose_tolerant(&["down"]);
+    compose_tolerant(&compose_file, &["down"]);
 
     for container in GPU_CONTAINERS {
         docker_stop_remove(container);
@@ -198,6 +203,10 @@ pub async fn stop(json_output: bool) -> Result<()> {
 }
 
 pub async fn start_cpu(api_url: &str, json_output: bool) -> Result<()> {
+    let compose_file = resolve_compose_file(
+        std::env::var_os(COMPOSE_FILE_VAR),
+        Path::new(COMPOSE_ENV_FILE),
+    )?;
     if !json_output {
         println!("{}", "Starting MainRAG in CPU-only mode...".bold());
     }
@@ -216,7 +225,7 @@ pub async fn start_cpu(api_url: &str, json_output: bool) -> Result<()> {
     wait_for_pg()?;
 
     systemctl_tolerant("stop", LEGACY_GPU_UNITS);
-    compose_tolerant(&["down"]);
+    compose_tolerant(&compose_file, &["down"]);
     for container in GPU_CONTAINERS {
         docker_stop_remove(container);
     }
@@ -261,6 +270,10 @@ pub async fn start_cpu(api_url: &str, json_output: bool) -> Result<()> {
 }
 
 pub async fn start_gpu(api_url: &str, json_output: bool) -> Result<()> {
+    let compose_file = resolve_compose_file(
+        std::env::var_os(COMPOSE_FILE_VAR),
+        Path::new(COMPOSE_ENV_FILE),
+    )?;
     if !json_output {
         println!("{}", "Starting MainRAG in full GPU mode...".bold());
     }
@@ -275,8 +288,8 @@ pub async fn start_gpu(api_url: &str, json_output: bool) -> Result<()> {
     run_checked("sudo", &["systemctl", "start", "postgresql.service"])?;
     wait_for_pg()?;
 
-    if let Err(err) = compose_up_and_wait().await {
-        rollback_gpu_start_failure();
+    if let Err(err) = compose_up_and_wait(&compose_file).await {
+        rollback_gpu_start_failure(&compose_file);
         bail!(
             "GPU stack did not become healthy: {}. Use `mainrag --cpu` while the GPU stack is unavailable.",
             err
@@ -786,19 +799,41 @@ async fn post_search_probe(api_url: &str, token: &str, endpoint: &str) -> Result
     Ok(SearchProbe { total, search_mode })
 }
 
-async fn compose_up_and_wait() -> Result<()> {
-    run_checked(
-        "docker",
-        &[
-            "compose",
-            "-f",
-            COMPOSE_FILE,
-            "--env-file",
-            COMPOSE_ENV_FILE,
-            "up",
-            "-d",
-        ],
-    )?;
+fn resolve_compose_file(override_value: Option<OsString>, env_file: &Path) -> Result<String> {
+    let value = match override_value {
+        Some(value) => value
+            .into_string()
+            .map_err(|_| anyhow!("{COMPOSE_FILE_VAR} must be valid UTF-8"))?,
+        None => {
+            let variables = dotenvy::from_path_iter(env_file).map_err(|_| {
+                anyhow!(
+                    "Set {COMPOSE_FILE_VAR} or define it in {}",
+                    env_file.display()
+                )
+            })?;
+            let mut selected = None;
+            for pair in variables {
+                let (name, value) = pair.map_err(|_| {
+                    anyhow!("Could not parse the configuration for {COMPOSE_FILE_VAR}")
+                })?;
+                if name == COMPOSE_FILE_VAR {
+                    selected = Some(value);
+                }
+            }
+            selected
+                .ok_or_else(|| anyhow!("{COMPOSE_FILE_VAR} is required for lifecycle commands"))?
+        }
+    };
+
+    let path = Path::new(&value);
+    if !path.is_absolute() || !path.is_file() {
+        bail!("{COMPOSE_FILE_VAR} must point to an existing absolute Compose file");
+    }
+    Ok(value)
+}
+
+async fn compose_up_and_wait(compose_file: &str) -> Result<()> {
+    run_checked("docker", &compose_arguments(compose_file, &["up", "-d"]))?;
 
     let expected = ["mainrag-tei-gte", "mainrag-tei-reranker", "qdrant-mainrag"];
     let start = Instant::now();
@@ -818,8 +853,8 @@ async fn compose_up_and_wait() -> Result<()> {
     }
 }
 
-fn rollback_gpu_start_failure() {
-    compose_tolerant(&["down"]);
+fn rollback_gpu_start_failure(compose_file: &str) {
+    compose_tolerant(compose_file, &["down"]);
     systemctl_tolerant("stop", APP_UNITS);
     systemctl_tolerant("stop", GPU_TIMERS);
     let _ = stop_postgres_if_dedicated();
@@ -922,18 +957,21 @@ fn systemctl_tolerant(action: &str, units: &[&str]) {
     run_tolerant("sudo", &args);
 }
 
-fn compose_tolerant(args: &[&str]) {
-    let full_args: Vec<&str> = [
+fn compose_arguments<'a>(compose_file: &'a str, args: &[&'a str]) -> Vec<&'a str> {
+    [
         "compose",
         "-f",
-        COMPOSE_FILE,
+        compose_file,
         "--env-file",
         COMPOSE_ENV_FILE,
     ]
     .into_iter()
     .chain(args.iter().copied())
-    .collect();
-    run_tolerant("docker", &full_args);
+    .collect()
+}
+
+fn compose_tolerant(compose_file: &str, args: &[&str]) {
+    run_tolerant("docker", &compose_arguments(compose_file, args));
 }
 
 fn docker_stop_remove(container: &str) {
@@ -1086,6 +1124,53 @@ fn trim_url(url: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_compose_override_is_used_without_reading_the_env_file() {
+        let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docker-compose.yml");
+        let resolved = resolve_compose_file(Some(file.clone().into_os_string()), Path::new(""))
+            .expect("the workspace provides a Compose file");
+        assert_eq!(Path::new(&resolved), file);
+        assert_eq!(
+            compose_arguments(&resolved, &["down"]),
+            [
+                "compose",
+                "-f",
+                resolved.as_str(),
+                "--env-file",
+                COMPOSE_ENV_FILE,
+                "down"
+            ]
+        );
+    }
+
+    #[test]
+    fn lifecycle_compose_reads_a_quoted_path_from_the_service_environment() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("deployment compose.yml");
+        std::fs::write(&file, "services: {}\n").unwrap();
+        let env_file = directory.path().join("mainrag.env");
+        std::fs::write(
+            &env_file,
+            format!("{COMPOSE_FILE_VAR}=\"{}\"\n", file.display()),
+        )
+        .unwrap();
+
+        let resolved = resolve_compose_file(None, &env_file).unwrap();
+
+        assert_eq!(Path::new(&resolved), file);
+        assert_eq!(compose_arguments(&resolved, &["up", "-d"])[2], resolved);
+    }
+
+    #[test]
+    fn lifecycle_compose_rejects_invalid_or_missing_configuration() {
+        for invalid in ["", "docker-compose.yml"] {
+            assert!(resolve_compose_file(Some(invalid.into()), Path::new("")).is_err());
+        }
+        let error = resolve_compose_file(None, Path::new(""))
+            .expect_err("an explicit Compose file is required");
+        assert!(error.to_string().contains(COMPOSE_FILE_VAR));
+    }
 
     #[test]
     fn parses_psql_database_names() {
